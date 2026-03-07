@@ -1,4 +1,9 @@
-use std::fmt;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+use crate::util::{read_cstring, read_u32};
 
 /// A parsed input or output signature element.
 #[derive(Debug)]
@@ -51,10 +56,6 @@ fn format_mask(mask: u8) -> String {
     s
 }
 
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
-
 /// Parse an ISGN, OSGN, ISG1, OSG1, or OSG5 chunk.
 pub fn parse_signature(data: &[u8]) -> Vec<SignatureElement> {
     if data.len() < 8 {
@@ -91,15 +92,4 @@ pub fn parse_signature(data: &[u8]) -> Vec<SignatureElement> {
         });
     }
     elements
-}
-
-fn read_cstring(data: &[u8], offset: usize) -> String {
-    if offset >= data.len() {
-        return String::new();
-    }
-    let mut end = offset;
-    while end < data.len() && data[end] != 0 {
-        end += 1;
-    }
-    String::from_utf8_lossy(&data[offset..end]).into_owned()
 }

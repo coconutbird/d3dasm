@@ -1,10 +1,8 @@
 //! Parser for the STAT (statistics) chunk in DXBC shader bytecode.
 
-use std::fmt;
+use core::fmt;
 
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
+use crate::util::read_u32;
 
 /// Shader statistics extracted from the STAT chunk.
 #[derive(Debug, Clone, Default)]

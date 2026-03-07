@@ -1,4 +1,7 @@
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
+
+use crate::util::read_u32;
 
 const DXBC_MAGIC: &[u8; 4] = b"DXBC";
 
@@ -18,7 +21,7 @@ pub struct DxbcChunk<'a> {
 
 impl DxbcChunk<'_> {
     pub fn fourcc_str(&self) -> &str {
-        std::str::from_utf8(&self.fourcc).unwrap_or("????")
+        core::str::from_utf8(&self.fourcc).unwrap_or("????")
     }
 }
 
@@ -32,10 +35,6 @@ impl fmt::Display for DxbcContainer<'_> {
             self.chunks.len()
         )
     }
-}
-
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
 /// Scan a byte slice for all DXBC containers and parse them.
@@ -104,6 +103,9 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::vec::Vec;
+
     use super::*;
 
     /// Build a minimal valid DXBC container with the given chunks.

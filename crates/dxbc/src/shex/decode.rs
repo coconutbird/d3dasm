@@ -1,11 +1,12 @@
 //! Decoder: raw SHEX/SHDR bytes → structured IR.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec::Vec;
+
 use super::ir::*;
 use super::opcodes::Opcode;
-
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
+use crate::util::read_u32;
 
 /// Decode a SHEX/SHDR chunk into a structured [`Program`].
 pub fn decode(data: &[u8]) -> Option<Program> {

@@ -1,5 +1,9 @@
 //! Structured intermediate representation for SM4/SM5 shader bytecode.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use super::opcodes::Opcode;
 
 #[derive(Debug, Clone)]

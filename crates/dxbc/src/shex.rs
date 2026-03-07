@@ -1,3 +1,5 @@
+use alloc::string::String;
+
 pub mod decode;
 pub mod fmt;
 pub mod ir;
@@ -16,6 +18,8 @@ pub fn disassemble(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
 
     /// Helper: build a minimal SHEX chunk (ps_5_0) from a list of instruction token slices.

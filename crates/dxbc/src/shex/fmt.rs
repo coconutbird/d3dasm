@@ -1,6 +1,9 @@
 //! Formatter: IR → human-readable disassembly text.
 
-use std::fmt::Write;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write;
 
 use super::ir::*;
 use super::opcodes::Opcode;

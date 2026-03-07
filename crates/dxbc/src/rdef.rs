@@ -1,4 +1,8 @@
-use std::fmt;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+use crate::util::{read_cstring, read_u32};
 
 #[derive(Debug)]
 pub struct ResourceDef {
@@ -68,21 +72,6 @@ impl fmt::Display for ResourceBinding {
             self.name, ty, dim, self.bind_point
         )
     }
-}
-
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
-
-fn read_cstring(data: &[u8], offset: usize) -> String {
-    if offset >= data.len() {
-        return String::new();
-    }
-    let mut end = offset;
-    while end < data.len() && data[end] != 0 {
-        end += 1;
-    }
-    String::from_utf8_lossy(&data[offset..end]).into_owned()
 }
 
 /// Parse an RDEF chunk.
