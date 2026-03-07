@@ -17,24 +17,45 @@ pub struct SignatureElement<'a> {
     pub rw_mask: u8,
 }
 
-impl fmt::Display for SignatureElement<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let comp = match self.component_type {
+impl SignatureElement<'_> {
+    /// The semantic name including the index suffix (e.g. `"TEXCOORD1"`).
+    pub fn name_with_index(&self) -> String {
+        if self.semantic_index > 0 {
+            format!("{}{}", self.semantic_name, self.semantic_index)
+        } else {
+            String::from(self.semantic_name)
+        }
+    }
+
+    /// The component type name (`"float"`, `"uint"`, `"int"`).
+    pub fn component_type_name(&self) -> &'static str {
+        match self.component_type {
             1 => "uint",
             2 => "int",
             3 => "float",
             _ => "unknown",
-        };
+        }
+    }
+
+    /// Format the columns after the name: type and register.mask.
+    pub fn format_columns(&self) -> String {
         let mask_str = format_mask(self.mask);
-        let name_with_idx = if self.semantic_index > 0 {
-            format!("{}{}", self.semantic_name, self.semantic_index)
-        } else {
-            String::from(self.semantic_name)
-        };
+        format!(
+            "{:>5} v{}.{}",
+            self.component_type_name(),
+            self.register,
+            mask_str
+        )
+    }
+}
+
+impl fmt::Display for SignatureElement<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{:<24} {:>5} v{}.{}",
-            name_with_idx, comp, self.register, mask_str
+            "{:<24} {}",
+            self.name_with_index(),
+            self.format_columns()
         )
     }
 }

@@ -2,16 +2,35 @@
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use super::ir::*;
 use super::opcodes::Opcode;
 use crate::util::read_u32;
 
+/// Error returned when decoding a SHEX/SHDR chunk fails.
+#[derive(Debug, Clone)]
+pub struct DecodeError {
+    pub message: String,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHEX decode error: {}", self.message)
+    }
+}
+
 /// Decode a SHEX/SHDR chunk into a structured [`Program`].
-pub fn decode(data: &[u8]) -> Option<Program> {
+pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
     if data.len() < 8 {
-        return None;
+        return Err(DecodeError {
+            message: format!(
+                "SHEX/SHDR chunk too short: {} bytes (minimum 8)",
+                data.len()
+            ),
+        });
     }
 
     let version_token = read_u32(data, 0);
@@ -73,7 +92,7 @@ pub fn decode(data: &[u8]) -> Option<Program> {
         offset += instr_len * 4;
     }
 
-    Some(Program {
+    Ok(Program {
         shader_type,
         major_version: major,
         minor_version: minor,

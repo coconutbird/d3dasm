@@ -346,12 +346,33 @@ fn dest_component_count(op: Option<&Operand>) -> Option<u8> {
 }
 
 /// Override source width for instructions that read more components than
-/// the destination mask implies (e.g., dp3 always reads 3 source components).
+/// the destination mask implies (e.g., dp3 always reads 3 source components,
+/// texture sampling always reads 4-component swizzles).
 fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
     match opcode {
         Opcode::Dp2 => Some(2),
         Opcode::Dp3 => Some(3),
         Opcode::Dp4 => Some(4),
+        // Texture/resource instructions: source swizzles are independent of
+        // the destination mask — don't truncate them.
+        Opcode::Sample
+        | Opcode::SampleB
+        | Opcode::SampleC
+        | Opcode::SampleCLz
+        | Opcode::SampleD
+        | Opcode::SampleL
+        | Opcode::Ld
+        | Opcode::LdMs
+        | Opcode::LdUavTyped
+        | Opcode::Gather4
+        | Opcode::Gather4C
+        | Opcode::Gather4Po
+        | Opcode::Gather4PoC
+        | Opcode::Resinfo
+        | Opcode::Lod
+        | Opcode::SamplePos
+        | Opcode::SampleInfo
+        | Opcode::BufInfo => None,
         _ => dest_width,
     }
 }

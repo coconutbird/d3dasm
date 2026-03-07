@@ -11,8 +11,8 @@ pub mod opcodes;
 /// IR ([`ir::Program`]) and then formats it into text.
 pub fn disassemble(data: &[u8]) -> String {
     match decode::decode(data) {
-        Some(program) => fmt::format_program(&program),
-        None => String::new(),
+        Ok(program) => fmt::format_program(&program),
+        Err(_) => String::new(),
     }
 }
 

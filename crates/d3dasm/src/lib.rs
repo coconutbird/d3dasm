@@ -28,8 +28,12 @@ pub struct Shader<'a> {
     pub input_signature: Vec<SignatureElement<'a>>,
     /// Output signature elements.
     pub output_signature: Vec<SignatureElement<'a>>,
+    /// Patch constant signature elements (hull/domain shaders).
+    pub patch_constant_signature: Vec<SignatureElement<'a>>,
     /// Shader statistics (instruction counts, register usage, etc.).
     pub stats: Option<ShaderStats>,
+    /// Shader hash from the XHSH chunk (8 bytes).
+    pub hash: Option<[u8; 8]>,
 }
 
 /// Parse all DXBC shaders found in a raw byte buffer.
@@ -52,7 +56,9 @@ pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
         resource_def: None,
         input_signature: Vec::new(),
         output_signature: Vec::new(),
+        patch_constant_signature: Vec::new(),
         stats: None,
+        hash: None,
     };
 
     for chunk in &container.chunks {
@@ -64,8 +70,18 @@ pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
             "OSGN" | "OSG1" | "OSG5" => {
                 shader.output_signature = dxbc::signature::parse_signature(chunk.data);
             }
-            "SHEX" | "SHDR" => shader.program = dxbc::shex::decode::decode(chunk.data),
+            "PCSG" => {
+                shader.patch_constant_signature = dxbc::signature::parse_signature(chunk.data);
+            }
+            "SHEX" | "SHDR" => shader.program = dxbc::shex::decode::decode(chunk.data).ok(),
             "STAT" => shader.stats = dxbc::stat::parse_stat(chunk.data),
+            "XHSH" => {
+                if chunk.data.len() >= 8 {
+                    let mut h = [0u8; 8];
+                    h.copy_from_slice(&chunk.data[..8]);
+                    shader.hash = Some(h);
+                }
+            }
             _ => {}
         }
     }
@@ -94,8 +110,16 @@ impl fmt::Display for Shader<'_> {
                     .max(4);
                 writeln!(f, "//")?;
                 writeln!(f, "// Resource Bindings:")?;
-                writeln!(f, "// {:<nw$} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
-                writeln!(f, "// {:-<nw$} {:-<12} {:-<8} ----", "", "", "")?;
+                writeln!(
+                    f,
+                    "// {:<nw$} {:<12} {:<8} {:<4} {:<5} Flags",
+                    "Name", "Type", "Dim", "Slot", "Count"
+                )?;
+                writeln!(
+                    f,
+                    "// {:-<nw$} {:-<12} {:-<8} {:-<4} {:-<5} -----",
+                    "", "", "", "", ""
+                )?;
                 for b in &rd.bindings {
                     writeln!(f, "// {:<nw$} {}", b.name, b.format_columns())?;
                 }
@@ -110,10 +134,10 @@ impl fmt::Display for Shader<'_> {
                     .max(4);
                 writeln!(f, "//")?;
                 writeln!(f, "// cbuffer {} ({} bytes)", cb.name, cb.size)?;
-                writeln!(f, "//   {:<nw$} {:<6}  {:<4}", "Name", "Offset", "Size")?;
-                writeln!(f, "//   {:-<nw$} {:-<6}  {:-<4}", "", "", "")?;
+                writeln!(f, "//   {:<nw$} {:<6}  Size", "Name", "Offset")?;
+                writeln!(f, "//   {:-<nw$} {:-<6}  ----", "", "")?;
                 for v in &cb.variables {
-                    writeln!(f, "//   {:<nw$} {:<6}  {:<4}", v.name, v.offset, v.size)?;
+                    writeln!(f, "//   {:<nw$} {:<6}  {}", v.name, v.offset, v.size)?;
                 }
             }
             writeln!(f, "//")?;
@@ -121,19 +145,74 @@ impl fmt::Display for Shader<'_> {
 
         // Input signature
         if !self.input_signature.is_empty() {
+            let nw = self
+                .input_signature
+                .iter()
+                .map(|e| e.name_with_index().len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
             writeln!(f, "// Input Signature:")?;
             for e in &self.input_signature {
-                writeln!(f, "//   {e}")?;
+                writeln!(
+                    f,
+                    "//   {:<nw$} {}",
+                    e.name_with_index(),
+                    e.format_columns()
+                )?;
             }
             writeln!(f, "//")?;
         }
 
         // Output signature
         if !self.output_signature.is_empty() {
+            let nw = self
+                .output_signature
+                .iter()
+                .map(|e| e.name_with_index().len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
             writeln!(f, "// Output Signature:")?;
             for e in &self.output_signature {
-                writeln!(f, "//   {e}")?;
+                writeln!(
+                    f,
+                    "//   {:<nw$} {}",
+                    e.name_with_index(),
+                    e.format_columns()
+                )?;
             }
+            writeln!(f, "//")?;
+        }
+
+        // Patch constant signature
+        if !self.patch_constant_signature.is_empty() {
+            let nw = self
+                .patch_constant_signature
+                .iter()
+                .map(|e| e.name_with_index().len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
+            writeln!(f, "// Patch Constant Signature:")?;
+            for e in &self.patch_constant_signature {
+                writeln!(
+                    f,
+                    "//   {:<nw$} {}",
+                    e.name_with_index(),
+                    e.format_columns()
+                )?;
+            }
+            writeln!(f, "//")?;
+        }
+
+        // Shader hash
+        if let Some(h) = &self.hash {
+            writeln!(
+                f,
+                "// Hash: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+            )?;
             writeln!(f, "//")?;
         }
 
