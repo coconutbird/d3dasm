@@ -50,7 +50,18 @@ fn format_instruction(instr: &Instruction) -> String {
             if operands.is_empty() {
                 format!("{name}{sat}")
             } else {
-                let ops: Vec<String> = operands.iter().map(format_operand).collect();
+                // Determine active component count from the destination (first operand) mask.
+                // Source swizzles are truncated to this width since DXBC always encodes
+                // 4 swizzle slots but only the first N are meaningful.
+                let dest_width = dest_component_count(operands.first());
+                let mut ops = Vec::with_capacity(operands.len());
+                for (i, op) in operands.iter().enumerate() {
+                    if i == 0 {
+                        ops.push(format_operand(op));
+                    } else {
+                        ops.push(format_operand_with_width(op, dest_width));
+                    }
+                }
                 format!("{name}{sat} {}", ops.join(", "))
             }
         }
@@ -208,7 +219,46 @@ fn format_custom_data(
     }
 }
 
+/// Determine the number of swizzle components needed for a destination mask.
+///
+/// This is the position of the highest set bit + 1, NOT the popcount.
+/// For `.xy` (bits 0,1) → 2, for `.zw` (bits 2,3) → 4, for `.xw` (bits 0,3) → 4.
+/// Source swizzles can be safely truncated to this length since higher
+/// components are never read.
+fn dest_component_count(op: Option<&Operand>) -> Option<u8> {
+    let op = op?;
+    match &op.components {
+        ComponentSelect::Mask(mask) => {
+            if *mask == 0 {
+                None
+            } else {
+                // Highest set bit position + 1
+                Some((8 - mask.leading_zeros()) as u8)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Format a source operand, truncating its swizzle to `width` components.
+fn format_operand_with_width(op: &Operand, width: Option<u8>) -> String {
+    let base = format_operand_inner(op);
+    if let (Some(w), ComponentSelect::Swizzle(_)) = (width, &op.components) {
+        // The base string ends with ".xyzx" or similar — truncate the swizzle portion.
+        if let Some(dot_pos) = base.rfind('.') {
+            let (before_dot, after_dot) = base.split_at(dot_pos + 1);
+            let truncated: String = after_dot.chars().take(w as usize).collect();
+            return format!("{before_dot}{truncated}");
+        }
+    }
+    base
+}
+
 fn format_operand(op: &Operand) -> String {
+    format_operand_inner(op)
+}
+
+fn format_operand_inner(op: &Operand) -> String {
     let prefix = op.reg_type.prefix();
 
     // Immediates
