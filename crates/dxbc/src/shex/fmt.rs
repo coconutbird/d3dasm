@@ -48,26 +48,61 @@ pub fn format_program(program: &Program) -> String {
     out
 }
 
-fn format_instruction(instr: &Instruction) -> String {
-    let name = instr.opcode.name();
-    let sat = if instr.saturate { "_sat" } else { "" };
-
+/// Format a single [`Instruction`] into its disassembly text.
+///
+/// Returns the full line, e.g. `"mad_sat r0.x, r1.y, r2.z, r3.w"` or
+/// `"dcl_constantbuffer cb4[1].xyzw, immediateIndexed"`.
+pub fn format_instruction(instr: &Instruction) -> String {
     match &instr.kind {
-        InstructionKind::Generic { operands } => format_generic(instr, name, sat, operands),
-        InstructionKind::HsPhase => name.to_string(),
+        InstructionKind::Generic { operands } => format_generic(instr, operands),
+        InstructionKind::HsPhase => format_opcode(instr),
         InstructionKind::CustomData {
             subtype,
             values,
             raw_dword_count,
         } => format_custom_data(subtype, values, *raw_dword_count),
-        _ => format_declaration(instr, name),
+        _ => format_declaration(instr),
     }
 }
 
+/// Format the opcode mnemonic of an [`Instruction`], including any
+/// modifier suffixes (saturate, resinfo return type, texture offsets).
+///
+/// Examples: `"mad_sat"`, `"resinfo_uint"`, `"sample(1, 2, 0)"`, `"mov"`.
+pub fn format_opcode(instr: &Instruction) -> String {
+    let name = instr.opcode.name();
+    let sat = if instr.saturate { "_sat" } else { "" };
+
+    let suffix = match instr.resinfo_return_type {
+        Some(1) => "_rcpFloat",
+        Some(2) => "_uint",
+        _ => "",
+    };
+
+    let offsets = match instr.tex_offsets {
+        Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
+            format!("({u}, {v}, {w})")
+        }
+        _ => String::new(),
+    };
+
+    format!("{name}{suffix}{sat}{offsets}")
+}
+
+/// Format a single [`Operand`] into its disassembly text.
+///
+/// Examples: `"r0.xy"`, `"cb5[r0.x].yyyz"`, `"l(1.000000, 0.000000)"`,
+/// `"-|r1.x|"`.
+pub fn format_operand(op: &Operand) -> String {
+    format_operand_core(op, None)
+}
+
 /// Format a generic ALU / flow-control / sample instruction.
-fn format_generic(instr: &Instruction, name: &str, sat: &str, operands: &[Operand]) -> String {
+fn format_generic(instr: &Instruction, operands: &[Operand]) -> String {
+    let opcode = format_opcode(instr);
+
     if operands.is_empty() {
-        return format!("{name}{sat}");
+        return opcode;
     }
 
     // Determine active component count from the destination (first operand) mask.
@@ -82,26 +117,12 @@ fn format_generic(instr: &Instruction, name: &str, sat: &str, operands: &[Operan
         }
     }
 
-    // resinfo return type suffix
-    let suffix = match instr.resinfo_return_type {
-        Some(1) => "_rcpFloat",
-        Some(2) => "_uint",
-        _ => "",
-    };
-
-    // Texture sample offsets from extended opcode
-    let offsets = match instr.tex_offsets {
-        Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
-            format!("({u}, {v}, {w})")
-        }
-        _ => String::new(),
-    };
-
-    format!("{name}{suffix}{sat}{offsets} {}", ops.join(", "))
+    format!("{opcode} {}", ops.join(", "))
 }
 
 /// Format a declaration instruction (`dcl_*` variants).
-fn format_declaration(instr: &Instruction, name: &str) -> String {
+fn format_declaration(instr: &Instruction) -> String {
+    let name = instr.opcode.name();
     match &instr.kind {
         InstructionKind::DclGlobalFlags { flags } => {
             format!("dcl_globalFlags {}", flags.join("|"))
@@ -334,10 +355,6 @@ fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
 /// to avoid breaking closing delimiters like `|`.
 fn format_operand_with_width(op: &Operand, width: Option<u8>) -> String {
     format_operand_core(op, width.map(|w| w as usize))
-}
-
-fn format_operand(op: &Operand) -> String {
-    format_operand_core(op, None)
 }
 
 fn format_operand_core(op: &Operand, swizzle_width: Option<usize>) -> String {
