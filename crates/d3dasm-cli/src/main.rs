@@ -37,10 +37,10 @@ fn main() {
 
         for chunk in &container.chunks {
             match chunk.fourcc_str() {
-                "RDEF" => print_rdef(&chunk.data),
-                "ISGN" | "ISG1" => print_signature("Input", &chunk.data),
-                "OSGN" | "OSG1" | "OSG5" => print_signature("Output", &chunk.data),
-                "SHEX" | "SHDR" => print_shex(&chunk.data),
+                "RDEF" => print_rdef(chunk.data),
+                "ISGN" | "ISG1" => print_signature("Input", chunk.data),
+                "OSGN" | "OSG1" | "OSG5" => print_signature("Output", chunk.data),
+                "SHEX" | "SHDR" => print_shex(chunk.data),
                 _ => {
                     println!("// Chunk: {} ({} bytes)", chunk.fourcc_str(), chunk.size);
                 }

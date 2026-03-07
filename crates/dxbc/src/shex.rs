@@ -1,464 +1,389 @@
+pub mod decode;
+pub mod fmt;
+pub mod ir;
 mod opcodes;
-mod operand;
-
-use std::fmt::Write;
-
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
 
 /// Disassemble a SHEX or SHDR chunk into human-readable text.
+///
+/// This is the main entry point. It decodes the raw bytes into a structured
+/// IR ([`ir::Program`]) and then formats it into text.
 pub fn disassemble(data: &[u8]) -> String {
-    let mut out = String::new();
-    if data.len() < 8 {
-        return out;
+    match decode::decode(data) {
+        Some(program) => fmt::format_program(&program),
+        None => String::new(),
     }
+}
 
-    let version_token = read_u32(data, 0);
-    let length_dwords = read_u32(data, 4) as usize;
-    let shader_type = (version_token >> 16) & 0xFFFF;
-    let major = (version_token >> 4) & 0xF;
-    let minor = version_token & 0xF;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let type_name = match shader_type {
-        0 => "ps",
-        1 => "vs",
-        2 => "gs",
-        3 => "hs",
-        4 => "ds",
-        5 => "cs",
-        _ => "unknown",
-    };
-
-    let _ = writeln!(out, "{type_name}_{major}_{minor}");
-
-    let mut offset = 8; // skip version + length tokens
-    let end = (length_dwords * 4).min(data.len());
-    let mut indent = 0u32;
-
-    while offset + 4 <= end {
-        let token = read_u32(data, offset);
-        let opcode_val = token & 0x7FF;
-        let is_extended = (token >> 31) & 1 != 0;
-        let instr_len = instruction_length(token, opcode_val, data, offset, end);
-
-        if instr_len == 0 || offset + instr_len * 4 > end {
-            let _ = writeln!(out, "  // invalid instruction at offset 0x{offset:X}");
-            break;
+    /// Helper: build a minimal SHEX chunk (ps_5_0) from a list of instruction token slices.
+    /// Returns raw bytes suitable for `disassemble()`.
+    fn build_shex(shader_type: u32, instructions: &[&[u32]]) -> Vec<u8> {
+        let mut dwords: Vec<u32> = Vec::new();
+        // Version token: shader_type << 16 | major << 4 | minor
+        dwords.push((shader_type << 16) | (5 << 4));
+        // Placeholder for length (will fill in)
+        dwords.push(0);
+        for instr in instructions {
+            dwords.extend_from_slice(instr);
         }
-
-        // Collect all dwords for this instruction
-        let tokens: Vec<u32> = (0..instr_len)
-            .map(|i| read_u32(data, offset + i * 4))
-            .collect();
-
-        let line = disassemble_instruction(&tokens, opcode_val, is_extended, &mut indent);
-        let pad = "  ".repeat(indent as usize);
-        let _ = writeln!(out, "{pad}{line}");
-
-        offset += instr_len * 4;
+        // Fill in length (total dwords including header)
+        dwords[1] = dwords.len() as u32;
+        // Convert to bytes
+        dwords.iter().flat_map(|d| d.to_le_bytes()).collect()
     }
 
-    out
-}
-
-/// Determine instruction length in dwords.
-fn instruction_length(token: u32, opcode: u32, data: &[u8], offset: usize, end: usize) -> usize {
-    use opcodes::Opcode;
-    let op = Opcode::from_u32(opcode);
-
-    // Customdata has its own length encoding
-    if matches!(op, Opcode::CustomData) {
-        if offset + 8 <= end {
-            return read_u32(data, offset + 4) as usize;
-        }
-        return 0;
+    fn build_ps(instructions: &[&[u32]]) -> Vec<u8> {
+        build_shex(0, instructions) // 0 = pixel shader
     }
 
-    // For declarations and most instructions, length is in bits [30:24]
-    let len = ((token >> 24) & 0x7F) as usize;
-    if len == 0 {
-        // Some declaration opcodes use the whole next section
-        return 1;
-    }
-    len
-}
-
-fn disassemble_instruction(
-    tokens: &[u32],
-    opcode_val: u32,
-    _is_extended: bool,
-    indent: &mut u32,
-) -> String {
-    use opcodes::Opcode;
-    let op = Opcode::from_u32(opcode_val);
-    let token0 = tokens[0];
-
-    // Handle indent changes for control flow
-    match op {
-        Opcode::Else | Opcode::EndIf | Opcode::EndLoop | Opcode::EndSwitch => {
-            *indent = indent.saturating_sub(1);
-        }
-        _ => {}
+    fn build_vs(instructions: &[&[u32]]) -> Vec<u8> {
+        build_shex(1, instructions) // 1 = vertex shader
     }
 
-    let result = match op {
-        Opcode::CustomData => format_custom_data(tokens),
-        Opcode::DclGlobalFlags => format_dcl_global_flags(token0),
-        Opcode::DclInput
-        | Opcode::DclInputSgv
-        | Opcode::DclInputSiv
-        | Opcode::DclInputPs
-        | Opcode::DclInputPsSgv
-        | Opcode::DclInputPsSiv => format_dcl_input(tokens, &op),
-        Opcode::DclOutput | Opcode::DclOutputSgv | Opcode::DclOutputSiv => {
-            format_dcl_output(tokens, &op)
-        }
-        Opcode::DclResource => format_dcl_resource(tokens),
-        Opcode::DclSampler => format_dcl_sampler(tokens),
-        Opcode::DclConstantBuffer => format_dcl_cb(tokens),
-        Opcode::DclTemps => format_dcl_temps(tokens),
-        Opcode::DclIndexableTemp => format_dcl_indexable_temp(tokens),
-        Opcode::DclGsInputPrimitive => format_dcl_gs_input(token0),
-        Opcode::DclGsOutputPrimitiveTopology => format_dcl_gs_output_topo(token0),
-        Opcode::DclMaxOutputVertexCount => format_dcl_max_output(tokens),
-        Opcode::DclGsInstanceCount => format_dcl_gs_instance_count(tokens),
-        Opcode::DclOutputControlPointCount => format_dcl_output_cp_count(token0),
-        Opcode::DclInputControlPointCount => format_dcl_input_cp_count(token0),
-        Opcode::DclTessDomain => format_dcl_tess_domain(token0),
-        Opcode::DclTessPartitioning => format_dcl_tess_partitioning(token0),
-        Opcode::DclTessOutputPrimitive => format_dcl_tess_output_prim(token0),
-        Opcode::DclHsMaxTessFactor => format_dcl_hs_max_tess(tokens),
-        Opcode::DclHsForkPhaseInstanceCount => format_dcl_hs_fork_count(tokens),
-        Opcode::HsDecls
-        | Opcode::HsControlPointPhase
-        | Opcode::HsForkPhase
-        | Opcode::HsJoinPhase => op.name().to_string(),
-        _ => format_generic_instruction(tokens, &op),
-    };
-
-    // Handle indent increases for control flow
-    match op {
-        Opcode::If | Opcode::Else | Opcode::Loop | Opcode::Switch => {
-            let r = result;
-            *indent += 1;
-            r
-        }
-        _ => result,
-    }
-}
-
-fn format_custom_data(tokens: &[u32]) -> String {
-    let subtype = (tokens[0] >> 11) & 0x1F;
-    let ty = match subtype {
-        0 => "comment",
-        1 => "debuginfo",
-        2 => "opaque",
-        3 => "dcl_immediateConstantBuffer",
-        _ => "customdata",
-    };
-    if subtype == 3 && tokens.len() > 2 {
-        let count = (tokens.len() - 2) / 4;
-        let mut s = format!("{ty} {{");
-        for i in 0..count {
-            let base = 2 + i * 4;
-            if base + 4 > tokens.len() {
-                break;
-            }
-            let x = f32::from_bits(tokens[base]);
-            let y = f32::from_bits(tokens[base + 1]);
-            let z = f32::from_bits(tokens[base + 2]);
-            let w = f32::from_bits(tokens[base + 3]);
-            s.push_str(&format!("\n    {{ {x:e}, {y:e}, {z:e}, {w:e} }}"));
-        }
-        s.push_str("\n}");
-        s
-    } else {
-        format!("{ty} // {subtype}, {} dwords", tokens.len())
-    }
-}
-
-fn format_dcl_global_flags(token: u32) -> String {
-    let flags = (token >> 11) & 0x1FFF;
-    let mut parts = Vec::new();
-    if flags & 1 != 0 {
-        parts.push("refactoringAllowed");
-    }
-    if flags & 2 != 0 {
-        parts.push("enableDoublePrecisionFloatOps");
-    }
-    if flags & 4 != 0 {
-        parts.push("forceEarlyDepthStencil");
-    }
-    if flags & 8 != 0 {
-        parts.push("enableRawAndStructuredBuffers");
-    }
-    if flags & 16 != 0 {
-        parts.push("skipOptimization");
-    }
-    if flags & 32 != 0 {
-        parts.push("enableMinPrecision");
-    }
-    if flags & 64 != 0 {
-        parts.push("enable11_1DoubleExtensions");
-    }
-    if flags & 128 != 0 {
-        parts.push("enable11_1ShaderExtensions");
-    }
-    format!("dcl_globalFlags {}", parts.join("|"))
-}
-
-fn format_dcl_input(tokens: &[u32], op: &opcodes::Opcode) -> String {
-    let operands = operand::decode_operands(tokens, 1);
-    let interp = if matches!(
-        op,
-        opcodes::Opcode::DclInputPs
-            | opcodes::Opcode::DclInputPsSiv
-            | opcodes::Opcode::DclInputPsSgv
-    ) {
-        let interp_mode = (tokens[0] >> 11) & 0xF;
-        match interp_mode {
-            0 => "",
-            1 => " constant",
-            2 => " linear",
-            3 => " linearCentroid",
-            4 => " linearNoperspective",
-            5 => " linearNoperspectiveCentroid",
-            6 => " linearSample",
-            7 => " linearNoperspectiveSample",
-            _ => " ?interp",
-        }
-    } else {
-        ""
-    };
-    let name = op.name();
-    if operands.is_empty() {
-        format!("{name}{interp}")
-    } else {
-        format!("{name}{interp}, {}", operands.join(", "))
-    }
-}
-
-fn format_dcl_output(tokens: &[u32], op: &opcodes::Opcode) -> String {
-    let operands = operand::decode_operands(tokens, 1);
-    let name = op.name();
-    if operands.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {}", operands.join(", "))
-    }
-}
-
-fn format_dcl_resource(tokens: &[u32]) -> String {
-    let dim = (tokens[0] >> 11) & 0x1F;
-    let dim_str = match dim {
-        1 => "buffer",
-        2 => "texture1d",
-        3 => "texture2d",
-        4 => "texture2dms",
-        5 => "texture3d",
-        6 => "texturecube",
-        7 => "texture1darray",
-        8 => "texture2darray",
-        9 => "texture2dmsarray",
-        10 => "texturecubearray",
-        _ => "unknown",
-    };
-    let operands = operand::decode_operands(tokens, 1);
-    let ret_type = if tokens.len() > 2 {
-        let rt = tokens[tokens.len() - 1];
-        format_return_type(rt)
-    } else {
-        String::new()
-    };
-    format!(
-        "dcl_resource_{dim_str} ({ret_type}) {}",
-        operands.join(", ")
-    )
-}
-
-fn format_return_type(token: u32) -> String {
-    let names = [
-        "",
-        "unorm",
-        "snorm",
-        "sint",
-        "uint",
-        "float",
-        "mixed",
-        "double",
-        "continued",
-        "unused",
-    ];
-    let mut parts = Vec::new();
-    for i in 0..4 {
-        let t = ((token >> (i * 4)) & 0xF) as usize;
-        parts.push(if t < names.len() { names[t] } else { "?" });
-    }
-    parts.join(",")
-}
-
-fn format_dcl_sampler(tokens: &[u32]) -> String {
-    let mode = (tokens[0] >> 11) & 0xF;
-    let mode_str = match mode {
-        0 => "default",
-        1 => "comparison",
-        2 => "mono",
-        _ => "?",
-    };
-    let operands = operand::decode_operands(tokens, 1);
-    format!("dcl_sampler {}, mode_{mode_str}", operands.join(", "))
-}
-
-fn format_dcl_cb(tokens: &[u32]) -> String {
-    let access = (tokens[0] >> 11) & 1;
-    let access_str = if access == 0 {
-        "immediateIndexed"
-    } else {
-        "dynamicIndexed"
-    };
-    let operands = operand::decode_operands(tokens, 1);
-    format!("dcl_constantbuffer {}, {access_str}", operands.join(", "))
-}
-
-fn format_dcl_temps(tokens: &[u32]) -> String {
-    let count = if tokens.len() > 1 { tokens[1] } else { 0 };
-    format!("dcl_temps {count}")
-}
-
-fn format_dcl_indexable_temp(tokens: &[u32]) -> String {
-    if tokens.len() >= 4 {
-        format!(
-            "dcl_indexableTemp x{}[{}], {}",
-            tokens[1], tokens[2], tokens[3]
-        )
-    } else {
-        "dcl_indexableTemp".to_string()
-    }
-}
-
-fn format_dcl_gs_input(token: u32) -> String {
-    let prim = (token >> 11) & 0x3F;
-    let prim_str = match prim {
-        1 => "point",
-        2 => "line",
-        3 => "triangle",
-        4 => "lineAdj",
-        5 => "triangleAdj",
-        _ => "?",
-    };
-    if (6..=37).contains(&prim) {
-        format!("dcl_inputPrimitive patchlist_{}", prim - 5)
-    } else {
-        format!("dcl_inputPrimitive {prim_str}")
-    }
-}
-
-fn format_dcl_gs_output_topo(token: u32) -> String {
-    let topo = (token >> 11) & 0x7;
-    let topo_str = match topo {
-        1 => "pointlist",
-        2 => "linestrip",
-        3 => "trianglestrip",
-        _ => "?",
-    };
-    format!("dcl_outputTopology {topo_str}")
-}
-
-fn format_dcl_max_output(tokens: &[u32]) -> String {
-    let count = if tokens.len() > 1 { tokens[1] } else { 0 };
-    format!("dcl_maxOutputVertexCount {count}")
-}
-
-fn format_dcl_gs_instance_count(tokens: &[u32]) -> String {
-    let count = if tokens.len() > 1 { tokens[1] } else { 0 };
-    format!("dcl_gsInstanceCount {count}")
-}
-
-fn format_dcl_output_cp_count(token: u32) -> String {
-    let count = (token >> 11) & 0x3F;
-    format!("dcl_outputControlPointCount {count}")
-}
-
-fn format_dcl_input_cp_count(token: u32) -> String {
-    let count = (token >> 11) & 0x3F;
-    format!("dcl_inputControlPointCount {count}")
-}
-
-fn format_dcl_tess_domain(token: u32) -> String {
-    let domain = (token >> 11) & 0x3;
-    let s = match domain {
-        0 => "undefined",
-        1 => "isoline",
-        2 => "tri",
-        3 => "quad",
-        _ => "?",
-    };
-    format!("dcl_tessDomain {s}")
-}
-
-fn format_dcl_tess_partitioning(token: u32) -> String {
-    let p = (token >> 11) & 0x7;
-    let s = match p {
-        0 => "undefined",
-        1 => "integer",
-        2 => "pow2",
-        3 => "fractional_odd",
-        4 => "fractional_even",
-        _ => "?",
-    };
-    format!("dcl_tessPartitioning {s}")
-}
-
-fn format_dcl_tess_output_prim(token: u32) -> String {
-    let p = (token >> 11) & 0x7;
-    let s = match p {
-        0 => "undefined",
-        1 => "point",
-        2 => "line",
-        3 => "triangle_cw",
-        4 => "triangle_ccw",
-        _ => "?",
-    };
-    format!("dcl_tessOutputPrimitive {s}")
-}
-
-fn format_dcl_hs_max_tess(tokens: &[u32]) -> String {
-    let val = if tokens.len() > 1 {
-        f32::from_bits(tokens[1])
-    } else {
-        0.0
-    };
-    format!("dcl_hsMaxTessFactor {val}")
-}
-
-fn format_dcl_hs_fork_count(tokens: &[u32]) -> String {
-    let count = if tokens.len() > 1 { tokens[1] } else { 0 };
-    format!("dcl_hsForkPhaseInstanceCount {count}")
-}
-
-fn format_generic_instruction(tokens: &[u32], op: &opcodes::Opcode) -> String {
-    let name = op.name();
-    let sat = if (tokens[0] >> 13) & 1 != 0 {
-        "_sat"
-    } else {
-        ""
-    };
-
-    // Decode operands starting after the opcode token (and any extended tokens)
-    let mut start = 1;
-    // Skip extended opcode tokens
-    if (tokens[0] >> 31) & 1 != 0 {
-        while start < tokens.len() && (tokens[start] >> 31) & 1 != 0 {
-            start += 1;
-        }
-        start += 1; // skip the last extended token
+    /// Helper: encode an instruction token with opcode and length.
+    fn instr_token(opcode: u32, length: u32) -> u32 {
+        (length << 24) | opcode
     }
 
-    let operands = operand::decode_operands(tokens, start);
-    if operands.is_empty() {
-        format!("{name}{sat}")
-    } else {
-        format!("{name}{sat} {}", operands.join(", "))
+    /// Helper: encode a temp register operand (r0-rN) with 4-component mask.
+    /// For destinations: mask mode, e.g. r0.xyzw
+    fn temp_dest(reg: u32, mask: u8) -> [u32; 2] {
+        // num_components=2 (4-comp), sel_mode=0 (mask), op_type=0 (temp), index_dim=1 (1D)
+        let token = 0x00100002 | ((mask as u32) << 4);
+        [token, reg]
+    }
+
+    /// Helper: encode a temp register operand (r0-rN) with 4-component swizzle.
+    /// For sources: swizzle mode, e.g. r1.xyzw
+    fn temp_src(reg: u32, swizzle: u32) -> [u32; 2] {
+        // num_components=2 (4-comp), sel_mode=1 (swizzle), op_type=0 (temp), index_dim=1 (1D)
+        let token = 0x00100006 | (swizzle << 4);
+        [token, reg]
+    }
+
+    /// Helper: encode a scalar temp source, e.g. r0.x
+    fn temp_src_scalar(reg: u32, component: u32) -> [u32; 2] {
+        // num_components=2 (4-comp), sel_mode=2 (scalar), op_type=0 (temp), index_dim=1 (1D)
+        let token = 0x0010000A | (component << 4);
+        [token, reg]
+    }
+
+    /// Swizzle constants
+    const XYZW: u32 = 0b11_10_01_00; // x=0,y=1,z=2,w=3
+
+    // ==================== Version header tests ====================
+
+    #[test]
+    fn version_ps_5_0() {
+        let data = build_ps(&[&[instr_token(62, 1)]]); // ret
+        let output = disassemble(&data);
+        assert!(output.starts_with("ps_5_0\n"), "got: {output}");
+    }
+
+    #[test]
+    fn version_vs_5_0() {
+        let data = build_vs(&[&[instr_token(62, 1)]]); // ret
+        let output = disassemble(&data);
+        assert!(output.starts_with("vs_5_0\n"), "got: {output}");
+    }
+
+    #[test]
+    fn version_gs_5_0() {
+        let data = build_shex(2, &[&[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.starts_with("gs_5_0\n"), "got: {output}");
+    }
+
+    #[test]
+    fn version_cs_5_0() {
+        let data = build_shex(5, &[&[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.starts_with("cs_5_0\n"), "got: {output}");
+    }
+
+    // ==================== Simple instruction tests ====================
+
+    #[test]
+    fn instr_ret() {
+        let data = build_ps(&[&[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("ret\n"), "got: {output}");
+    }
+
+    #[test]
+    fn instr_nop() {
+        let data = build_ps(&[&[instr_token(58, 1)], &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("nop\n"), "got: {output}");
+    }
+
+    #[test]
+    fn instr_mov() {
+        let d = temp_dest(0, 0xF); // r0.xyzw
+        let s = temp_src(1, XYZW); // r1.xyzw
+        let tokens = [instr_token(54, 5), d[0], d[1], s[0], s[1]];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("mov r0.xyzw, r1.xyzw"), "got: {output}");
+    }
+
+    #[test]
+    fn instr_add() {
+        let d = temp_dest(0, 0xF);
+        let s0 = temp_src(1, XYZW);
+        let s1 = temp_src(2, XYZW);
+        let tokens = [instr_token(0, 7), d[0], d[1], s0[0], s0[1], s1[0], s1[1]];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("add r0.xyzw, r1.xyzw, r2.xyzw"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn instr_mul() {
+        let d = temp_dest(0, 0xF);
+        let s0 = temp_src(1, XYZW);
+        let s1 = temp_src(2, XYZW);
+        let tokens = [instr_token(56, 7), d[0], d[1], s0[0], s0[1], s1[0], s1[1]];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("mul r0.xyzw, r1.xyzw, r2.xyzw"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn instr_mad() {
+        let d = temp_dest(0, 0xF);
+        let s0 = temp_src(1, XYZW);
+        let s1 = temp_src(2, XYZW);
+        let s2 = temp_src(3, XYZW);
+        let tokens = [
+            instr_token(50, 9),
+            d[0],
+            d[1],
+            s0[0],
+            s0[1],
+            s1[0],
+            s1[1],
+            s2[0],
+            s2[1],
+        ];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("mad r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw"),
+            "got: {output}"
+        );
+    }
+
+    // ==================== Saturate modifier ====================
+
+    #[test]
+    fn instr_mov_sat() {
+        let d = temp_dest(0, 0xF);
+        let s = temp_src(1, XYZW);
+        // Saturate bit is bit 13
+        let tokens = [instr_token(54, 5) | (1 << 13), d[0], d[1], s[0], s[1]];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("mov_sat r0.xyzw, r1.xyzw"), "got: {output}");
+    }
+
+    // ==================== Declaration tests ====================
+
+    #[test]
+    fn dcl_global_flags_refactoring() {
+        // opcode 106, length 1, flags bit 11 = refactoringAllowed
+        let tokens = [instr_token(106, 1) | (1 << 11)];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("dcl_globalFlags refactoringAllowed"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn dcl_temps() {
+        // opcode 104, length 2, followed by count=4
+        let tokens = [instr_token(104, 2), 4];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("dcl_temps 4"), "got: {output}");
+    }
+
+    #[test]
+    fn dcl_max_output_vertex_count() {
+        // opcode 94, length 2
+        let tokens = [instr_token(94, 2), 6];
+        let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("dcl_maxOutputVertexCount 6"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn dcl_thread_group() {
+        // opcode 155, length 4, followed by x, y, z
+        let tokens = [instr_token(155, 4), 8, 8, 1];
+        let data = build_shex(5, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        // dcl_thread_group goes through format_generic_instruction
+        // which decodes operands — the 3 values will be treated as operands
+        assert!(output.contains("dcl_thread_group"), "got: {output}");
+    }
+
+    // ==================== Control flow ====================
+
+    #[test]
+    fn control_flow_if_else_endif() {
+        let cond = temp_src_scalar(0, 0); // r0.x
+        let data = build_ps(&[
+            &[instr_token(31, 3), cond[0], cond[1]], // if r0.x
+            &[instr_token(58, 1)],                   // nop
+            &[instr_token(18, 1)],                   // else
+            &[instr_token(58, 1)],                   // nop
+            &[instr_token(21, 1)],                   // endif
+            &[instr_token(62, 1)],                   // ret
+        ]);
+        let output = disassemble(&data);
+        assert!(output.contains("if"), "missing 'if' in: {output}");
+        assert!(output.contains("else"), "missing 'else' in: {output}");
+        assert!(output.contains("endif"), "missing 'endif' in: {output}");
+    }
+
+    #[test]
+    fn control_flow_loop_endloop() {
+        let data = build_ps(&[
+            &[instr_token(48, 1)], // loop
+            &[instr_token(2, 1)],  // break
+            &[instr_token(22, 1)], // endloop
+            &[instr_token(62, 1)], // ret
+        ]);
+        let output = disassemble(&data);
+        assert!(output.contains("loop"), "missing 'loop' in: {output}");
+        assert!(output.contains("break"), "missing 'break' in: {output}");
+        assert!(output.contains("endloop"), "missing 'endloop' in: {output}");
+    }
+
+    // ==================== SM5 instructions ====================
+
+    #[test]
+    fn instr_emit_stream() {
+        // opcode 117 = emit_stream, needs a stream operand
+        // stream0 operand: op_type=16 (stream), index_dim=1 (1D), num_components=0
+        let stream_op = (1u32 << 20) | (16 << 12); // index_dim=1, op_type=stream, 0-comp
+        let tokens = [instr_token(117, 3), stream_op, 0]; // stream0
+        let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("emit_stream"), "got: {output}");
+    }
+
+    #[test]
+    fn instr_cut_stream() {
+        let stream_op = (1u32 << 20) | (16 << 12);
+        let tokens = [instr_token(118, 3), stream_op, 0];
+        let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("cut_stream"), "got: {output}");
+    }
+
+    #[test]
+    fn instr_hs_phases() {
+        let data = build_shex(
+            3,
+            &[
+                &[instr_token(113, 1)], // hs_decls
+                &[instr_token(114, 1)], // hs_control_point_phase
+                &[instr_token(115, 1)], // hs_fork_phase
+                &[instr_token(62, 1)],  // ret
+            ],
+        );
+        let output = disassemble(&data);
+        assert!(output.contains("hs_decls"), "got: {output}");
+        assert!(output.contains("hs_control_point_phase"), "got: {output}");
+        assert!(output.contains("hs_fork_phase"), "got: {output}");
+    }
+
+    // ==================== Partial mask tests ====================
+
+    #[test]
+    fn instr_mov_partial_mask() {
+        let d = temp_dest(0, 0x3); // r0.xy
+        let s = temp_src(1, XYZW);
+        let tokens = [instr_token(54, 5), d[0], d[1], s[0], s[1]];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("mov r0.xy,"), "got: {output}");
+    }
+
+    // ==================== GS declarations ====================
+
+    #[test]
+    fn dcl_gs_input_primitive() {
+        // opcode 93, triangle = 3 in bits [16:11]
+        let tokens = [instr_token(93, 1) | (3 << 11)];
+        let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("dcl_inputPrimitive triangle"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn dcl_gs_output_topology_trianglestrip() {
+        // opcode 92, trianglestrip = 3 in bits [13:11]
+        let tokens = [instr_token(92, 1) | (3 << 11)];
+        let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("dcl_outputTopology trianglestrip"),
+            "got: {output}"
+        );
+    }
+
+    // ==================== Tessellation declarations ====================
+
+    #[test]
+    fn dcl_tess_domain_tri() {
+        let tokens = [instr_token(149, 1) | (2 << 11)]; // tri = 2
+        let data = build_shex(3, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("dcl_tessDomain tri"), "got: {output}");
+    }
+
+    #[test]
+    fn dcl_tess_partitioning_fractional_odd() {
+        let tokens = [instr_token(150, 1) | (3 << 11)]; // fractional_odd = 3
+        let data = build_shex(3, &[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(
+            output.contains("dcl_tessPartitioning fractional_odd"),
+            "got: {output}"
+        );
+    }
+
+    // ==================== Empty / minimal input ====================
+
+    #[test]
+    fn empty_data() {
+        let output = disassemble(&[]);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn too_short() {
+        let output = disassemble(&[0, 0, 0, 0]);
+        assert!(output.is_empty() || output.contains("unknown"));
     }
 }

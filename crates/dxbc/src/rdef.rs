@@ -86,6 +86,15 @@ fn read_cstring(data: &[u8], offset: usize) -> String {
 }
 
 /// Parse an RDEF chunk.
+///
+/// RDEF header layout (28 bytes):
+///   0: u32 constant_buffer_count
+///   4: u32 constant_buffer_offset
+///   8: u32 bound_resource_count
+///  12: u32 bound_resource_offset
+///  16: u32 target_version  (minor | major<<8 | type<<16)
+///  20: u32 flags
+///  24: u32 creator_offset
 pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
     if data.len() < 28 {
         return None;
@@ -95,6 +104,11 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
     let cb_offset = read_u32(data, 4) as usize;
     let binding_count = read_u32(data, 8) as usize;
     let binding_offset = read_u32(data, 12) as usize;
+    let target_version = read_u32(data, 16);
+
+    // SM5 uses 40-byte variable descriptors; SM4 uses 24-byte.
+    let major_version = (target_version >> 8) & 0xFF;
+    let var_stride: usize = if major_version >= 5 { 40 } else { 24 };
 
     // Parse resource bindings
     let mut bindings = Vec::with_capacity(binding_count);
@@ -129,8 +143,8 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
 
         let mut variables = Vec::with_capacity(var_count);
         for j in 0..var_count {
-            let vbase = var_offset + j * 24;
-            if vbase + 24 > data.len() {
+            let vbase = var_offset + j * var_stride;
+            if vbase + var_stride > data.len() {
                 break;
             }
             let vname_off = read_u32(data, vbase) as usize;
@@ -148,10 +162,14 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
         });
     }
 
-    // Creator string
-    let creator_off = read_u32(data, 16) as usize;
-    let creator = if creator_off < data.len() {
-        read_cstring(data, creator_off)
+    // Creator string (at offset 24 in the RDEF header)
+    let creator = if data.len() >= 28 {
+        let creator_off = read_u32(data, 24) as usize;
+        if creator_off < data.len() {
+            read_cstring(data, creator_off)
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };

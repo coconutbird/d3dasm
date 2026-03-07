@@ -695,3 +695,105 @@ impl Opcode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Opcode;
+
+    /// Verify every opcode value 0..=217 maps to a known variant (not Unknown).
+    #[test]
+    fn all_opcodes_are_known() {
+        for v in 0..=217u32 {
+            // Skip reserved slots
+            if v == 107 || v == 112 || v == 209 {
+                assert!(
+                    matches!(Opcode::from_u32(v), Opcode::Unknown(_)),
+                    "reserved opcode {v} should map to Unknown"
+                );
+                continue;
+            }
+            let op = Opcode::from_u32(v);
+            assert!(
+                !matches!(op, Opcode::Unknown(_)),
+                "opcode {v} mapped to Unknown, expected a known variant"
+            );
+        }
+    }
+
+    /// Verify every known opcode has a non-empty, non-"unknown_op" name.
+    #[test]
+    fn all_opcodes_have_names() {
+        for v in 0..=217u32 {
+            if v == 107 || v == 112 || v == 209 {
+                continue;
+            }
+            let op = Opcode::from_u32(v);
+            let name = op.name();
+            assert!(
+                !name.is_empty() && name != "unknown_op",
+                "opcode {v} ({op:?}) has bad name: {name:?}"
+            );
+        }
+    }
+
+    /// Spot-check key opcode values against their expected names.
+    #[test]
+    fn opcode_spot_checks() {
+        let cases: &[(u32, &str)] = &[
+            (0, "add"),
+            (1, "and"),
+            (14, "div"),
+            (31, "if"),
+            (48, "loop"),
+            (54, "mov"),
+            (62, "ret"),
+            (69, "sample"),
+            (87, "xor"),
+            // Declarations
+            (88, "dcl_resource"),
+            (89, "dcl_constantbuffer"),
+            (104, "dcl_temps"),
+            (106, "dcl_globalFlags"),
+            // DX10.1
+            (108, "lod"),
+            (109, "gather4"),
+            // DX11 HS
+            (113, "hs_decls"),
+            (117, "emit_stream"),
+            (118, "cut_stream"),
+            // SM5
+            (121, "bufinfo"),
+            (129, "rcp"),
+            (134, "countbits"),
+            (143, "dcl_stream"),
+            (155, "dcl_thread_group"),
+            (163, "ld_uav_typed"),
+            (190, "sync"),
+            // Double precision
+            (191, "dadd"),
+            (202, "ftod"),
+            // Eval
+            (203, "eval_snapped"),
+            (206, "dcl_gsInstanceCount"),
+            // DX11.1
+            (210, "ddiv"),
+            (217, "utod"),
+        ];
+        for &(v, expected) in cases {
+            let op = Opcode::from_u32(v);
+            assert_eq!(op.name(), expected, "opcode {v} ({op:?})");
+        }
+    }
+
+    /// Values beyond 217 should map to Unknown.
+    #[test]
+    fn unknown_opcodes() {
+        for v in [218, 255, 500, 1000, u32::MAX] {
+            assert!(
+                matches!(Opcode::from_u32(v), Opcode::Unknown(_)),
+                "opcode {v} should be Unknown"
+            );
+            assert_eq!(Opcode::from_u32(v).name(), "unknown_op");
+        }
+    }
+}

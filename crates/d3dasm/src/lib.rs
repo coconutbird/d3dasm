@@ -24,6 +24,6 @@ pub trait ShaderContainer: fmt::Debug + fmt::Display {
 /// Scan a byte buffer and extract all shader containers.
 ///
 /// Currently supports DXBC. Will support DXIL in the future.
-pub fn scan(data: &[u8]) -> Vec<dxbc::container::DxbcContainer> {
+pub fn scan(data: &[u8]) -> Vec<dxbc::container::DxbcContainer<'_>> {
     dxbc::container::scan_dxbc(data)
 }
