@@ -6,7 +6,7 @@
 ///
 /// Panics if `offset + 4 > data.len()`.
 #[inline]
-pub(crate) fn read_u32(data: &[u8], offset: usize) -> u32 {
+pub fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
@@ -15,7 +15,7 @@ pub(crate) fn read_u32(data: &[u8], offset: usize) -> u32 {
 /// Returns an empty string if `offset` is out of bounds or the bytes
 /// are not valid UTF-8. In practice, all strings emitted by the HLSL
 /// compiler are pure ASCII.
-pub(crate) fn read_cstring(data: &[u8], offset: usize) -> &str {
+pub fn read_cstring(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
         return "";
     }

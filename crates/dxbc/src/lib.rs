@@ -6,4 +6,4 @@ pub mod rdef;
 pub mod shex;
 pub mod signature;
 pub mod stat;
-mod util;
+pub mod util;

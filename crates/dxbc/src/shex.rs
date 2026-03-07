@@ -3,7 +3,7 @@ use alloc::string::String;
 pub mod decode;
 pub mod fmt;
 pub mod ir;
-mod opcodes;
+pub mod opcodes;
 
 /// Disassemble a SHEX or SHDR chunk into human-readable text.
 ///

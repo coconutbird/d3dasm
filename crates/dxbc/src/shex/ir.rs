@@ -137,6 +137,39 @@ pub enum InstructionKind {
     },
 }
 
+impl Instruction {
+    /// Returns the operands of this instruction, if any.
+    ///
+    /// Most instruction kinds carry operands; declarations that encode
+    /// everything in the token itself (e.g. `dcl_temps`) return an empty
+    /// slice.
+    pub fn operands(&self) -> &[Operand] {
+        self.kind.operands()
+    }
+}
+
+impl InstructionKind {
+    /// Returns the operands embedded in this variant, or an empty slice
+    /// if the variant has none.
+    pub fn operands(&self) -> &[Operand] {
+        match self {
+            Self::Generic { operands }
+            | Self::DclInput { operands, .. }
+            | Self::DclOutput { operands, .. }
+            | Self::DclResource { operands, .. }
+            | Self::DclSampler { operands, .. }
+            | Self::DclConstantBuffer { operands, .. }
+            | Self::DclUavTyped { operands, .. }
+            | Self::DclUavRaw { operands, .. }
+            | Self::DclUavStructured { operands, .. }
+            | Self::DclResourceRaw { operands }
+            | Self::DclResourceStructured { operands, .. }
+            | Self::DclIndexRange { operands, .. } => operands,
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomDataType {
     Comment,

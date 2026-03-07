@@ -498,3 +498,31 @@ fn format_immediate(val: u32) -> String {
         format!("0x{val:08X}")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Display impls — delegate to the public format_* functions
+// ---------------------------------------------------------------------------
+
+impl core::fmt::Display for Instruction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&format_instruction(self))
+    }
+}
+
+impl core::fmt::Display for Operand {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&format_operand(self))
+    }
+}
+
+impl core::fmt::Display for Opcode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl core::fmt::Display for Program {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&format_program(self))
+    }
+}
