@@ -488,18 +488,33 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
     match index_dim {
         0 => {
             if op_type_val == 4 {
-                // Immediate32: consume 4 dwords
-                let count = if pos + consumed + 4 <= tokens.len() {
-                    4
-                } else if pos + consumed < tokens.len() {
-                    1
-                } else {
-                    0
+                // Immediate32: dword count depends on num_components
+                //   0 → 0 components (no data)
+                //   1 → 1 component  (1 dword)
+                //   2 → N-component  (4 dwords for Immediate32)
+                let count = match num_components {
+                    0 => 0,
+                    1 => 1,
+                    _ => 4,
                 };
-                for i in 0..count {
+                let available = (tokens.len() - (pos + consumed)).min(count);
+                for i in 0..available {
                     immediate_values.push(tokens[pos + consumed + i]);
                 }
-                consumed += count;
+                consumed += available;
+            } else if op_type_val == 5 {
+                // Immediate64: each component is 2 dwords (64-bit)
+                let components = match num_components {
+                    0 => 0,
+                    1 => 1,
+                    _ => 4,
+                };
+                let dword_count = components * 2;
+                let available = (tokens.len() - (pos + consumed)).min(dword_count);
+                for i in 0..available {
+                    immediate_values.push(tokens[pos + consumed + i]);
+                }
+                consumed += available;
             }
         }
         1 => {

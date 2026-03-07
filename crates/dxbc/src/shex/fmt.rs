@@ -53,13 +53,18 @@ fn format_instruction(instr: &Instruction) -> String {
                 // Determine active component count from the destination (first operand) mask.
                 // Source swizzles are truncated to this width since DXBC always encodes
                 // 4 swizzle slots but only the first N are meaningful.
+                //
+                // However, some instructions read more source components than the dest
+                // mask width:  dp2 always reads 2, dp3 reads 3, dp4 reads 4, etc.
+                // For those, we use the opcode-implied width instead.
                 let dest_width = dest_component_count(operands.first());
+                let src_width = source_width_override(instr.opcode, dest_width);
                 let mut ops = Vec::with_capacity(operands.len());
                 for (i, op) in operands.iter().enumerate() {
                     if i == 0 {
                         ops.push(format_operand(op));
                     } else {
-                        ops.push(format_operand_with_width(op, dest_width));
+                        ops.push(format_operand_with_width(op, src_width));
                     }
                 }
                 format!("{name}{sat} {}", ops.join(", "))
@@ -240,25 +245,30 @@ fn dest_component_count(op: Option<&Operand>) -> Option<u8> {
     }
 }
 
-/// Format a source operand, truncating its swizzle to `width` components.
-fn format_operand_with_width(op: &Operand, width: Option<u8>) -> String {
-    let base = format_operand_inner(op);
-    if let (Some(w), ComponentSelect::Swizzle(_)) = (width, &op.components) {
-        // The base string ends with ".xyzx" or similar — truncate the swizzle portion.
-        if let Some(dot_pos) = base.rfind('.') {
-            let (before_dot, after_dot) = base.split_at(dot_pos + 1);
-            let truncated: String = after_dot.chars().take(w as usize).collect();
-            return format!("{before_dot}{truncated}");
-        }
+/// Override source width for instructions that read more components than
+/// the destination mask implies (e.g., dp3 always reads 3 source components).
+fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
+    match opcode {
+        Opcode::Dp2 => Some(2),
+        Opcode::Dp3 => Some(3),
+        Opcode::Dp4 => Some(4),
+        _ => dest_width,
     }
-    base
+}
+
+/// Format a source operand, truncating its swizzle to `width` components.
+///
+/// Truncation is applied at the component level (before modifiers like abs/negate)
+/// to avoid breaking closing delimiters like `|`.
+fn format_operand_with_width(op: &Operand, width: Option<u8>) -> String {
+    format_operand_core(op, width.map(|w| w as usize))
 }
 
 fn format_operand(op: &Operand) -> String {
-    format_operand_inner(op)
+    format_operand_core(op, None)
 }
 
-fn format_operand_inner(op: &Operand) -> String {
+fn format_operand_core(op: &Operand, swizzle_width: Option<usize>) -> String {
     let prefix = op.reg_type.prefix();
 
     // Immediates
@@ -269,6 +279,20 @@ fn format_operand_inner(op: &Operand) -> String {
             .map(|&v| format_immediate(v))
             .collect();
         return format!("l({})", vals.join(", "));
+    }
+    if op.reg_type == RegisterType::Immediate64 {
+        // Each 64-bit value is stored as two consecutive u32s (lo, hi)
+        let mut vals = Vec::new();
+        let mut i = 0;
+        while i + 1 < op.immediate_values.len() {
+            let lo = op.immediate_values[i] as u64;
+            let hi = op.immediate_values[i + 1] as u64;
+            let bits = lo | (hi << 32);
+            let f = f64::from_bits(bits);
+            vals.push(format!("{f:?}"));
+            i += 2;
+        }
+        return format!("d({})", vals.join(", "));
     }
 
     // Build register name with indices
@@ -299,14 +323,14 @@ fn format_operand_inner(op: &Operand) -> String {
         }
     }
 
-    // Append swizzle/mask
-    let swizzle = format_components(&op.components);
+    // Append swizzle/mask — truncate swizzle to width if specified
+    let swizzle = format_components_with_width(&op.components, swizzle_width);
     if !swizzle.is_empty() {
         name.push('.');
         name.push_str(&swizzle);
     }
 
-    // Apply modifiers
+    // Apply modifiers (AFTER building name, so delimiters like | are not affected by truncation)
     if op.negate && op.abs {
         format!("-|{name}|")
     } else if op.negate {
@@ -327,13 +351,14 @@ fn format_index(idx: &OperandIndex) -> String {
     }
 }
 
-fn format_components(comp: &ComponentSelect) -> String {
+fn format_components_with_width(comp: &ComponentSelect, width: Option<usize>) -> String {
     match comp {
         ComponentSelect::None => String::new(),
         ComponentSelect::Mask(mask) => format_mask(*mask),
         ComponentSelect::Swizzle(s) => {
             let comps = ['x', 'y', 'z', 'w'];
-            let full: String = s.iter().map(|&c| comps[c as usize]).collect();
+            let count = width.unwrap_or(4).min(4);
+            let full: String = s[..count].iter().map(|&c| comps[c as usize]).collect();
             trim_swizzle(&full)
         }
         ComponentSelect::Scalar(c) => ['x', 'y', 'z', 'w'][*c as usize].to_string(),
