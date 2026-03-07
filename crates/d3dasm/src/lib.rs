@@ -87,8 +87,8 @@ impl fmt::Display for Shader<'_> {
             if !rd.bindings.is_empty() {
                 writeln!(f, "//")?;
                 writeln!(f, "// Resource Bindings:")?;
-                writeln!(f, "// {:<28} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
-                writeln!(f, "// {:-<28} {:-<12} {:-<8} ----", "", "", "")?;
+                writeln!(f, "// {:<30} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
+                writeln!(f, "// {:-<30} {:-<12} {:-<8} ----", "", "", "")?;
                 for b in &rd.bindings {
                     writeln!(f, "// {b}")?;
                 }

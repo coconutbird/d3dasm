@@ -53,37 +53,56 @@ fn format_instruction(instr: &Instruction) -> String {
     let sat = if instr.saturate { "_sat" } else { "" };
 
     match &instr.kind {
-        InstructionKind::Generic { operands } => {
-            if operands.is_empty() {
-                format!("{name}{sat}")
-            } else {
-                // Determine active component count from the destination (first operand) mask.
-                let dest_width = dest_component_count(operands.first());
-                let src_width = source_width_override(instr.opcode, dest_width);
-                let mut ops = Vec::with_capacity(operands.len());
-                for (i, op) in operands.iter().enumerate() {
-                    if i == 0 {
-                        ops.push(format_operand(op));
-                    } else {
-                        ops.push(format_operand_with_width(op, src_width));
-                    }
-                }
-                // resinfo return type suffix
-                let suffix = match instr.resinfo_return_type {
-                    Some(1) => "_rcpFloat",
-                    Some(2) => "_uint",
-                    _ => "",
-                };
-                // Texture sample offsets from extended opcode
-                let offsets = match instr.tex_offsets {
-                    Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
-                        format!("({u}, {v}, {w})")
-                    }
-                    _ => String::new(),
-                };
-                format!("{name}{suffix}{sat}{offsets} {}", ops.join(", "))
-            }
+        InstructionKind::Generic { operands } => format_generic(instr, name, sat, operands),
+        InstructionKind::HsPhase => name.to_string(),
+        InstructionKind::CustomData {
+            subtype,
+            values,
+            raw_dword_count,
+        } => format_custom_data(subtype, values, *raw_dword_count),
+        _ => format_declaration(instr, name),
+    }
+}
+
+/// Format a generic ALU / flow-control / sample instruction.
+fn format_generic(instr: &Instruction, name: &str, sat: &str, operands: &[Operand]) -> String {
+    if operands.is_empty() {
+        return format!("{name}{sat}");
+    }
+
+    // Determine active component count from the destination (first operand) mask.
+    let dest_width = dest_component_count(operands.first());
+    let src_width = source_width_override(instr.opcode, dest_width);
+    let mut ops = Vec::with_capacity(operands.len());
+    for (i, op) in operands.iter().enumerate() {
+        if i == 0 {
+            ops.push(format_operand(op));
+        } else {
+            ops.push(format_operand_with_width(op, src_width));
         }
+    }
+
+    // resinfo return type suffix
+    let suffix = match instr.resinfo_return_type {
+        Some(1) => "_rcpFloat",
+        Some(2) => "_uint",
+        _ => "",
+    };
+
+    // Texture sample offsets from extended opcode
+    let offsets = match instr.tex_offsets {
+        Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
+            format!("({u}, {v}, {w})")
+        }
+        _ => String::new(),
+    };
+
+    format!("{name}{suffix}{sat}{offsets} {}", ops.join(", "))
+}
+
+/// Format a declaration instruction (`dcl_*` variants).
+fn format_declaration(instr: &Instruction, name: &str) -> String {
+    match &instr.kind {
         InstructionKind::DclGlobalFlags { flags } => {
             format!("dcl_globalFlags {}", flags.join("|"))
         }
@@ -227,12 +246,9 @@ fn format_instruction(instr: &Instruction) -> String {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             format!("dcl_indexRange {}, {count}", ops.join(", "))
         }
-        InstructionKind::HsPhase => name.to_string(),
-        InstructionKind::CustomData {
-            subtype,
-            values,
-            raw_dword_count,
-        } => format_custom_data(subtype, values, *raw_dword_count),
+        // Generic, HsPhase, and CustomData are handled by format_instruction
+        // before calling this function.
+        _ => name.to_string(),
     }
 }
 
@@ -266,8 +282,11 @@ fn format_custom_data(
         let mut s = format!("{ty} {{");
         for v in values {
             s.push_str(&format!(
-                "\n    {{ {:e}, {:e}, {:e}, {:e} }}",
-                v[0], v[1], v[2], v[3]
+                "\n  {{ {}, {}, {}, {} }}",
+                format_immediate(v[0].to_bits()),
+                format_immediate(v[1].to_bits()),
+                format_immediate(v[2].to_bits()),
+                format_immediate(v[3].to_bits()),
             ));
         }
         s.push_str("\n}");

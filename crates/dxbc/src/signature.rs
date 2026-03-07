@@ -26,15 +26,15 @@ impl fmt::Display for SignatureElement<'_> {
             _ => "unknown",
         };
         let mask_str = format_mask(self.mask);
-        let idx = if self.semantic_index > 0 {
-            format!("{}", self.semantic_index)
+        let name_with_idx = if self.semantic_index > 0 {
+            format!("{}{}", self.semantic_name, self.semantic_index)
         } else {
-            String::new()
+            String::from(self.semantic_name)
         };
         write!(
             f,
-            "{}{:<20} {} v{}.{}",
-            self.semantic_name, idx, comp, self.register, mask_str
+            "{:<24} {:>5} v{}.{}",
+            name_with_idx, comp, self.register, mask_str
         )
     }
 }
