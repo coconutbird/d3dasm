@@ -55,7 +55,7 @@ pub fn format_program(program: &Program) -> String {
 pub fn format_instruction(instr: &Instruction) -> String {
     match &instr.kind {
         InstructionKind::Generic { operands } => format_generic(instr, operands),
-        InstructionKind::HsPhase => format_opcode(instr),
+        InstructionKind::HsPhase => format_mnemonic(instr),
         InstructionKind::CustomData {
             subtype,
             values,
@@ -65,11 +65,18 @@ pub fn format_instruction(instr: &Instruction) -> String {
     }
 }
 
-/// Format the opcode mnemonic of an [`Instruction`], including any
-/// modifier suffixes (saturate, resinfo return type, texture offsets).
+/// Format the bare opcode name.
+///
+/// Examples: `"mov"`, `"mad"`, `"sample"`, `"dcl_constantbuffer"`.
+pub fn format_opcode(opcode: &Opcode) -> &'static str {
+    opcode.name()
+}
+
+/// Format the full instruction mnemonic, including any modifier suffixes
+/// (saturate, resinfo return type, texture offsets).
 ///
 /// Examples: `"mad_sat"`, `"resinfo_uint"`, `"sample(1, 2, 0)"`, `"mov"`.
-pub fn format_opcode(instr: &Instruction) -> String {
+pub fn format_mnemonic(instr: &Instruction) -> String {
     let name = instr.opcode.name();
     let sat = if instr.saturate { "_sat" } else { "" };
 
@@ -99,7 +106,7 @@ pub fn format_operand(op: &Operand) -> String {
 
 /// Format a generic ALU / flow-control / sample instruction.
 fn format_generic(instr: &Instruction, operands: &[Operand]) -> String {
-    let opcode = format_opcode(instr);
+    let opcode = format_mnemonic(instr);
 
     if operands.is_empty() {
         return opcode;
@@ -517,7 +524,7 @@ impl core::fmt::Display for Operand {
 
 impl core::fmt::Display for Opcode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.name())
+        f.write_str(format_opcode(self))
     }
 }
 
