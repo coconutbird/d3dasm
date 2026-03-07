@@ -63,15 +63,20 @@ fn format_instruction(instr: &Instruction) -> String {
             operands,
         } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let interp = interpolation.map(|i| format!(" {i}")).unwrap_or_default();
             let sv = system_value
                 .filter(|s| *s != "undefined")
                 .map(|s| format!(", {s}"))
                 .unwrap_or_default();
             if ops.is_empty() {
-                format!("{name}{interp}{sv}")
+                if let Some(interp) = interpolation {
+                    format!("{name} {interp}{sv}")
+                } else {
+                    format!("{name}{sv}")
+                }
+            } else if let Some(interp) = interpolation {
+                format!("{name} {interp}, {}{sv}", ops.join(", "))
             } else {
-                format!("{name}{interp}, {}{sv}", ops.join(", "))
+                format!("{name} {}{sv}", ops.join(", "))
             }
         }
         InstructionKind::DclOutput {
@@ -221,7 +226,16 @@ fn format_operand(op: &Operand) -> String {
     match op.indices.len() {
         0 => {}
         1 => {
-            name.push_str(&format_index(&op.indices[0]));
+            // 1D: simple registers like r0, v1 use bare number; others use brackets
+            let idx_str = format_index(&op.indices[0]);
+            if matches!(
+                &op.indices[0],
+                OperandIndex::Relative(_) | OperandIndex::RelativePlusImm(_, _)
+            ) {
+                name.push_str(&format!("[{idx_str}]"));
+            } else {
+                name.push_str(&idx_str);
+            }
         }
         2 => {
             name.push_str(&format_index(&op.indices[0]));
@@ -259,7 +273,7 @@ fn format_index(idx: &OperandIndex) -> String {
         OperandIndex::Imm32(v) => format!("{v}"),
         OperandIndex::Imm64(v) => format!("{v}"),
         OperandIndex::Relative(sub) => format_operand(sub),
-        OperandIndex::RelativePlusImm(imm, sub) => format!("{imm} + {}", format_operand(sub)),
+        OperandIndex::RelativePlusImm(imm, sub) => format!("{} + {imm}", format_operand(sub)),
     }
 }
 
