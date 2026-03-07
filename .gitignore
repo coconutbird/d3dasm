@@ -1,6 +1,9 @@
 # Build
 /target
 
+# Proprietary shader data
+/shaders
+
 # macOS
 .DS_Store
 
