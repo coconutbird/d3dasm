@@ -41,6 +41,7 @@ fn main() {
                 "ISGN" | "ISG1" => print_signature("Input", chunk.data),
                 "OSGN" | "OSG1" | "OSG5" => print_signature("Output", chunk.data),
                 "SHEX" | "SHDR" => print_shex(chunk.data),
+                "STAT" => print_stat(chunk.data),
                 _ => {
                     println!("// Chunk: {} ({} bytes)", chunk.fourcc_str(), chunk.size);
                 }
@@ -89,4 +90,10 @@ fn print_signature(label: &str, data: &[u8]) {
 fn print_shex(data: &[u8]) {
     let asm = dxbc::shex::disassemble(data);
     print!("{asm}");
+}
+
+fn print_stat(data: &[u8]) {
+    if let Some(stats) = dxbc::stat::parse_stat(data) {
+        print!("{stats}");
+    }
 }

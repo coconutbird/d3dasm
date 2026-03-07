@@ -8,6 +8,8 @@ pub struct Program {
     pub major_version: u32,
     pub minor_version: u32,
     pub instructions: Vec<Instruction>,
+    /// Warnings encountered during decoding (malformed tokens, truncated data, etc.).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

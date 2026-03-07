@@ -30,15 +30,37 @@ pub fn decode(data: &[u8]) -> Option<Program> {
     };
 
     let mut instructions = Vec::new();
+    let mut warnings = Vec::new();
     let mut offset = 8;
     let end = (length_dwords * 4).min(data.len());
+
+    if length_dwords * 4 > data.len() {
+        warnings.push(format!(
+            "SHEX header claims {} dwords ({} bytes) but chunk is only {} bytes",
+            length_dwords,
+            length_dwords * 4,
+            data.len()
+        ));
+    }
 
     while offset + 4 <= end {
         let token = read_u32(data, offset);
         let opcode_val = token & 0x7FF;
         let instr_len = instruction_length(token, opcode_val, data, offset, end);
 
-        if instr_len == 0 || offset + instr_len * 4 > end {
+        if instr_len == 0 {
+            warnings.push(format!(
+                "instruction at byte offset {offset} has zero length, stopping"
+            ));
+            break;
+        }
+        if offset + instr_len * 4 > end {
+            warnings.push(format!(
+                "instruction at byte offset {offset} extends past end of chunk \
+                 (needs {} bytes, only {} available)",
+                instr_len * 4,
+                end - offset
+            ));
             break;
         }
 
@@ -55,6 +77,7 @@ pub fn decode(data: &[u8]) -> Option<Program> {
         major_version: major,
         minor_version: minor,
         instructions,
+        warnings,
     })
 }
 

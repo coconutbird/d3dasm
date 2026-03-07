@@ -16,6 +16,10 @@ pub fn format_program(program: &Program) -> String {
 
     let mut indent = 0u32;
 
+    for w in &program.warnings {
+        let _ = writeln!(out, "// WARNING: {w}");
+    }
+
     for instr in &program.instructions {
         // Pre-indent decrease for closing control flow
         match instr.opcode {
