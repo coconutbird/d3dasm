@@ -75,6 +75,16 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     let token0 = tokens[0];
     let saturate = (token0 >> 13) & 1 != 0;
 
+    // Extract resinfo return type (bits [11:12]) for resinfo opcode
+    let resinfo_return_type = if op == Opcode::Resinfo {
+        Some((token0 >> 11) & 0x3)
+    } else {
+        None
+    };
+
+    // Extract texture offsets from extended opcode token if present
+    let tex_offsets = decode_extended_tex_offsets(tokens);
+
     let kind = match op {
         Opcode::CustomData => decode_custom_data(tokens),
         Opcode::DclGlobalFlags => decode_dcl_global_flags(token0),
@@ -89,6 +99,15 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
         }
         Opcode::DclResource => decode_dcl_resource(tokens),
         Opcode::DclUnorderedAccessViewTyped => decode_dcl_uav_typed(tokens),
+        Opcode::DclUnorderedAccessViewRaw => decode_dcl_uav_raw(tokens),
+        Opcode::DclUnorderedAccessViewStructured => decode_dcl_uav_structured(tokens),
+        Opcode::DclResourceRaw => decode_dcl_resource_raw(tokens),
+        Opcode::DclResourceStructured => decode_dcl_resource_structured(tokens),
+        Opcode::DclStream => {
+            // dcl_stream has a single stream operand — decode it generically
+            decode_generic(tokens)
+        }
+        Opcode::DclIndexRange => decode_dcl_index_range(tokens),
         Opcode::DclSampler => decode_dcl_sampler(tokens),
         Opcode::DclConstantBuffer => decode_dcl_cb(tokens),
         Opcode::DclTemps => InstructionKind::DclTemps {
@@ -137,6 +156,8 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     Instruction {
         opcode: op,
         saturate,
+        resinfo_return_type,
+        tex_offsets,
         kind,
     }
 }
@@ -316,6 +337,105 @@ fn decode_dcl_uav_typed(tokens: &[u32]) -> InstructionKind {
         dimension,
         return_type,
         operands: decode_operands(&tokens[..operand_end], 1),
+    }
+}
+
+fn decode_dcl_uav_raw(tokens: &[u32]) -> InstructionKind {
+    let flags = (tokens[0] >> 16) & 0xFF;
+    InstructionKind::DclUavRaw {
+        flags,
+        operands: decode_operands(tokens, 1),
+    }
+}
+
+fn decode_dcl_uav_structured(tokens: &[u32]) -> InstructionKind {
+    let flags = (tokens[0] >> 16) & 0xFF;
+    // Last token is the byte stride
+    let stride = if tokens.len() >= 3 {
+        tokens[tokens.len() - 1]
+    } else {
+        0
+    };
+    let operand_end = if tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    InstructionKind::DclUavStructured {
+        flags,
+        stride,
+        operands: decode_operands(&tokens[..operand_end], 1),
+    }
+}
+
+fn decode_dcl_resource_raw(tokens: &[u32]) -> InstructionKind {
+    InstructionKind::DclResourceRaw {
+        operands: decode_operands(tokens, 1),
+    }
+}
+
+fn decode_dcl_resource_structured(tokens: &[u32]) -> InstructionKind {
+    // Last token is the byte stride
+    let stride = if tokens.len() >= 3 {
+        tokens[tokens.len() - 1]
+    } else {
+        0
+    };
+    let operand_end = if tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    InstructionKind::DclResourceStructured {
+        stride,
+        operands: decode_operands(&tokens[..operand_end], 1),
+    }
+}
+
+fn decode_dcl_index_range(tokens: &[u32]) -> InstructionKind {
+    // Last token is the register count
+    let count = if tokens.len() >= 3 {
+        tokens[tokens.len() - 1]
+    } else {
+        0
+    };
+    let operand_end = if tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    InstructionKind::DclIndexRange {
+        operands: decode_operands(&tokens[..operand_end], 1),
+        count,
+    }
+}
+
+/// Extract texture offsets (u, v, w) from the extended opcode token.
+/// Returns None if there's no extended token or if it's not a sample offset type.
+fn decode_extended_tex_offsets(tokens: &[u32]) -> Option<[i8; 3]> {
+    let token0 = tokens[0];
+    if (token0 >> 31) & 1 == 0 || tokens.len() < 2 {
+        return None;
+    }
+    let ext = tokens[1];
+    let ext_type = ext & 0x3F;
+    // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
+    if ext_type != 1 {
+        return None;
+    }
+    // Offsets are 4-bit signed values at bits [9:12], [13:16], [17:20]
+    let u = sign_extend_4bit((ext >> 9) & 0xF);
+    let v = sign_extend_4bit((ext >> 13) & 0xF);
+    let w = sign_extend_4bit((ext >> 17) & 0xF);
+    Some([u, v, w])
+}
+
+/// Sign-extend a 4-bit value to i8.
+fn sign_extend_4bit(val: u32) -> i8 {
+    if val & 0x8 != 0 {
+        (val | 0xFFFFFFF0) as i32 as i8
+    } else {
+        val as i8
     }
 }
 

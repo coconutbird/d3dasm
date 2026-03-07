@@ -14,6 +14,10 @@ pub struct Program {
 pub struct Instruction {
     pub opcode: Opcode,
     pub saturate: bool,
+    /// resinfo return type: 0=float, 1=rcpFloat, 2=uint
+    pub resinfo_return_type: Option<u32>,
+    /// Texture sample/ld offsets from extended opcode token (u,v,w as signed 4-bit).
+    pub tex_offsets: Option<[i8; 3]>,
     pub kind: InstructionKind,
 }
 
@@ -97,6 +101,27 @@ pub enum InstructionKind {
         dimension: &'static str,
         return_type: [ReturnType; 4],
         operands: Vec<Operand>,
+    },
+    DclUavRaw {
+        flags: u32,
+        operands: Vec<Operand>,
+    },
+    DclUavStructured {
+        flags: u32,
+        stride: u32,
+        operands: Vec<Operand>,
+    },
+    DclResourceRaw {
+        operands: Vec<Operand>,
+    },
+    DclResourceStructured {
+        stride: u32,
+        operands: Vec<Operand>,
+    },
+    // DclStream is handled as Generic (operand carries the stream index)
+    DclIndexRange {
+        operands: Vec<Operand>,
+        count: u32,
     },
     HsPhase,
     CustomData {

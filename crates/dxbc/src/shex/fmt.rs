@@ -51,12 +51,6 @@ fn format_instruction(instr: &Instruction) -> String {
                 format!("{name}{sat}")
             } else {
                 // Determine active component count from the destination (first operand) mask.
-                // Source swizzles are truncated to this width since DXBC always encodes
-                // 4 swizzle slots but only the first N are meaningful.
-                //
-                // However, some instructions read more source components than the dest
-                // mask width:  dp2 always reads 2, dp3 reads 3, dp4 reads 4, etc.
-                // For those, we use the opcode-implied width instead.
                 let dest_width = dest_component_count(operands.first());
                 let src_width = source_width_override(instr.opcode, dest_width);
                 let mut ops = Vec::with_capacity(operands.len());
@@ -67,7 +61,20 @@ fn format_instruction(instr: &Instruction) -> String {
                         ops.push(format_operand_with_width(op, src_width));
                     }
                 }
-                format!("{name}{sat} {}", ops.join(", "))
+                // resinfo return type suffix
+                let suffix = match instr.resinfo_return_type {
+                    Some(1) => "_rcpFloat",
+                    Some(2) => "_uint",
+                    _ => "",
+                };
+                // Texture sample offsets from extended opcode
+                let offsets = match instr.tex_offsets {
+                    Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
+                        format!("({u}, {v}, {w})")
+                    }
+                    _ => String::new(),
+                };
+                format!("{name}{suffix}{sat}{offsets} {}", ops.join(", "))
             }
         }
         InstructionKind::DclGlobalFlags { flags } => {
@@ -186,6 +193,33 @@ fn format_instruction(instr: &Instruction) -> String {
                 ops.join(", ")
             )
         }
+        InstructionKind::DclUavRaw { flags, operands } => {
+            let ops: Vec<String> = operands.iter().map(format_operand).collect();
+            let flag_str = format_uav_flags(*flags);
+            format!("dcl_uav_raw{flag_str} {}", ops.join(", "))
+        }
+        InstructionKind::DclUavStructured {
+            flags,
+            stride,
+            operands,
+        } => {
+            let ops: Vec<String> = operands.iter().map(format_operand).collect();
+            let flag_str = format_uav_flags(*flags);
+            format!("dcl_uav_structured{flag_str} {}, {stride}", ops.join(", "))
+        }
+        InstructionKind::DclResourceRaw { operands } => {
+            let ops: Vec<String> = operands.iter().map(format_operand).collect();
+            format!("dcl_resource_raw {}", ops.join(", "))
+        }
+        InstructionKind::DclResourceStructured { stride, operands } => {
+            let ops: Vec<String> = operands.iter().map(format_operand).collect();
+            format!("dcl_resource_structured {}, {stride}", ops.join(", "))
+        }
+
+        InstructionKind::DclIndexRange { operands, count } => {
+            let ops: Vec<String> = operands.iter().map(format_operand).collect();
+            format!("dcl_indexRange {}, {count}", ops.join(", "))
+        }
         InstructionKind::HsPhase => name.to_string(),
         InstructionKind::CustomData {
             subtype,
@@ -193,6 +227,18 @@ fn format_instruction(instr: &Instruction) -> String {
             raw_dword_count,
         } => format_custom_data(subtype, values, *raw_dword_count),
     }
+}
+
+fn format_uav_flags(flags: u32) -> String {
+    // Bit 0 = globally coherent, bit 1 = rasterizer ordered (ROV)
+    let mut parts = Vec::new();
+    if flags & 0x1 != 0 {
+        parts.push("_glc");
+    }
+    if flags & 0x2 != 0 {
+        parts.push("_opc");
+    }
+    parts.join("")
 }
 
 fn format_custom_data(
