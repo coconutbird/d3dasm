@@ -85,23 +85,35 @@ impl fmt::Display for Shader<'_> {
                 writeln!(f, "// Compiled with: {}", rd.creator)?;
             }
             if !rd.bindings.is_empty() {
+                let nw = rd
+                    .bindings
+                    .iter()
+                    .map(|b| b.name.len())
+                    .max()
+                    .unwrap_or(4)
+                    .max(4);
                 writeln!(f, "//")?;
                 writeln!(f, "// Resource Bindings:")?;
-                writeln!(f, "// {:<30} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
-                writeln!(f, "// {:-<30} {:-<12} {:-<8} ----", "", "", "")?;
+                writeln!(f, "// {:<nw$} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
+                writeln!(f, "// {:-<nw$} {:-<12} {:-<8} ----", "", "", "")?;
                 for b in &rd.bindings {
-                    writeln!(f, "// {b}")?;
+                    writeln!(f, "// {:<nw$} {}", b.name, b.format_columns())?;
                 }
             }
             for cb in &rd.constant_buffers {
+                let nw = cb
+                    .variables
+                    .iter()
+                    .map(|v| v.name.len())
+                    .max()
+                    .unwrap_or(4)
+                    .max(4);
                 writeln!(f, "//")?;
                 writeln!(f, "// cbuffer {} ({} bytes)", cb.name, cb.size)?;
+                writeln!(f, "//   {:<nw$} {:<6}  {:<4}", "Name", "Offset", "Size")?;
+                writeln!(f, "//   {:-<nw$} {:-<6}  {:-<4}", "", "", "")?;
                 for v in &cb.variables {
-                    writeln!(
-                        f,
-                        "//   {:<30} offset={:<4} size={}",
-                        v.name, v.offset, v.size
-                    )?;
+                    writeln!(f, "//   {:<nw$} {:<6}  {:<4}", v.name, v.offset, v.size)?;
                 }
             }
             writeln!(f, "//")?;

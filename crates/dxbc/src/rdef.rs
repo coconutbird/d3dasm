@@ -35,9 +35,9 @@ pub struct ResourceBinding<'a> {
     pub flags: u32,
 }
 
-impl fmt::Display for ResourceBinding<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ty = match self.input_type {
+impl ResourceBinding<'_> {
+    fn type_name(&self) -> &'static str {
+        match self.input_type {
             0 => "cbuffer",
             1 => "tbuffer",
             2 => "texture",
@@ -51,8 +51,11 @@ impl fmt::Display for ResourceBinding<'_> {
             10 => "uav_consume_structured",
             11 => "uav_rwstructured_with_counter",
             _ => "unknown",
-        };
-        let dim = match self.dimension {
+        }
+    }
+
+    fn dim_name(&self) -> &'static str {
+        match self.dimension {
             1 => "buf",
             2 => "1d",
             3 => "2d",
@@ -63,13 +66,24 @@ impl fmt::Display for ResourceBinding<'_> {
             8 => "2darray",
             9 => "2dMSarray",
             10 => "cubearray",
-            _ => "",
-        };
-        write!(
-            f,
-            "{:<30} {:<12} {:<8} {}",
-            self.name, ty, dim, self.bind_point
+            _ => "NA",
+        }
+    }
+
+    /// Format the type, dimension, and slot columns (everything after the name).
+    pub fn format_columns(&self) -> alloc::string::String {
+        alloc::format!(
+            "{:<12} {:<8} {}",
+            self.type_name(),
+            self.dim_name(),
+            self.bind_point
         )
+    }
+}
+
+impl fmt::Display for ResourceBinding<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:<30} {}", self.name, self.format_columns())
     }
 }
 
