@@ -1,33 +1,32 @@
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
 use crate::util::{read_cstring, read_u32};
 
 #[derive(Debug)]
-pub struct ResourceDef {
-    pub constant_buffers: Vec<CBufferDef>,
-    pub bindings: Vec<ResourceBinding>,
-    pub creator: String,
+pub struct ResourceDef<'a> {
+    pub constant_buffers: Vec<CBufferDef<'a>>,
+    pub bindings: Vec<ResourceBinding<'a>>,
+    pub creator: &'a str,
 }
 
 #[derive(Debug)]
-pub struct CBufferDef {
-    pub name: String,
-    pub variables: Vec<CBufferVariable>,
+pub struct CBufferDef<'a> {
+    pub name: &'a str,
+    pub variables: Vec<CBufferVariable<'a>>,
     pub size: u32,
 }
 
 #[derive(Debug)]
-pub struct CBufferVariable {
-    pub name: String,
+pub struct CBufferVariable<'a> {
+    pub name: &'a str,
     pub offset: u32,
     pub size: u32,
 }
 
 #[derive(Debug)]
-pub struct ResourceBinding {
-    pub name: String,
+pub struct ResourceBinding<'a> {
+    pub name: &'a str,
     pub input_type: u32,
     pub return_type: u32,
     pub dimension: u32,
@@ -36,7 +35,7 @@ pub struct ResourceBinding {
     pub flags: u32,
 }
 
-impl fmt::Display for ResourceBinding {
+impl fmt::Display for ResourceBinding<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ty = match self.input_type {
             0 => "cbuffer",
@@ -84,7 +83,7 @@ impl fmt::Display for ResourceBinding {
 ///  16: u32 target_version  (minor | major<<8 | type<<16)
 ///  20: u32 flags
 ///  24: u32 creator_offset
-pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
+pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
     if data.len() < 28 {
         return None;
     }
@@ -157,10 +156,10 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef> {
         if creator_off < data.len() {
             read_cstring(data, creator_off)
         } else {
-            String::new()
+            ""
         }
     } else {
-        String::new()
+        ""
     };
 
     Some(ResourceDef {

@@ -1,7 +1,5 @@
 //! Shared low-level helpers for reading binary data.
 
-use alloc::string::String;
-
 /// Read a little-endian `u32` from `data` at the given byte `offset`.
 ///
 /// # Panics
@@ -14,15 +12,16 @@ pub(crate) fn read_u32(data: &[u8], offset: usize) -> u32 {
 
 /// Read a null-terminated C string starting at `offset`.
 ///
-/// Returns an empty string if `offset` is out of bounds.
-/// Non-UTF-8 bytes are replaced with the Unicode replacement character.
-pub(crate) fn read_cstring(data: &[u8], offset: usize) -> String {
+/// Returns an empty string if `offset` is out of bounds or the bytes
+/// are not valid UTF-8. In practice, all strings emitted by the HLSL
+/// compiler are pure ASCII.
+pub(crate) fn read_cstring(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
-        return String::new();
+        return "";
     }
     let mut end = offset;
     while end < data.len() && data[end] != 0 {
         end += 1;
     }
-    String::from_utf8_lossy(&data[offset..end]).into_owned()
+    core::str::from_utf8(&data[offset..end]).unwrap_or("")
 }

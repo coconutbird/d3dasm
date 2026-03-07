@@ -1,132 +1,140 @@
-use std::fmt::Write;
+use std::fmt;
 
 /// Re-export the DXBC backend.
 pub use dxbc;
+use dxbc::container::DxbcContainer;
+use dxbc::rdef::ResourceDef;
+use dxbc::shex::ir::Program;
+use dxbc::signature::SignatureElement;
+use dxbc::stat::ShaderStats;
 
-/// Scan a byte buffer and extract all shader containers.
+/// A fully parsed shader from a DXBC container.
 ///
-/// Currently supports DXBC (SM4/SM5). Will support DXIL in the future.
-pub fn scan(data: &[u8]) -> Vec<dxbc::container::DxbcContainer<'_>> {
+/// All chunk data is parsed eagerly. String fields in `resource_def` and
+/// signatures borrow directly from the input byte slice (zero-copy).
+/// The instruction IR (`program`) is decoded from packed bit-fields and
+/// always allocates.
+#[derive(Debug)]
+pub struct Shader<'a> {
+    /// Byte offset of this container in the source file.
+    pub offset: usize,
+    /// Total size of the DXBC container in bytes.
+    pub size: u32,
+    /// Decoded shader program (instructions, version, warnings).
+    pub program: Option<Program>,
+    /// Resource definitions (constant buffers, bindings, creator string).
+    pub resource_def: Option<ResourceDef<'a>>,
+    /// Input signature elements.
+    pub input_signature: Vec<SignatureElement<'a>>,
+    /// Output signature elements.
+    pub output_signature: Vec<SignatureElement<'a>>,
+    /// Shader statistics (instruction counts, register usage, etc.).
+    pub stats: Option<ShaderStats>,
+}
+
+/// Parse all DXBC shaders found in a raw byte buffer.
+///
+/// Scans for DXBC containers and parses each one into a structured
+/// [`Shader`]. Returns an empty `Vec` if no containers are found.
+pub fn parse(data: &[u8]) -> Vec<Shader<'_>> {
     dxbc::container::scan_dxbc(data)
+        .iter()
+        .map(parse_container)
+        .collect()
 }
 
-/// Disassemble all shaders found in a raw byte buffer.
-///
-/// Scans for DXBC containers and formats each one into human-readable
-/// disassembly text, including resource definitions, signatures,
-/// shader instructions, and statistics.
-///
-/// Returns an empty string if no DXBC containers are found.
-pub fn disassemble(data: &[u8]) -> String {
-    let containers = scan(data);
-    if containers.is_empty() {
-        return String::new();
-    }
+/// Parse a single DXBC container into a [`Shader`].
+pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
+    let mut shader = Shader {
+        offset: container.offset_in_file,
+        size: container.total_size,
+        program: None,
+        resource_def: None,
+        input_signature: Vec::new(),
+        output_signature: Vec::new(),
+        stats: None,
+    };
 
-    let mut out = String::new();
-    for (i, container) in containers.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "// ============================================================"
-        );
-        let _ = writeln!(out, "// Shader #{i}: {container}");
-        let _ = writeln!(
-            out,
-            "// ============================================================"
-        );
-
-        for chunk in &container.chunks {
-            match chunk.fourcc_str() {
-                "RDEF" => format_rdef(&mut out, chunk.data),
-                "ISGN" | "ISG1" => format_signature(&mut out, "Input", chunk.data),
-                "OSGN" | "OSG1" | "OSG5" => format_signature(&mut out, "Output", chunk.data),
-                "SHEX" | "SHDR" => format_shex(&mut out, chunk.data),
-                "STAT" => format_stat(&mut out, chunk.data),
-                _ => {
-                    let _ = writeln!(
-                        out,
-                        "// Chunk: {} ({} bytes)",
-                        chunk.fourcc_str(),
-                        chunk.size
-                    );
-                }
-            }
-        }
-        let _ = writeln!(out);
-    }
-    out
-}
-
-/// Disassemble a single DXBC container into text.
-pub fn disassemble_container(container: &dxbc::container::DxbcContainer<'_>) -> String {
-    let mut out = String::new();
     for chunk in &container.chunks {
         match chunk.fourcc_str() {
-            "RDEF" => format_rdef(&mut out, chunk.data),
-            "ISGN" | "ISG1" => format_signature(&mut out, "Input", chunk.data),
-            "OSGN" | "OSG1" | "OSG5" => format_signature(&mut out, "Output", chunk.data),
-            "SHEX" | "SHDR" => format_shex(&mut out, chunk.data),
-            "STAT" => format_stat(&mut out, chunk.data),
-            _ => {
-                let _ = writeln!(
-                    out,
-                    "// Chunk: {} ({} bytes)",
-                    chunk.fourcc_str(),
-                    chunk.size
-                );
+            "RDEF" => shader.resource_def = dxbc::rdef::parse_rdef(chunk.data),
+            "ISGN" | "ISG1" => {
+                shader.input_signature = dxbc::signature::parse_signature(chunk.data);
             }
+            "OSGN" | "OSG1" | "OSG5" => {
+                shader.output_signature = dxbc::signature::parse_signature(chunk.data);
+            }
+            "SHEX" | "SHDR" => shader.program = dxbc::shex::decode::decode(chunk.data),
+            "STAT" => shader.stats = dxbc::stat::parse_stat(chunk.data),
+            _ => {}
         }
     }
-    out
+
+    shader
 }
 
-fn format_rdef(out: &mut String, data: &[u8]) {
-    if let Some(rd) = dxbc::rdef::parse_rdef(data) {
-        if !rd.creator.is_empty() {
-            let _ = writeln!(out, "// Compiled with: {}", rd.creator);
-        }
-        if !rd.bindings.is_empty() {
-            let _ = writeln!(out, "//");
-            let _ = writeln!(out, "// Resource Bindings:");
-            let _ = writeln!(out, "// {:<28} {:<12} {:<8} Slot", "Name", "Type", "Dim");
-            let _ = writeln!(out, "// {:-<28} {:-<12} {:-<8} ----", "", "", "");
-            for b in &rd.bindings {
-                let _ = writeln!(out, "// {b}");
+// ---------------------------------------------------------------------------
+// Display — produces the same disassembly text as before
+// ---------------------------------------------------------------------------
+
+impl fmt::Display for Shader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Resource definitions
+        if let Some(rd) = &self.resource_def {
+            if !rd.creator.is_empty() {
+                writeln!(f, "// Compiled with: {}", rd.creator)?;
             }
-        }
-        for cb in &rd.constant_buffers {
-            let _ = writeln!(out, "//");
-            let _ = writeln!(out, "// cbuffer {} ({} bytes)", cb.name, cb.size);
-            for v in &cb.variables {
-                let _ = writeln!(
-                    out,
-                    "//   {:<30} offset={:<4} size={}",
-                    v.name, v.offset, v.size
-                );
+            if !rd.bindings.is_empty() {
+                writeln!(f, "//")?;
+                writeln!(f, "// Resource Bindings:")?;
+                writeln!(f, "// {:<28} {:<12} {:<8} Slot", "Name", "Type", "Dim")?;
+                writeln!(f, "// {:-<28} {:-<12} {:-<8} ----", "", "", "")?;
+                for b in &rd.bindings {
+                    writeln!(f, "// {b}")?;
+                }
             }
+            for cb in &rd.constant_buffers {
+                writeln!(f, "//")?;
+                writeln!(f, "// cbuffer {} ({} bytes)", cb.name, cb.size)?;
+                for v in &cb.variables {
+                    writeln!(
+                        f,
+                        "//   {:<30} offset={:<4} size={}",
+                        v.name, v.offset, v.size
+                    )?;
+                }
+            }
+            writeln!(f, "//")?;
         }
-        let _ = writeln!(out, "//");
-    }
-}
 
-fn format_signature(out: &mut String, label: &str, data: &[u8]) {
-    let elements = dxbc::signature::parse_signature(data);
-    if !elements.is_empty() {
-        let _ = writeln!(out, "// {label} Signature:");
-        for e in &elements {
-            let _ = writeln!(out, "//   {e}");
+        // Input signature
+        if !self.input_signature.is_empty() {
+            writeln!(f, "// Input Signature:")?;
+            for e in &self.input_signature {
+                writeln!(f, "//   {e}")?;
+            }
+            writeln!(f, "//")?;
         }
-        let _ = writeln!(out, "//");
-    }
-}
 
-fn format_shex(out: &mut String, data: &[u8]) {
-    let asm = dxbc::shex::disassemble(data);
-    out.push_str(&asm);
-}
+        // Output signature
+        if !self.output_signature.is_empty() {
+            writeln!(f, "// Output Signature:")?;
+            for e in &self.output_signature {
+                writeln!(f, "//   {e}")?;
+            }
+            writeln!(f, "//")?;
+        }
 
-fn format_stat(out: &mut String, data: &[u8]) {
-    if let Some(stats) = dxbc::stat::parse_stat(data) {
-        let _ = write!(out, "{stats}");
+        // Shader instructions
+        if let Some(program) = &self.program {
+            write!(f, "{}", dxbc::shex::fmt::format_program(program))?;
+        }
+
+        // Statistics
+        if let Some(stats) = &self.stats {
+            write!(f, "{stats}")?;
+        }
+
+        Ok(())
     }
 }

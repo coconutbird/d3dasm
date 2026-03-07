@@ -7,8 +7,8 @@ use crate::util::{read_cstring, read_u32};
 
 /// A parsed input or output signature element.
 #[derive(Debug)]
-pub struct SignatureElement {
-    pub semantic_name: String,
+pub struct SignatureElement<'a> {
+    pub semantic_name: &'a str,
     pub semantic_index: u32,
     pub system_value: u32,
     pub component_type: u32,
@@ -17,7 +17,7 @@ pub struct SignatureElement {
     pub rw_mask: u8,
 }
 
-impl fmt::Display for SignatureElement {
+impl fmt::Display for SignatureElement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let comp = match self.component_type {
             1 => "uint",
@@ -57,7 +57,7 @@ fn format_mask(mask: u8) -> String {
 }
 
 /// Parse an ISGN, OSGN, ISG1, OSG1, or OSG5 chunk.
-pub fn parse_signature(data: &[u8]) -> Vec<SignatureElement> {
+pub fn parse_signature(data: &[u8]) -> Vec<SignatureElement<'_>> {
     if data.len() < 8 {
         return Vec::new();
     }

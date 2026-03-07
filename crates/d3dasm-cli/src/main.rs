@@ -26,14 +26,24 @@ fn main() {
         }
     };
 
-    let output = d3dasm::disassemble(&data);
-    if output.is_empty() {
+    let shaders = d3dasm::parse(&data);
+    if shaders.is_empty() {
         eprintln!("No DXBC shader bytecode found in {}", path.display());
         process::exit(1);
     }
 
     println!("// File: {}", path.display());
-    println!("// Found {} DXBC shader(s)", d3dasm::scan(&data).len());
+    println!("// Found {} DXBC shader(s)", shaders.len());
     println!();
-    print!("{output}");
+
+    for (i, shader) in shaders.iter().enumerate() {
+        println!("// ============================================================");
+        println!(
+            "// Shader #{i}: DXBC at 0x{:X}, size={}",
+            shader.offset, shader.size
+        );
+        println!("// ============================================================");
+        print!("{shader}");
+        println!();
+    }
 }
