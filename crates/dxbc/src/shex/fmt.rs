@@ -372,7 +372,35 @@ fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
         | Opcode::Lod
         | Opcode::SamplePos
         | Opcode::SampleInfo
-        | Opcode::BufInfo => None,
+        | Opcode::BufInfo
+        // Store/atomic instructions: operand widths are dictated by the
+        // resource, not the destination mask.
+        | Opcode::StoreUavTyped
+        | Opcode::StoreRaw
+        | Opcode::StoreStructured
+        | Opcode::AtomicAnd
+        | Opcode::AtomicOr
+        | Opcode::AtomicXor
+        | Opcode::AtomicCmpStore
+        | Opcode::AtomicIAdd
+        | Opcode::AtomicIMax
+        | Opcode::AtomicIMin
+        | Opcode::AtomicUMax
+        | Opcode::AtomicUMin
+        | Opcode::ImmAtomicAlloc
+        | Opcode::ImmAtomicConsume
+        | Opcode::ImmAtomicIAdd
+        | Opcode::ImmAtomicAnd
+        | Opcode::ImmAtomicOr
+        | Opcode::ImmAtomicXor
+        | Opcode::ImmAtomicExch
+        | Opcode::ImmAtomicCmpExch
+        | Opcode::ImmAtomicIMax
+        | Opcode::ImmAtomicIMin
+        | Opcode::ImmAtomicUMax
+        | Opcode::ImmAtomicUMin
+        | Opcode::LdRaw
+        | Opcode::LdStructured => None,
         _ => dest_width,
     }
 }
