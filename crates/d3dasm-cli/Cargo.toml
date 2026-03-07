@@ -1,0 +1,13 @@
+[package]
+name = "d3dasm-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool for disassembling Direct3D shader bytecode"
+
+[[bin]]
+name = "d3dasm"
+path = "src/main.rs"
+
+[dependencies]
+d3dasm = { path = "../d3dasm" }
+dxbc = { path = "../dxbc" }

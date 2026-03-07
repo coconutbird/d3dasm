@@ -1,0 +1,8 @@
+[package]
+name = "d3dasm"
+version = "0.1.0"
+edition = "2024"
+description = "Generic Direct3D shader disassembly interface"
+
+[dependencies]
+dxbc = { path = "../dxbc" }
