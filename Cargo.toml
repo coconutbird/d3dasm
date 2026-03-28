@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+
+# Keep memchr optimized even in debug builds so scanning is still efficient.
+[profile.dev.package.memchr]
+opt-level = 2

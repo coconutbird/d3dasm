@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use smallvec::{SmallVec, smallvec};
 
 use super::ir::*;
 use super::opcodes::Opcode;
@@ -295,7 +296,7 @@ fn decode_custom_data(tokens: &[u32]) -> InstructionKind {
 
 fn decode_dcl_global_flags(token: u32) -> InstructionKind {
     let flags_bits = (token >> 11) & 0x1FFF;
-    let mut flags = Vec::new();
+    let mut flags = SmallVec::new();
     let names: &[&str] = &[
         "refactoringAllowed",
         "enableDoublePrecisionFloatOps",
@@ -698,7 +699,7 @@ fn decode_dcl_function_table(tokens: &[u32]) -> InstructionKind {
     } else {
         0
     };
-    let body_indices: Vec<u32> = tokens.iter().skip(3).take(count).copied().collect();
+    let body_indices: SmallU32Vec = tokens.iter().skip(3).take(count).copied().collect();
     InstructionKind::DclFunctionTable {
         table_index,
         body_indices,
@@ -715,7 +716,7 @@ fn decode_dcl_interface(tokens: &[u32]) -> InstructionKind {
     } else {
         0
     };
-    let table_indices: Vec<u32> = tokens.iter().skip(4).take(num_types).copied().collect();
+    let table_indices: SmallU32Vec = tokens.iter().skip(4).take(num_types).copied().collect();
     InstructionKind::DclInterface {
         interface_index,
         num_call_sites,
@@ -743,8 +744,8 @@ fn decode_generic(tokens: &[u32]) -> InstructionKind {
 
 /// Decode operands starting at `start`, returning the operands and the
 /// token index just past the last consumed operand token.
-fn decode_operands_with_pos(tokens: &[u32], start: usize) -> (Vec<Operand>, usize) {
-    let mut result = Vec::new();
+fn decode_operands_with_pos(tokens: &[u32], start: usize) -> (Operands, usize) {
+    let mut result = SmallVec::new();
     let mut pos = start;
     while pos < tokens.len() {
         let (op, consumed) = decode_one_operand(tokens, pos);
@@ -757,7 +758,7 @@ fn decode_operands_with_pos(tokens: &[u32], start: usize) -> (Vec<Operand>, usiz
     (result, pos)
 }
 
-fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
+fn decode_operands(tokens: &[u32], start: usize) -> Operands {
     decode_operands_with_pos(tokens, start).0
 }
 
@@ -787,8 +788,8 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
     let num_components = components.num_components();
 
     // Decode indices and immediates
-    let mut indices = Vec::new();
-    let mut immediate_values = Vec::new();
+    let mut indices = SmallVec::new();
+    let mut immediate_values = SmallVec::new();
 
     match index_dim {
         0 => {
@@ -932,7 +933,7 @@ fn empty_operand() -> Operand {
         components: ComponentSelect::ZeroComponent,
         negate: false,
         abs: false,
-        indices: Vec::new(),
-        immediate_values: Vec::new(),
+        indices: smallvec![],
+        immediate_values: smallvec![],
     }
 }

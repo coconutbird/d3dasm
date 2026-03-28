@@ -11,3 +11,4 @@ std = ["nostdio/std"]
 [dependencies]
 memchr = { version = "2.8.0", default-features = false }
 nostdio = "0.1.0"
+smallvec = { version = "1.15.1", default-features = false, features = ["union"] }

@@ -4,7 +4,20 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use smallvec::SmallVec;
+
 use super::opcodes::Opcode;
+
+/// Inline capacity for operand lists (most instructions have 1–4 operands).
+pub type Operands = SmallVec<[Operand; 4]>;
+/// Inline capacity for operand index dimensions (max 3: 0D, 1D, 2D, 3D).
+pub type Indices = SmallVec<[OperandIndex; 3]>;
+/// Inline capacity for immediate values (typically 4 components).
+pub type Immediates = SmallVec<[u32; 4]>;
+/// Inline capacity for small u32 lists (function table entries, etc.).
+pub type SmallU32Vec = SmallVec<[u32; 8]>;
+/// Inline capacity for global flag name lists.
+pub type FlagNames = SmallVec<[&'static str; 8]>;
 
 /// A decoded SM4/SM5 shader program.
 #[derive(Debug, Clone)]
@@ -69,12 +82,12 @@ pub enum InstructionKind {
     /// A non-declaration instruction (ALU, flow-control, memory, etc.).
     Generic {
         /// Instruction operands (destination first, then sources).
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_globalFlags` — shader-wide capability flags.
     DclGlobalFlags {
         /// Active flag strings (e.g. `"refactoringAllowed"`, `"enableDoublePrecisionFloatOps"`).
-        flags: Vec<&'static str>,
+        flags: FlagNames,
     },
     /// `dcl_input` / `dcl_input_ps` — input register declaration.
     DclInput {
@@ -83,14 +96,14 @@ pub enum InstructionKind {
         /// System value semantic (e.g. `"position"`, `"undefined"`), if present.
         system_value: Option<&'static str>,
         /// Input register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_output` / `dcl_output_sgv` — output register declaration.
     DclOutput {
         /// System value semantic, if present.
         system_value: Option<&'static str>,
         /// Output register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_resource` — SRV resource declaration (Texture1D/2D/3D/Cube/etc.).
     DclResource {
@@ -102,21 +115,21 @@ pub enum InstructionKind {
         /// Per-component return types (e.g. `[Float, Float, Float, Float]`).
         return_type: [ReturnType; 4],
         /// Resource register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_sampler` — sampler state declaration.
     DclSampler {
         /// Sampler mode (`"default"`, `"comparison"`, `"mono"`).
         mode: &'static str,
         /// Sampler register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_constantbuffer` — constant-buffer binding.
     DclConstantBuffer {
         /// Access pattern (`"immediateIndexed"` or `"dynamicIndexed"`).
         access: &'static str,
         /// Constant-buffer register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_temps` — number of temporary registers.
     DclTemps {
@@ -205,14 +218,14 @@ pub enum InstructionKind {
         /// Per-component return types.
         return_type: [ReturnType; 4],
         /// UAV register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_uav_raw` — raw (byte-address) UAV declaration.
     DclUavRaw {
         /// UAV flags (globally coherent, etc.).
         flags: u32,
         /// UAV register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_uav_structured` — structured UAV declaration.
     DclUavStructured {
@@ -221,19 +234,19 @@ pub enum InstructionKind {
         /// Structure byte stride.
         stride: u32,
         /// UAV register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_resource_raw` — raw (byte-address) SRV declaration.
     DclResourceRaw {
         /// SRV register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_resource_structured` — structured SRV declaration.
     DclResourceStructured {
         /// Structure byte stride.
         stride: u32,
         /// SRV register operands.
-        operands: Vec<Operand>,
+        operands: Operands,
     },
     /// `dcl_function_body` — declares a function body slot.
     DclFunctionBody {
@@ -245,7 +258,7 @@ pub enum InstructionKind {
         /// Table index.
         table_index: u32,
         /// Function body indices in this table.
-        body_indices: Vec<u32>,
+        body_indices: SmallU32Vec,
     },
     /// `dcl_interface` — declares a class interface binding.
     DclInterface {
@@ -254,12 +267,12 @@ pub enum InstructionKind {
         /// Number of call sites using this interface.
         num_call_sites: u32,
         /// Function table indices for each type implementing the interface.
-        table_indices: Vec<u32>,
+        table_indices: SmallU32Vec,
     },
     /// `dcl_index_range` — declares an indexable register range.
     DclIndexRange {
         /// Register operands defining the range start.
-        operands: Vec<Operand>,
+        operands: Operands,
         /// Number of registers in the range.
         count: u32,
     },
@@ -480,9 +493,9 @@ pub struct Operand {
     /// Source modifier: absolute value.
     pub abs: bool,
     /// Register index levels (immediate, relative, or both).
-    pub indices: Vec<OperandIndex>,
+    pub indices: Indices,
     /// Inline immediate values (for `Immediate32` / `Immediate64` operands).
-    pub immediate_values: Vec<u32>,
+    pub immediate_values: Immediates,
 }
 
 /// How components are selected on an operand.
