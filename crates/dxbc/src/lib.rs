@@ -8,13 +8,11 @@
 //! # Quick start
 //!
 //! ```rust,ignore
-//! use dxbc::container::DxbcContainer;
-//! use dxbc::chunks::{parse_chunk, ChunkData};
+//! use dxbc::{DxbcContainer, parse_chunk, ChunkData};
 //!
 //! let container = DxbcContainer::parse(dxbc_bytes).unwrap();
 //! for chunk in &container.chunks {
-//!     let parsed = parse_chunk(&chunk.fourcc, chunk.data);
-//!     match parsed {
+//!     match parse_chunk(chunk) {
 //!         ChunkData::Shader(program) => {
 //!             println!("{}", dxbc::shex::fmt::format_program(&program));
 //!         }
@@ -27,7 +25,7 @@
 //!
 //! * **`no_std`** — the crate depends only on `alloc`; no filesystem or I/O.
 //! * **Decode** — [`shex::decode::decode`] turns raw SHEX/SHDR bytes into
-//!   [`shex::ir::Program`].
+//!   a [`Program`].
 //! * **Format** — [`shex::fmt::format_program`] renders a `Program` as
 //!   human-readable disassembly text.
 //! * **Encode** — [`shex::encode::encode`] serialises a `Program` back to
@@ -35,8 +33,6 @@
 
 #![no_std]
 extern crate alloc;
-
-pub use nostdio;
 
 /// DXBC chunk parsers for every known chunk FourCC.
 pub mod chunks;
@@ -46,3 +42,9 @@ pub mod container;
 pub mod shex;
 /// Shared helpers (C-string reading, string table builder).
 pub mod util;
+
+// Re-export the most commonly used types at the crate root.
+pub use chunks::{ChunkData, parse_chunk};
+pub use container::{DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
+pub use shex::disassemble;
+pub use shex::ir::Program;

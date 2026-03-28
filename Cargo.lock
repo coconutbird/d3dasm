@@ -112,6 +112,7 @@ dependencies = [
  "clap",
  "d3dasm",
  "dxbc",
+ "nostdio",
 ]
 
 [[package]]

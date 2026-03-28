@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::process;
 
-use dxbc::container::scan_dxbc;
-use dxbc::nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use dxbc::scan_dxbc;
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
 
 fn main() {
     let path = match std::env::args_os().nth(1) {
