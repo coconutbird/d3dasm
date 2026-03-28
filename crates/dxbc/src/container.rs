@@ -1,7 +1,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::util::read_u32;
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
+use crate::chunks::WritableChunk;
 
 const DXBC_MAGIC: &[u8; 4] = b"DXBC";
 
@@ -67,8 +69,11 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
     if offset + 0x20 > data.len() {
         return None;
     }
-    let total_size = read_u32(data, offset + 0x18);
-    let chunk_count = read_u32(data, offset + 0x1C) as usize;
+
+    let mut c = SliceCursor::new(data);
+    c.seek(SeekFrom::Start((offset + 0x18) as u64)).ok()?;
+    let total_size = c.read_u32_le().ok()?;
+    let chunk_count = c.read_u32_le().ok()? as usize;
 
     if offset + total_size as usize > data.len() {
         return None;
@@ -76,14 +81,18 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
 
     let mut chunks = Vec::with_capacity(chunk_count);
     for i in 0..chunk_count {
-        let chunk_offset_rel = read_u32(data, offset + 0x20 + i * 4) as usize;
+        // Read chunk offset from the offset table
+        c.seek(SeekFrom::Start((offset + 0x20 + i * 4) as u64))
+            .ok()?;
+        let chunk_offset_rel = c.read_u32_le().ok()? as usize;
         let chunk_abs = offset + chunk_offset_rel;
         if chunk_abs + 8 > data.len() {
             break;
         }
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&data[chunk_abs..chunk_abs + 4]);
-        let chunk_size = read_u32(data, chunk_abs + 4) as usize;
+        c.seek(SeekFrom::Start((chunk_abs + 4) as u64)).ok()?;
+        let chunk_size = c.read_u32_le().ok()? as usize;
         let chunk_data_start = chunk_abs + 8;
         let chunk_data_end = (chunk_data_start + chunk_size).min(data.len());
 
@@ -99,6 +108,43 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
         total_size,
         chunks,
     })
+}
+
+/// Build a DXBC container from a set of writable chunks.
+///
+/// Produces a valid DXBC byte stream with the standard header layout:
+/// magic(4) + hash(16 zeros) + version(4) + total_size(4) + chunk_count(4)
+/// followed by the chunk offset table and chunk entries.
+///
+/// The 16-byte hash field is left zeroed — computing the DXBC hash is a
+/// separate concern (typically only the GPU runtime validates it).
+pub fn build_dxbc(chunks: &[WritableChunk]) -> Vec<u8> {
+    let header_size = 0x20 + chunks.len() * 4;
+    let chunks_total: usize = chunks.iter().map(|c| 8 + c.data.len()).sum();
+    let total_size = header_size + chunks_total;
+
+    let mut buf = Vec::with_capacity(total_size);
+    buf.extend_from_slice(b"DXBC");
+    buf.extend_from_slice(&[0u8; 16]); // hash placeholder
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&(total_size as u32).to_le_bytes());
+    buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+
+    // Chunk offset table
+    let mut offset = header_size;
+    for c in chunks {
+        buf.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += 8 + c.data.len();
+    }
+
+    // Chunk entries: fourcc(4) + size(4) + payload
+    for c in chunks {
+        buf.extend_from_slice(&c.fourcc);
+        buf.extend_from_slice(&(c.data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&c.data);
+    }
+
+    buf
 }
 
 #[cfg(test)]

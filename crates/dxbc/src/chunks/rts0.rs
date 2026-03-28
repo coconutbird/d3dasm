@@ -3,8 +3,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::ChunkParser;
-use crate::util::read_u32;
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
+use super::{ChunkParser, ChunkWriter};
 
 /// Parsed RTS0 (root signature) chunk.
 #[derive(Debug)]
@@ -106,10 +107,6 @@ pub struct StaticSampler {
     pub visibility: ShaderVisibility,
 }
 
-fn read_f32(data: &[u8], off: usize) -> f32 {
-    f32::from_le_bytes(data[off..off + 4].try_into().unwrap())
-}
-
 fn parse_vis(v: u32) -> ShaderVisibility {
     match v {
         1 => ShaderVisibility::Vertex,
@@ -135,12 +132,13 @@ pub fn parse_rts0(data: &[u8]) -> Option<RootSignature> {
     if data.len() < 24 {
         return None;
     }
-    let version = read_u32(data, 0);
-    let np = read_u32(data, 4) as usize;
-    let p_off = read_u32(data, 8) as usize;
-    let ns = read_u32(data, 12) as usize;
-    let s_off = read_u32(data, 16) as usize;
-    let flags = read_u32(data, 20);
+    let mut c = SliceCursor::new(data);
+    let version = c.read_u32_le().ok()?;
+    let np = c.read_u32_le().ok()? as usize;
+    let p_off = c.read_u32_le().ok()? as usize;
+    let ns = c.read_u32_le().ok()? as usize;
+    let s_off = c.read_u32_le().ok()? as usize;
+    let flags = c.read_u32_le().ok()?;
 
     let mut parameters = Vec::with_capacity(np);
     for i in 0..np {
@@ -148,46 +146,61 @@ pub fn parse_rts0(data: &[u8]) -> Option<RootSignature> {
         if b + 12 > data.len() {
             break;
         }
-        let pt = read_u32(data, b);
-        let vis = parse_vis(read_u32(data, b + 4));
-        let po = read_u32(data, b + 8) as usize;
+        c.seek(SeekFrom::Start(b as u64)).ok()?;
+        let pt = c.read_u32_le().ok()?;
+        let vis = parse_vis(c.read_u32_le().ok()?);
+        let po = c.read_u32_le().ok()? as usize;
         let param_type = match pt {
             0 => {
-                let nr = read_u32(data, po) as usize;
-                let ro = read_u32(data, po + 4) as usize;
+                c.seek(SeekFrom::Start(po as u64)).ok()?;
+                let nr = c.read_u32_le().ok()? as usize;
+                let ro = c.read_u32_le().ok()? as usize;
                 let mut ranges = Vec::with_capacity(nr);
                 for j in 0..nr {
                     let r = ro + j * 20;
                     if r + 20 > data.len() {
                         break;
                     }
+                    c.seek(SeekFrom::Start(r as u64)).ok()?;
                     ranges.push(DescriptorRange {
-                        range_type: parse_rt(read_u32(data, r)),
-                        num_descriptors: read_u32(data, r + 4),
-                        base_shader_register: read_u32(data, r + 8),
-                        register_space: read_u32(data, r + 12),
-                        offset_in_descriptors_from_table_start: read_u32(data, r + 16),
+                        range_type: parse_rt(c.read_u32_le().ok()?),
+                        num_descriptors: c.read_u32_le().ok()?,
+                        base_shader_register: c.read_u32_le().ok()?,
+                        register_space: c.read_u32_le().ok()?,
+                        offset_in_descriptors_from_table_start: c.read_u32_le().ok()?,
                     });
                 }
                 RootParameterType::DescriptorTable { ranges }
             }
-            1 => RootParameterType::Constants32Bit {
-                register: read_u32(data, po),
-                space: read_u32(data, po + 4),
-                num_values: read_u32(data, po + 8),
-            },
-            2 => RootParameterType::Cbv {
-                register: read_u32(data, po),
-                space: read_u32(data, po + 4),
-            },
-            3 => RootParameterType::Srv {
-                register: read_u32(data, po),
-                space: read_u32(data, po + 4),
-            },
-            _ => RootParameterType::Uav {
-                register: read_u32(data, po),
-                space: read_u32(data, po + 4),
-            },
+            1 => {
+                c.seek(SeekFrom::Start(po as u64)).ok()?;
+                RootParameterType::Constants32Bit {
+                    register: c.read_u32_le().ok()?,
+                    space: c.read_u32_le().ok()?,
+                    num_values: c.read_u32_le().ok()?,
+                }
+            }
+            2 => {
+                c.seek(SeekFrom::Start(po as u64)).ok()?;
+                RootParameterType::Cbv {
+                    register: c.read_u32_le().ok()?,
+                    space: c.read_u32_le().ok()?,
+                }
+            }
+            3 => {
+                c.seek(SeekFrom::Start(po as u64)).ok()?;
+                RootParameterType::Srv {
+                    register: c.read_u32_le().ok()?,
+                    space: c.read_u32_le().ok()?,
+                }
+            }
+            _ => {
+                c.seek(SeekFrom::Start(po as u64)).ok()?;
+                RootParameterType::Uav {
+                    register: c.read_u32_le().ok()?,
+                    space: c.read_u32_le().ok()?,
+                }
+            }
         };
         parameters.push(RootParameter {
             param_type,
@@ -201,20 +214,21 @@ pub fn parse_rts0(data: &[u8]) -> Option<RootSignature> {
         if s + 52 > data.len() {
             break;
         }
+        c.seek(SeekFrom::Start(s as u64)).ok()?;
         static_samplers.push(StaticSampler {
-            filter: read_u32(data, s),
-            address_u: read_u32(data, s + 4),
-            address_v: read_u32(data, s + 8),
-            address_w: read_u32(data, s + 12),
-            mip_lod_bias: read_f32(data, s + 16),
-            max_anisotropy: read_u32(data, s + 20),
-            comparison_func: read_u32(data, s + 24),
-            border_color: read_u32(data, s + 28),
-            min_lod: read_f32(data, s + 32),
-            max_lod: read_f32(data, s + 36),
-            shader_register: read_u32(data, s + 40),
-            register_space: read_u32(data, s + 44),
-            visibility: parse_vis(read_u32(data, s + 48)),
+            filter: c.read_u32_le().ok()?,
+            address_u: c.read_u32_le().ok()?,
+            address_v: c.read_u32_le().ok()?,
+            address_w: c.read_u32_le().ok()?,
+            mip_lod_bias: c.read_f32_le().ok()?,
+            max_anisotropy: c.read_u32_le().ok()?,
+            comparison_func: c.read_u32_le().ok()?,
+            border_color: c.read_u32_le().ok()?,
+            min_lod: c.read_f32_le().ok()?,
+            max_lod: c.read_f32_le().ok()?,
+            shader_register: c.read_u32_le().ok()?,
+            register_space: c.read_u32_le().ok()?,
+            visibility: parse_vis(c.read_u32_le().ok()?),
         });
     }
     Some(RootSignature {
@@ -263,6 +277,151 @@ impl DescriptorRangeType {
 impl ChunkParser for RootSignature {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_rts0(data)
+    }
+}
+
+fn vis_to_u32(v: &ShaderVisibility) -> u32 {
+    match v {
+        ShaderVisibility::All => 0,
+        ShaderVisibility::Vertex => 1,
+        ShaderVisibility::Hull => 2,
+        ShaderVisibility::Domain => 3,
+        ShaderVisibility::Geometry => 4,
+        ShaderVisibility::Pixel => 5,
+    }
+}
+
+fn rt_to_u32(r: &DescriptorRangeType) -> u32 {
+    match r {
+        DescriptorRangeType::Srv => 0,
+        DescriptorRangeType::Uav => 1,
+        DescriptorRangeType::Cbv => 2,
+        DescriptorRangeType::Sampler => 3,
+    }
+}
+
+impl ChunkWriter for RootSignature {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"RTS0"
+    }
+
+    fn write_payload(&self) -> Vec<u8> {
+        let w = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+        let wf = |buf: &mut Vec<u8>, v: f32| buf.extend_from_slice(&v.to_le_bytes());
+
+        let np = self.parameters.len();
+        let ns = self.static_samplers.len();
+
+        // Compute payload sizes for each parameter
+        let mut param_payload_sizes = Vec::with_capacity(np);
+        for p in &self.parameters {
+            let size = match &p.param_type {
+                RootParameterType::DescriptorTable { ranges } => 8 + ranges.len() * 20,
+                RootParameterType::Constants32Bit { .. } => 12,
+                RootParameterType::Cbv { .. }
+                | RootParameterType::Srv { .. }
+                | RootParameterType::Uav { .. } => 8,
+            };
+            param_payload_sizes.push(size);
+        }
+
+        // Layout:
+        // Header: 24 bytes (version, np, p_off, ns, s_off, flags)
+        // Parameter entries: np * 12 bytes
+        // Parameter payloads: variable
+        // Static samplers: ns * 52 bytes
+        let params_offset = 24usize;
+        let payloads_start = params_offset + np * 12;
+        let mut payload_offsets = Vec::with_capacity(np);
+        let mut off = payloads_start;
+        for &sz in &param_payload_sizes {
+            payload_offsets.push(off);
+            off += sz;
+        }
+        let samplers_offset = off;
+
+        let total = samplers_offset + ns * 52;
+        let mut buf = Vec::with_capacity(total);
+
+        // Header
+        w(&mut buf, self.version);
+        w(&mut buf, np as u32);
+        w(&mut buf, params_offset as u32);
+        w(&mut buf, ns as u32);
+        w(&mut buf, samplers_offset as u32);
+        w(&mut buf, self.flags);
+
+        // Parameter entries
+        for (i, p) in self.parameters.iter().enumerate() {
+            let pt = match &p.param_type {
+                RootParameterType::DescriptorTable { .. } => 0u32,
+                RootParameterType::Constants32Bit { .. } => 1,
+                RootParameterType::Cbv { .. } => 2,
+                RootParameterType::Srv { .. } => 3,
+                RootParameterType::Uav { .. } => 4,
+            };
+            w(&mut buf, pt);
+            w(&mut buf, vis_to_u32(&p.visibility));
+            w(&mut buf, payload_offsets[i] as u32);
+        }
+
+        // Parameter payloads
+        for p in &self.parameters {
+            match &p.param_type {
+                RootParameterType::DescriptorTable { ranges } => {
+                    let nr = ranges.len();
+                    w(&mut buf, nr as u32);
+                    // Ranges offset: right after this 8-byte sub-header
+                    let ranges_off = buf.len() + 4 - 4; // we need absolute offset
+                    // Actually, ranges are written right after the (count, ranges_offset) pair.
+                    // The ranges_offset points to absolute position within chunk data.
+                    let ro = buf.len() + 4; // after the u32 we're about to write
+                    w(&mut buf, ro as u32);
+                    for r in ranges {
+                        w(&mut buf, rt_to_u32(&r.range_type));
+                        w(&mut buf, r.num_descriptors);
+                        w(&mut buf, r.base_shader_register);
+                        w(&mut buf, r.register_space);
+                        w(&mut buf, r.offset_in_descriptors_from_table_start);
+                    }
+                    let _ = ranges_off;
+                }
+                RootParameterType::Constants32Bit {
+                    register,
+                    space,
+                    num_values,
+                } => {
+                    w(&mut buf, *register);
+                    w(&mut buf, *space);
+                    w(&mut buf, *num_values);
+                }
+                RootParameterType::Cbv { register, space }
+                | RootParameterType::Srv { register, space }
+                | RootParameterType::Uav { register, space } => {
+                    w(&mut buf, *register);
+                    w(&mut buf, *space);
+                }
+            }
+        }
+
+        // Static samplers
+        for s in &self.static_samplers {
+            w(&mut buf, s.filter);
+            w(&mut buf, s.address_u);
+            w(&mut buf, s.address_v);
+            w(&mut buf, s.address_w);
+            wf(&mut buf, s.mip_lod_bias);
+            w(&mut buf, s.max_anisotropy);
+            w(&mut buf, s.comparison_func);
+            w(&mut buf, s.border_color);
+            wf(&mut buf, s.min_lod);
+            wf(&mut buf, s.max_lod);
+            w(&mut buf, s.shader_register);
+            w(&mut buf, s.register_space);
+            w(&mut buf, vis_to_u32(&s.visibility));
+        }
+
+        buf
     }
 }
 

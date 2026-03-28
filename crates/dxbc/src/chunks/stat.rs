@@ -2,8 +2,9 @@
 
 use core::fmt;
 
-use super::ChunkParser;
-use crate::util::read_u32;
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
+use super::{ChunkParser, ChunkWriter};
 
 /// Shader statistics extracted from the STAT chunk.
 #[derive(Debug, Clone, Default)]
@@ -40,46 +41,99 @@ pub struct ShaderStats {
 ///
 /// Returns `None` if the data is too short to contain a valid STAT chunk.
 pub fn parse_stat(data: &[u8]) -> Option<ShaderStats> {
-    // Minimum STAT chunk is 29 u32 fields = 116 bytes
     if data.len() < 116 {
         return None;
     }
 
+    let mut c = SliceCursor::new(data);
+    let r = &mut c;
     Some(ShaderStats {
-        instruction_count: read_u32(data, 0),
-        temp_register_count: read_u32(data, 4),
-        define_count: read_u32(data, 8),
-        declaration_count: read_u32(data, 12),
-        float_instruction_count: read_u32(data, 16),
-        int_instruction_count: read_u32(data, 20),
-        uint_instruction_count: read_u32(data, 24),
-        static_flow_control_count: read_u32(data, 28),
-        dynamic_flow_control_count: read_u32(data, 32),
-        macro_instruction_count: read_u32(data, 36),
-        temp_array_count: read_u32(data, 40),
-        array_instruction_count: read_u32(data, 44),
-        cut_instruction_count: read_u32(data, 48),
-        emit_instruction_count: read_u32(data, 52),
-        texture_normal_instructions: read_u32(data, 56),
-        texture_load_instructions: read_u32(data, 60),
-        texture_comp_instructions: read_u32(data, 64),
-        texture_bias_instructions: read_u32(data, 68),
-        texture_gradient_instructions: read_u32(data, 72),
-        mov_instruction_count: read_u32(data, 76),
-        movc_instruction_count: read_u32(data, 80),
-        conversion_instruction_count: read_u32(data, 84),
-        // Offsets 88 and 92 are unknown fields
-        gs_input_primitive: read_u32(data, 96),
-        gs_output_topology: read_u32(data, 100),
-        gs_max_output_vertex_count: read_u32(data, 104),
+        instruction_count: r.read_u32_le().ok()?,
+        temp_register_count: r.read_u32_le().ok()?,
+        define_count: r.read_u32_le().ok()?,
+        declaration_count: r.read_u32_le().ok()?,
+        float_instruction_count: r.read_u32_le().ok()?,
+        int_instruction_count: r.read_u32_le().ok()?,
+        uint_instruction_count: r.read_u32_le().ok()?,
+        static_flow_control_count: r.read_u32_le().ok()?,
+        dynamic_flow_control_count: r.read_u32_le().ok()?,
+        macro_instruction_count: r.read_u32_le().ok()?,
+        temp_array_count: r.read_u32_le().ok()?,
+        array_instruction_count: r.read_u32_le().ok()?,
+        cut_instruction_count: r.read_u32_le().ok()?,
+        emit_instruction_count: r.read_u32_le().ok()?,
+        texture_normal_instructions: r.read_u32_le().ok()?,
+        texture_load_instructions: r.read_u32_le().ok()?,
+        texture_comp_instructions: r.read_u32_le().ok()?,
+        texture_bias_instructions: r.read_u32_le().ok()?,
+        texture_gradient_instructions: r.read_u32_le().ok()?,
+        mov_instruction_count: r.read_u32_le().ok()?,
+        movc_instruction_count: r.read_u32_le().ok()?,
+        conversion_instruction_count: r.read_u32_le().ok()?,
+        // Offsets 88 and 92 are unknown fields — skip 2 u32s
+        gs_input_primitive: {
+            r.seek(SeekFrom::Current(8)).ok()?;
+            r.read_u32_le().ok()?
+        },
+        gs_output_topology: r.read_u32_le().ok()?,
+        gs_max_output_vertex_count: r.read_u32_le().ok()?,
         // Offsets 108 and 112 are unknown fields
-        is_sample_frequency: data.len() >= 120 && read_u32(data, 116) != 0,
+        is_sample_frequency: {
+            if data.len() >= 120 {
+                r.seek(SeekFrom::Start(116)).ok()?;
+                r.read_u32_le().ok()? != 0
+            } else {
+                false
+            }
+        },
     })
 }
 
 impl ChunkParser for ShaderStats {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_stat(data)
+    }
+}
+
+impl ChunkWriter for ShaderStats {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"STAT"
+    }
+
+    fn write_payload(&self) -> alloc::vec::Vec<u8> {
+        let mut buf = alloc::vec::Vec::with_capacity(120);
+        let w = |buf: &mut alloc::vec::Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+        w(&mut buf, self.instruction_count);
+        w(&mut buf, self.temp_register_count);
+        w(&mut buf, self.define_count);
+        w(&mut buf, self.declaration_count);
+        w(&mut buf, self.float_instruction_count);
+        w(&mut buf, self.int_instruction_count);
+        w(&mut buf, self.uint_instruction_count);
+        w(&mut buf, self.static_flow_control_count);
+        w(&mut buf, self.dynamic_flow_control_count);
+        w(&mut buf, self.macro_instruction_count);
+        w(&mut buf, self.temp_array_count);
+        w(&mut buf, self.array_instruction_count);
+        w(&mut buf, self.cut_instruction_count);
+        w(&mut buf, self.emit_instruction_count);
+        w(&mut buf, self.texture_normal_instructions);
+        w(&mut buf, self.texture_load_instructions);
+        w(&mut buf, self.texture_comp_instructions);
+        w(&mut buf, self.texture_bias_instructions);
+        w(&mut buf, self.texture_gradient_instructions);
+        w(&mut buf, self.mov_instruction_count);
+        w(&mut buf, self.movc_instruction_count);
+        w(&mut buf, self.conversion_instruction_count);
+        w(&mut buf, 0); // unknown at offset 88
+        w(&mut buf, 0); // unknown at offset 92
+        w(&mut buf, self.gs_input_primitive);
+        w(&mut buf, self.gs_output_topology);
+        w(&mut buf, self.gs_max_output_vertex_count);
+        w(&mut buf, 0); // unknown at offset 108
+        w(&mut buf, 0); // unknown at offset 112
+        w(&mut buf, self.is_sample_frequency as u32);
+        buf
     }
 }
 

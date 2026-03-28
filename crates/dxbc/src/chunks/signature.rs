@@ -3,7 +3,44 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::util::{read_cstring, read_u32};
+use super::{ChunkWriter, WritableChunk};
+
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
+use crate::util::{StringTableWriter, read_cstring};
+
+/// A parsed signature chunk, preserving its original FourCC for round-tripping.
+///
+/// Different FourCCs use different binary layouts (element strides, optional
+/// fields). Storing the FourCC ensures `ISG1` stays `ISG1` instead of
+/// collapsing to `ISGN` on write.
+#[derive(Debug)]
+pub struct Signature<'a> {
+    /// Original FourCC (e.g. `ISGN`, `ISG1`, `OSG5`, `OSGN`, `PCSG`, `PSG1`).
+    pub fourcc: [u8; 4],
+    /// Parsed signature elements.
+    pub elements: Vec<SignatureElement<'a>>,
+}
+
+impl fmt::Display for Signature<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for e in &self.elements {
+            writeln!(f, "{e}")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl ChunkWriter for Signature<'_> {
+    fn fourcc(&self) -> [u8; 4] {
+        self.fourcc
+    }
+
+    fn write_payload(&self) -> Vec<u8> {
+        write_signature(self.fourcc, &self.elements).data
+    }
+}
 
 /// Which binary layout variant was used in the DXBC chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +74,7 @@ impl SignatureVersion {
     fn has_stream(self) -> bool {
         matches!(self, Self::V5 | Self::V1)
     }
+
     fn has_min_precision(self) -> bool {
         matches!(self, Self::V1)
     }
@@ -70,6 +108,20 @@ impl MinPrecision {
             x => Self::Unknown(x),
         }
     }
+
+    fn to_u32(self) -> u32 {
+        match self {
+            Self::Default => 0,
+            Self::Float16 => 1,
+            Self::Float2_8 => 2,
+            Self::Reserved => 3,
+            Self::SInt16 => 4,
+            Self::UInt16 => 5,
+            Self::Any16 => 0xf0,
+            Self::Any10 => 0xf1,
+            Self::Unknown(x) => x,
+        }
+    }
 }
 
 impl fmt::Display for MinPrecision {
@@ -84,6 +136,55 @@ impl fmt::Display for MinPrecision {
             Self::Any16 => write!(f, " [any16]"),
             Self::Any10 => write!(f, " [any10]"),
             Self::Unknown(v) => write!(f, " [minprec={}]", v),
+        }
+    }
+}
+
+/// Component data type for signature elements (D3D_REGISTER_COMPONENT_TYPE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ComponentType {
+    Unknown = 0,
+    UInt = 1,
+    Int = 2,
+    Float = 3,
+    UInt16 = 4,
+    Int16 = 5,
+    Float16 = 6,
+    UInt64 = 7,
+    Int64 = 8,
+    Float64 = 9,
+}
+
+impl ComponentType {
+    pub fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::Unknown,
+            1 => Self::UInt,
+            2 => Self::Int,
+            3 => Self::Float,
+            4 => Self::UInt16,
+            5 => Self::Int16,
+            6 => Self::Float16,
+            7 => Self::UInt64,
+            8 => Self::Int64,
+            9 => Self::Float64,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::UInt => "uint",
+            Self::Int => "int",
+            Self::Float => "float",
+            Self::UInt16 => "uint16",
+            Self::Int16 => "int16",
+            Self::Float16 => "float16",
+            Self::UInt64 => "uint64",
+            Self::Int64 => "int64",
+            Self::Float64 => "float64",
         }
     }
 }
@@ -116,17 +217,9 @@ impl SignatureElement<'_> {
 
     /// The component type name.
     pub fn component_type_name(&self) -> &'static str {
-        match self.component_type {
-            1 => "uint",
-            2 => "int",
-            3 => "float",
-            4 => "uint16",
-            5 => "int16",
-            6 => "float16",
-            7 => "uint64",
-            8 => "int64",
-            9 => "float64",
-            _ => "unknown",
+        match ComponentType::from_u32(self.component_type) {
+            Some(ct) => ct.name(),
+            None => "unknown",
         }
     }
 
@@ -155,9 +248,11 @@ impl fmt::Display for SignatureElement<'_> {
         {
             write!(f, " stream={}", s)?;
         }
+
         if let Some(mp) = self.min_precision {
             write!(f, "{}", mp)?;
         }
+
         Ok(())
     }
 }
@@ -191,9 +286,14 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
     if data.len() < 8 {
         return Vec::new();
     }
+
     let ver = SignatureVersion::from_fourcc(fourcc);
     let stride = ver.stride();
-    let count = read_u32(data, 0) as usize;
+    let mut c = SliceCursor::new(data);
+    let count = match c.read_u32_le() {
+        Ok(v) => v as usize,
+        Err(_) => return Vec::new(),
+    };
     let mut elements = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -202,22 +302,26 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
             break;
         }
 
-        let (stream, ofs) = if ver.has_stream() {
-            (Some(read_u32(data, base)), base + 4)
+        c.seek(SeekFrom::Start(base as u64)).ok();
+
+        let stream = if ver.has_stream() {
+            Some(c.read_u32_le().unwrap_or(0))
         } else {
-            (None, base)
+            None
         };
 
-        let name_offset = read_u32(data, ofs) as usize;
-        let semantic_index = read_u32(data, ofs + 4);
-        let system_value = read_u32(data, ofs + 8);
-        let component_type = read_u32(data, ofs + 12);
-        let register = read_u32(data, ofs + 16);
-        let mask = data[ofs + 20];
-        let rw_mask = data[ofs + 21];
+        let name_offset = c.read_u32_le().unwrap_or(0) as usize;
+        let semantic_index = c.read_u32_le().unwrap_or(0);
+        let system_value = c.read_u32_le().unwrap_or(0);
+        let component_type = c.read_u32_le().unwrap_or(0);
+        let register = c.read_u32_le().unwrap_or(0);
+        let mask = c.read_u8_le().unwrap_or(0);
+        let rw_mask = c.read_u8_le().unwrap_or(0);
 
         let min_precision = if ver.has_min_precision() {
-            Some(MinPrecision::from_u32(read_u32(data, ofs + 24)))
+            // Skip 2 bytes padding after mask/rw_mask to reach min_precision at +24
+            let _ = c.seek(SeekFrom::Current(2));
+            Some(MinPrecision::from_u32(c.read_u32_le().unwrap_or(0)))
         } else {
             None
         };
@@ -234,5 +338,60 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
             min_precision,
         });
     }
+
     elements
+}
+
+/// Serialize a signature chunk back to bytes.
+///
+/// `fourcc` is the 4-byte chunk tag (e.g. `*b"ISGN"`, `*b"OSG1"`).
+/// Returns a `WritableChunk` ready for `build_dxbc`.
+pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> WritableChunk {
+    let fourcc_str = core::str::from_utf8(&fourcc).unwrap_or("ISGN");
+    let ver = SignatureVersion::from_fourcc(fourcc_str);
+    let stride = ver.stride();
+    let w = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+
+    // Build string table: collect unique names and assign offsets.
+    // String table starts right after the header + element array.
+    let string_table_start = 8 + elements.len() * stride;
+    let mut strings = StringTableWriter::new(string_table_start);
+    let mut name_offsets = Vec::with_capacity(elements.len());
+
+    for elem in elements {
+        name_offsets.push(strings.add(elem.semantic_name));
+    }
+
+    let total = string_table_start + strings.len();
+    let mut buf = Vec::with_capacity(total);
+
+    // Header: count + 8 bytes (the second u32 is always 8 in real DXBC files)
+    w(&mut buf, elements.len() as u32);
+    w(&mut buf, 8);
+
+    // Elements
+    for (i, elem) in elements.iter().enumerate() {
+        if ver.has_stream() {
+            w(&mut buf, elem.stream.unwrap_or(0));
+        }
+
+        w(&mut buf, name_offsets[i]);
+        w(&mut buf, elem.semantic_index);
+        w(&mut buf, elem.system_value);
+        w(&mut buf, elem.component_type);
+        w(&mut buf, elem.register);
+        buf.push(elem.mask);
+        buf.push(elem.rw_mask);
+        if ver.has_min_precision() {
+            buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding
+            w(&mut buf, elem.min_precision.map_or(0, |mp| mp.to_u32()));
+        } else {
+            buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding to fill stride
+        }
+    }
+
+    // String table
+    buf.extend_from_slice(&strings.finish());
+
+    WritableChunk { fourcc, data: buf }
 }

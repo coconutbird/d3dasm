@@ -10,7 +10,7 @@
 
 use core::fmt;
 
-use super::ChunkParser;
+use super::{ChunkParser, ChunkWriter};
 
 /// Parsed ILDN (debug name) chunk.
 #[derive(Debug, Clone)]
@@ -51,6 +51,22 @@ pub fn parse_ildn(data: &[u8]) -> Option<DebugName> {
 impl ChunkParser for DebugName {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_ildn(data)
+    }
+}
+
+impl ChunkWriter for DebugName {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"ILDN"
+    }
+
+    fn write_payload(&self) -> alloc::vec::Vec<u8> {
+        let name_bytes = self.name.as_bytes();
+        let mut buf = alloc::vec::Vec::with_capacity(4 + name_bytes.len() + 1);
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+        buf.push(0); // null terminator
+        buf
     }
 }
 

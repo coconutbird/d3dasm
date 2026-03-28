@@ -6,9 +6,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
 use super::ir::*;
 use super::opcodes::Opcode;
-use crate::util::read_u32;
 
 /// Error returned when decoding a SHEX/SHDR chunk fails.
 #[derive(Debug, Clone)]
@@ -24,6 +25,11 @@ impl fmt::Display for DecodeError {
 
 /// Decode a SHEX/SHDR chunk into a structured [`Program`].
 pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
+    decode_with_fourcc(data, *b"SHEX")
+}
+
+/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original FourCC.
+pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, DecodeError> {
     if data.len() < 8 {
         return Err(DecodeError {
             message: format!(
@@ -33,8 +39,13 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
         });
     }
 
-    let version_token = read_u32(data, 0);
-    let length_dwords = read_u32(data, 4) as usize;
+    let mut c = SliceCursor::new(data);
+    let version_token = c.read_u32_le().map_err(|_| DecodeError {
+        message: String::from("failed to read version token"),
+    })?;
+    let length_dwords = c.read_u32_le().map_err(|_| DecodeError {
+        message: String::from("failed to read length"),
+    })? as usize;
     let shader_type_val = (version_token >> 16) & 0xFFFF;
     let major = (version_token >> 4) & 0xF;
     let minor = version_token & 0xF;
@@ -64,9 +75,10 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
     }
 
     while offset + 4 <= end {
-        let token = read_u32(data, offset);
+        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let token = c.read_u32_le().unwrap();
         let opcode_val = token & 0x7FF;
-        let instr_len = instruction_length(token, opcode_val, data, offset, end);
+        let instr_len = instruction_length(token, opcode_val, &mut c, offset, end);
 
         if instr_len == 0 {
             warnings.push(format!(
@@ -84,9 +96,11 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
             break;
         }
 
-        let tokens: Vec<u32> = (0..instr_len)
-            .map(|i| read_u32(data, offset + i * 4))
-            .collect();
+        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let mut tokens = Vec::with_capacity(instr_len);
+        for _ in 0..instr_len {
+            tokens.push(c.read_u32_le().unwrap());
+        }
 
         instructions.push(decode_instruction(&tokens, opcode_val));
         offset += instr_len * 4;
@@ -98,14 +112,23 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
         minor_version: minor,
         instructions,
         warnings,
+        fourcc,
+        raw: Vec::from(data),
     })
 }
 
-fn instruction_length(token: u32, opcode: u32, data: &[u8], offset: usize, end: usize) -> usize {
+fn instruction_length(
+    token: u32,
+    opcode: u32,
+    c: &mut SliceCursor<'_>,
+    offset: usize,
+    end: usize,
+) -> usize {
     let op = Opcode::from_u32(opcode);
     if matches!(op, Opcode::CustomData) {
         if offset + 8 <= end {
-            return read_u32(data, offset + 4) as usize;
+            c.seek(SeekFrom::Start((offset + 4) as u64)).unwrap();
+            return c.read_u32_le().unwrap() as usize;
         }
         return 0;
     }

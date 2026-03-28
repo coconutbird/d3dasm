@@ -6,8 +6,9 @@
 
 use core::fmt;
 
-use super::ChunkParser;
-use crate::util::read_u32;
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
+use super::{ChunkParser, ChunkWriter};
 
 // D3D11/D3D12 shader feature flag constants.
 pub const DOUBLES: u64 = 0x0001;
@@ -49,12 +50,15 @@ pub struct ShaderFeatureInfo {
 /// Parse an SFI0 chunk.
 pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
     let lo = if data.len() >= 4 {
-        read_u32(data, 0) as u64
+        let mut c = SliceCursor::new(data);
+        c.read_u32_le().ok()? as u64
     } else {
         0
     };
     let hi = if data.len() >= 8 {
-        read_u32(data, 4) as u64
+        let mut c = SliceCursor::new(data);
+        c.seek(SeekFrom::Start(4)).ok()?;
+        c.read_u32_le().ok()? as u64
     } else {
         0
     };
@@ -66,6 +70,19 @@ pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
 impl ChunkParser for ShaderFeatureInfo {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_sfi0(data)
+    }
+}
+
+impl ChunkWriter for ShaderFeatureInfo {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"SFI0"
+    }
+
+    fn write_payload(&self) -> alloc::vec::Vec<u8> {
+        let mut buf = alloc::vec::Vec::with_capacity(8);
+        buf.extend_from_slice(&(self.flags as u32).to_le_bytes());
+        buf.extend_from_slice(&((self.flags >> 32) as u32).to_le_bytes());
+        buf
     }
 }
 

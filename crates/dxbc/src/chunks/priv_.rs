@@ -4,9 +4,10 @@
 //! GUID identifying the tool, followed by opaque payload bytes.
 //! We expose the raw size and, when present, the leading GUID bytes.
 
+use alloc::vec::Vec;
 use core::fmt;
 
-use super::ChunkParser;
+use super::{ChunkParser, ChunkWriter};
 
 /// Parsed PRIV (private data) chunk.
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub struct PrivateData {
     pub size: usize,
     /// First 16 bytes (GUID) if present.
     pub guid: Option<[u8; 16]>,
+    /// Raw chunk payload for round-trip serialization.
+    pub raw: Vec<u8>,
 }
 
 /// Parse a PRIV chunk.
@@ -29,12 +32,23 @@ pub fn parse_priv(data: &[u8]) -> Option<PrivateData> {
     Some(PrivateData {
         size: data.len(),
         guid,
+        raw: Vec::from(data),
     })
 }
 
 impl ChunkParser for PrivateData {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_priv(data)
+    }
+}
+
+impl ChunkWriter for PrivateData {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"PRIV"
+    }
+
+    fn write_payload(&self) -> Vec<u8> {
+        self.raw.clone()
     }
 }
 

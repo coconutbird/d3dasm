@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process;
 
 use dxbc::container::scan_dxbc;
-use dxbc::util::read_u32;
+use dxbc::nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
 
 fn main() {
     let path = match std::env::args_os().nth(1) {
@@ -32,8 +32,10 @@ fn main() {
         process::exit(1);
     }
 
-    let version = read_u32(&data, 0x04);
-    let hash = read_u32(&data, 0x08);
+    let mut hdr = SliceCursor::new(&data);
+    hdr.seek(SeekFrom::Start(0x04)).unwrap();
+    let version = hdr.read_u32_le().unwrap();
+    let hash = hdr.read_u32_le().unwrap();
 
     println!("// File: {}", path.display());
     println!("// Format: UFXS v{version}, hash=0x{hash:08X}");
@@ -57,8 +59,10 @@ fn main() {
         if size_pos + 4 > data.len() {
             continue;
         }
-        let offset = read_u32(&data, off_pos) as usize;
-        let size = read_u32(&data, size_pos) as usize;
+        hdr.seek(SeekFrom::Start(off_pos as u64)).unwrap();
+        let offset = hdr.read_u32_le().unwrap() as usize;
+        hdr.seek(SeekFrom::Start(size_pos as u64)).unwrap();
+        let size = hdr.read_u32_le().unwrap() as usize;
         if offset == 0 || size == 0 {
             continue;
         }

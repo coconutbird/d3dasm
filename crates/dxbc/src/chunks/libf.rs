@@ -8,10 +8,11 @@
 //! and attempt to read a leading function count (u32) when the chunk
 //! is large enough.
 
+use alloc::vec::Vec;
 use core::fmt;
 
-use super::ChunkParser;
-use crate::util::read_u32;
+use super::{ChunkParser, ChunkWriter};
+use nostdio::{ReadLe, SliceCursor};
 
 /// Parsed LIBF (library function table) chunk.
 #[derive(Debug, Clone)]
@@ -20,24 +21,38 @@ pub struct LibraryFunction {
     pub function_count: Option<u32>,
     /// Total size of the chunk payload in bytes.
     pub size: usize,
+    /// Raw chunk payload for round-trip serialization.
+    pub raw: Vec<u8>,
 }
 
 /// Parse a LIBF chunk.
 pub fn parse_libf(data: &[u8]) -> Option<LibraryFunction> {
     let function_count = if data.len() >= 4 {
-        Some(read_u32(data, 0))
+        let mut c = SliceCursor::new(data);
+        Some(c.read_u32_le().ok()?)
     } else {
         None
     };
     Some(LibraryFunction {
         function_count,
         size: data.len(),
+        raw: Vec::from(data),
     })
 }
 
 impl ChunkParser for LibraryFunction {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_libf(data)
+    }
+}
+
+impl ChunkWriter for LibraryFunction {
+    fn fourcc(&self) -> [u8; 4] {
+        *b"LIBF"
+    }
+
+    fn write_payload(&self) -> Vec<u8> {
+        self.raw.clone()
     }
 }
 
