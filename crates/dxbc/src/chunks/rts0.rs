@@ -32,24 +32,39 @@ pub struct RootParameter {
 /// Root parameter payload variants.
 #[derive(Debug)]
 pub enum RootParameterType {
+    /// A descriptor table containing one or more descriptor ranges.
     DescriptorTable {
+        /// Ordered list of descriptor ranges in this table.
         ranges: Vec<DescriptorRange>,
     },
+    /// Inline 32-bit root constants.
     Constants32Bit {
+        /// Base shader register (`b` register).
         register: u32,
+        /// Register space.
         space: u32,
+        /// Number of 32-bit values.
         num_values: u32,
     },
+    /// Inline CBV root descriptor.
     Cbv {
+        /// Shader register (`b` register).
         register: u32,
+        /// Register space.
         space: u32,
     },
+    /// Inline SRV root descriptor.
     Srv {
+        /// Shader register (`t` register).
         register: u32,
+        /// Register space.
         space: u32,
     },
+    /// Inline UAV root descriptor.
     Uav {
+        /// Shader register (`u` register).
         register: u32,
+        /// Register space.
         space: u32,
     },
 }
@@ -92,18 +107,31 @@ pub enum ShaderVisibility {
 /// A static sampler baked into the root signature.
 #[derive(Debug)]
 pub struct StaticSampler {
+    /// D3D12 filter mode (raw `D3D12_FILTER` value).
     pub filter: u32,
+    /// Texture address mode for U axis (raw `D3D12_TEXTURE_ADDRESS_MODE`).
     pub address_u: u32,
+    /// Texture address mode for V axis.
     pub address_v: u32,
+    /// Texture address mode for W axis.
     pub address_w: u32,
+    /// Mip LOD bias.
     pub mip_lod_bias: f32,
+    /// Maximum anisotropy (1–16).
     pub max_anisotropy: u32,
+    /// Comparison function (raw `D3D12_COMPARISON_FUNC`).
     pub comparison_func: u32,
+    /// Border color (raw `D3D12_STATIC_BORDER_COLOR`).
     pub border_color: u32,
+    /// Minimum LOD clamp.
     pub min_lod: f32,
+    /// Maximum LOD clamp.
     pub max_lod: f32,
+    /// Sampler shader register (`s` register).
     pub shader_register: u32,
+    /// Register space.
     pub register_space: u32,
+    /// Which shader stage(s) can see this sampler.
     pub visibility: ShaderVisibility,
 }
 
@@ -264,6 +292,7 @@ impl fmt::Display for DescriptorRangeType {
 }
 
 impl DescriptorRangeType {
+    /// Returns the HLSL register prefix character for this range type.
     pub fn prefix(&self) -> char {
         match self {
             Self::Srv => 't',
@@ -271,6 +300,83 @@ impl DescriptorRangeType {
             Self::Cbv => 'b',
             Self::Sampler => 's',
         }
+    }
+}
+
+impl fmt::Display for DescriptorRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cnt = if self.num_descriptors == 0xFFFFFFFF {
+            alloc::string::String::from("unbounded")
+        } else {
+            alloc::format!("{}", self.num_descriptors)
+        };
+
+        let off = if self.offset_in_descriptors_from_table_start == 0xFFFFFFFF {
+            alloc::string::String::from("APPEND")
+        } else {
+            alloc::format!("{}", self.offset_in_descriptors_from_table_start)
+        };
+
+        write!(
+            f,
+            "{}({}) {}{} space={} offset={}",
+            self.range_type,
+            cnt,
+            self.range_type.prefix(),
+            self.base_shader_register,
+            self.register_space,
+            off
+        )
+    }
+}
+
+impl fmt::Display for RootParameter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.param_type {
+            RootParameterType::DescriptorTable { ranges } => {
+                write!(f, "DescriptorTable vis={}", self.visibility)?;
+                for r in ranges {
+                    write!(f, "\n  {r}")?;
+                }
+                Ok(())
+            }
+            RootParameterType::Constants32Bit {
+                register,
+                space,
+                num_values,
+            } => write!(
+                f,
+                "32BitConstants vis={} b{register} space={space} num32BitValues={num_values}",
+                self.visibility
+            ),
+            RootParameterType::Cbv { register, space } => {
+                write!(f, "CBV vis={} b{register} space={space}", self.visibility)
+            }
+            RootParameterType::Srv { register, space } => {
+                write!(f, "SRV vis={} t{register} space={space}", self.visibility)
+            }
+            RootParameterType::Uav { register, space } => {
+                write!(f, "UAV vis={} u{register} space={space}", self.visibility)
+            }
+        }
+    }
+}
+
+impl fmt::Display for StaticSampler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "StaticSampler s{} space={} vis={} filter={} addr=({},{},{}) lod=[{},{}]",
+            self.shader_register,
+            self.register_space,
+            self.visibility,
+            self.filter,
+            self.address_u,
+            self.address_v,
+            self.address_w,
+            self.min_lod,
+            self.max_lod
+        )
     }
 }
 
@@ -371,9 +477,7 @@ impl ChunkWriter for RootSignature {
                 RootParameterType::DescriptorTable { ranges } => {
                     let nr = ranges.len();
                     w(&mut buf, nr as u32);
-                    // Ranges offset: right after this 8-byte sub-header
-                    let ranges_off = buf.len() + 4 - 4; // we need absolute offset
-                    // Actually, ranges are written right after the (count, ranges_offset) pair.
+                    // Ranges are written right after the (count, ranges_offset) pair.
                     // The ranges_offset points to absolute position within chunk data.
                     let ro = buf.len() + 4; // after the u32 we're about to write
                     w(&mut buf, ro as u32);
@@ -384,7 +488,6 @@ impl ChunkWriter for RootSignature {
                         w(&mut buf, r.register_space);
                         w(&mut buf, r.offset_in_descriptors_from_table_start);
                     }
-                    let _ = ranges_off;
                 }
                 RootParameterType::Constants32Bit {
                     register,

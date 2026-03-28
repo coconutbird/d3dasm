@@ -157,6 +157,7 @@ pub enum ComponentType {
 }
 
 impl ComponentType {
+    /// Converts a raw `D3D_REGISTER_COMPONENT_TYPE` value to the corresponding variant.
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Unknown,
@@ -173,6 +174,7 @@ impl ComponentType {
         })
     }
 
+    /// Returns the lowercase type name used in disassembly output.
     pub fn name(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
@@ -302,7 +304,7 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
             break;
         }
 
-        c.seek(SeekFrom::Start(base as u64)).ok();
+        let _ = c.seek(SeekFrom::Start(base as u64));
 
         let stream = if ver.has_stream() {
             Some(c.read_u32_le().unwrap_or(0))

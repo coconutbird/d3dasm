@@ -14,6 +14,7 @@ use super::opcodes::Opcode;
 /// Error returned when decoding a SHEX/SHDR chunk fails.
 #[derive(Debug, Clone)]
 pub struct DecodeError {
+    /// Human-readable description of the decode failure.
     pub message: String,
 }
 
@@ -148,7 +149,12 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
         None
     };
 
-    // Extract texture offsets from extended opcode token if present
+    // Extract texture offsets from extended opcode token if present.
+    // NOTE: SM5.0 extended opcode types 2 (resource_dim) and 3 (resource_return_type)
+    // on instructions are intentionally not parsed — SM5.1 removes them in favor of
+    // 3D declaration operands (range ID, lower/upper bound) plus a register space
+    // token. Full SM5.1 support requires parsing those declaration operands rather
+    // than instruction-level extended tokens.
     let tex_offsets = decode_extended_tex_offsets(tokens);
 
     let kind = match op {
@@ -204,14 +210,19 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
                 0.0
             },
         },
-        Opcode::DclHsForkPhaseInstanceCount => InstructionKind::DclHsForkPhaseInstanceCount {
-            count: if tokens.len() > 1 { tokens[1] } else { 0 },
-        },
+        Opcode::DclHsForkPhaseInstanceCount | Opcode::DclHsJoinPhaseInstanceCount => {
+            InstructionKind::DclHsForkPhaseInstanceCount {
+                count: if tokens.len() > 1 { tokens[1] } else { 0 },
+            }
+        }
         Opcode::DclThreadGroup => InstructionKind::DclThreadGroup {
             x: if tokens.len() > 1 { tokens[1] } else { 0 },
             y: if tokens.len() > 2 { tokens[2] } else { 0 },
             z: if tokens.len() > 3 { tokens[3] } else { 0 },
         },
+        Opcode::DclFunctionBody => decode_dcl_function_body(tokens),
+        Opcode::DclFunctionTable => decode_dcl_function_table(tokens),
+        Opcode::DclInterface => decode_dcl_interface(tokens),
         Opcode::HsDecls
         | Opcode::HsControlPointPhase
         | Opcode::HsForkPhase
@@ -228,7 +239,7 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     }
 }
 
-// ── Declaration decoders ──────────────────────────────────────────────
+// Declaration decoders.
 
 fn decode_custom_data(tokens: &[u32]) -> InstructionKind {
     let subtype_val = (tokens[0] >> 11) & 0x1F;
@@ -297,35 +308,37 @@ fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
     } else {
         None
     };
-    // System value is in the last token for sgv/siv variants
+    // Parse operands first, then read the trailing system-value token
+    // from whatever remains. This is robust against extended opcode tokens
+    // or other fields that might shift the layout.
     let has_sv = matches!(
         op,
         Opcode::DclInputSgv | Opcode::DclInputSiv | Opcode::DclInputPsSgv | Opcode::DclInputPsSiv
     );
-    let (system_value, operand_end) = if has_sv && tokens.len() >= 3 {
-        let sv = tokens[tokens.len() - 1];
-        (Some(system_value_name(sv)), tokens.len() - 1)
+    let (operands, next_pos) = decode_operands_with_pos(tokens, 1);
+    let system_value = if has_sv && next_pos < tokens.len() {
+        Some(system_value_name(tokens[next_pos]))
     } else {
-        (None, tokens.len())
+        None
     };
     InstructionKind::DclInput {
         interpolation,
         system_value,
-        operands: decode_operands(&tokens[..operand_end], 1),
+        operands,
     }
 }
 
 fn decode_dcl_output(tokens: &[u32], op: &Opcode) -> InstructionKind {
     let has_sv = matches!(op, Opcode::DclOutputSgv | Opcode::DclOutputSiv);
-    let (system_value, operand_end) = if has_sv && tokens.len() >= 3 {
-        let sv = tokens[tokens.len() - 1];
-        (Some(system_value_name(sv)), tokens.len() - 1)
+    let (operands, next_pos) = decode_operands_with_pos(tokens, 1);
+    let system_value = if has_sv && next_pos < tokens.len() {
+        Some(system_value_name(tokens[next_pos]))
     } else {
-        (None, tokens.len())
+        None
     };
     InstructionKind::DclOutput {
         system_value,
-        operands: decode_operands(&tokens[..operand_end], 1),
+        operands,
     }
 }
 
@@ -611,7 +624,49 @@ fn decode_dcl_tess_output_prim(token: u32) -> InstructionKind {
     InstructionKind::DclTessOutputPrimitive { primitive }
 }
 
-// ── Generic instruction decoder ───────────────────────────────────────
+fn decode_dcl_function_body(tokens: &[u32]) -> InstructionKind {
+    // dcl_function_body fb<N>
+    // Token layout: [opcode_token, function_body_index]
+    InstructionKind::DclFunctionBody {
+        index: if tokens.len() > 1 { tokens[1] } else { 0 },
+    }
+}
+
+fn decode_dcl_function_table(tokens: &[u32]) -> InstructionKind {
+    // dcl_function_table ft<N> = { fb0, fb1, ... }
+    // Token layout: [opcode_token, table_index, count, body0, body1, ...]
+    let table_index = if tokens.len() > 1 { tokens[1] } else { 0 };
+    let count = if tokens.len() > 2 {
+        tokens[2] as usize
+    } else {
+        0
+    };
+    let body_indices: Vec<u32> = tokens.iter().skip(3).take(count).copied().collect();
+    InstructionKind::DclFunctionTable {
+        table_index,
+        body_indices,
+    }
+}
+
+fn decode_dcl_interface(tokens: &[u32]) -> InstructionKind {
+    // dcl_interface fp<N>[<num_call_sites>][<num_types>] = { ft0, ft1, ... }
+    // Token layout: [opcode_token, interface_index, num_call_sites, num_types, ft0, ft1, ...]
+    let interface_index = if tokens.len() > 1 { tokens[1] } else { 0 };
+    let num_call_sites = if tokens.len() > 2 { tokens[2] } else { 0 };
+    let num_types = if tokens.len() > 3 {
+        tokens[3] as usize
+    } else {
+        0
+    };
+    let table_indices: Vec<u32> = tokens.iter().skip(4).take(num_types).copied().collect();
+    InstructionKind::DclInterface {
+        interface_index,
+        num_call_sites,
+        table_indices,
+    }
+}
+
+// Generic instruction decoder.
 
 fn decode_generic(tokens: &[u32]) -> InstructionKind {
     let mut start = 1;
@@ -627,9 +682,11 @@ fn decode_generic(tokens: &[u32]) -> InstructionKind {
     }
 }
 
-// ── Operand decoder ───────────────────────────────────────────────────
+// Operand decoder.
 
-fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
+/// Decode operands starting at `start`, returning the operands and the
+/// token index just past the last consumed operand token.
+fn decode_operands_with_pos(tokens: &[u32], start: usize) -> (Vec<Operand>, usize) {
     let mut result = Vec::new();
     let mut pos = start;
     while pos < tokens.len() {
@@ -640,7 +697,11 @@ fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
         result.push(op);
         pos += consumed;
     }
-    result
+    (result, pos)
+}
+
+fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
+    decode_operands_with_pos(tokens, start).0
 }
 
 fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {

@@ -17,19 +17,33 @@ pub struct ShaderHash {
 
 /// Parse a HASH or XHSH chunk.
 ///
-/// HASH chunks contain a 4-byte flags field followed by a 16-byte MD5 digest.
-/// XHSH chunks contain an 8-byte hash with no flags prefix.
-/// We handle both by checking the data length.
-pub fn parse_hash(data: &[u8]) -> Option<ShaderHash> {
+/// `fourcc` should be the original FourCC from the container so it is
+/// preserved correctly for round-trip serialization. HASH chunks contain
+/// a 4-byte flags field followed by a 16-byte MD5 digest. XHSH chunks
+/// contain an 8-byte hash with no flags prefix.
+pub fn parse_hash(data: &[u8], fourcc: [u8; 4]) -> Option<ShaderHash> {
     let mut bytes = [0u8; 16];
+    let is_xhsh = &fourcc == b"XHSH";
 
-    if data.len() >= 20 {
+    if is_xhsh {
+        // XHSH: 8-byte hash, no flags prefix
+        if data.len() >= 8 {
+            bytes[..8].copy_from_slice(&data[..8]);
+            Some(ShaderHash {
+                bytes,
+                len: 8,
+                fourcc,
+            })
+        } else {
+            None
+        }
+    } else if data.len() >= 20 {
         // HASH chunk: 4 bytes flags + 16 bytes MD5
         bytes.copy_from_slice(&data[4..20]);
         Some(ShaderHash {
             bytes,
             len: 16,
-            fourcc: *b"HASH",
+            fourcc,
         })
     } else if data.len() >= 16 {
         // Could be a 16-byte hash without flags
@@ -37,15 +51,7 @@ pub fn parse_hash(data: &[u8]) -> Option<ShaderHash> {
         Some(ShaderHash {
             bytes,
             len: 16,
-            fourcc: *b"HASH",
-        })
-    } else if data.len() >= 8 {
-        // XHSH: 8-byte hash
-        bytes[..8].copy_from_slice(&data[..8]);
-        Some(ShaderHash {
-            bytes,
-            len: 8,
-            fourcc: *b"XHSH",
+            fourcc,
         })
     } else {
         None
@@ -54,7 +60,9 @@ pub fn parse_hash(data: &[u8]) -> Option<ShaderHash> {
 
 impl ChunkParser for ShaderHash {
     fn parse(data: &[u8]) -> Option<Self> {
-        parse_hash(data)
+        // Default to HASH when called via the generic ChunkParser trait.
+        // Prefer calling parse_hash(data, fourcc) directly when the FourCC is known.
+        parse_hash(data, *b"HASH")
     }
 }
 

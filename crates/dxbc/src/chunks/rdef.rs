@@ -138,6 +138,7 @@ pub enum ResourceInputType {
 }
 
 impl ResourceInputType {
+    /// Converts a raw `D3D_SHADER_INPUT_TYPE` value to the corresponding variant.
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::CBuffer,
@@ -156,6 +157,7 @@ impl ResourceInputType {
         })
     }
 
+    /// Returns the lowercase name used in disassembly output.
     pub fn name(self) -> &'static str {
         match self {
             Self::CBuffer => "cbuffer",
@@ -191,6 +193,7 @@ pub enum ResourceDimension {
 }
 
 impl ResourceDimension {
+    /// Converts a raw `D3D_SRV_DIMENSION` value to the corresponding variant.
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             1 => Self::Buffer,
@@ -207,6 +210,7 @@ impl ResourceDimension {
         })
     }
 
+    /// Returns the short dimension name used in disassembly output.
     pub fn name(self) -> &'static str {
         match self {
             Self::Buffer => "buf",
@@ -617,20 +621,27 @@ impl ResourceDef<'_> {
     /// a de-duplicated list in encounter order. Each entry is an index
     /// into the returned Vec; the index is stored alongside each variable.
     fn collect_types(&self) -> (Vec<&TypeDesc<'_>>, Vec<Vec<usize>>) {
-        // types[i] = &TypeDesc, cb_var_type_idx[cb][var] = index into types
-        let mut types: Vec<*const TypeDesc<'_>> = Vec::new();
+        // types[i] = &TypeDesc, cb_var_type_idx[cb][var] = index into types.
+        // We deduplicate by address (identity) using the pointer value as a
+        // plain usize key — no unsafe dereference needed.
+        let mut types: Vec<&TypeDesc<'_>> = Vec::new();
+        let mut seen: Vec<usize> = Vec::new(); // address-identity keys
         let mut cb_var_idx: Vec<Vec<usize>> = Vec::new();
 
-        fn register<'a>(td: &'a TypeDesc<'a>, types: &mut Vec<*const TypeDesc<'a>>) -> usize {
-            let ptr = td as *const TypeDesc<'a>;
-            // Check for pointer-identity dedup
-            if let Some(pos) = types.iter().position(|&p| core::ptr::eq(p, ptr)) {
+        fn register<'a>(
+            td: &'a TypeDesc<'a>,
+            types: &mut Vec<&'a TypeDesc<'a>>,
+            seen: &mut Vec<usize>,
+        ) -> usize {
+            let addr = td as *const TypeDesc<'a> as usize;
+            if let Some(pos) = seen.iter().position(|&a| a == addr) {
                 return pos;
             }
             let idx = types.len();
-            types.push(ptr);
+            types.push(td);
+            seen.push(addr);
             for m in &td.members {
-                register(&m.member_type, types);
+                register(&m.member_type, types, seen);
             }
             idx
         }
@@ -638,16 +649,13 @@ impl ResourceDef<'_> {
         for cb in &self.constant_buffers {
             let mut var_idxs = Vec::with_capacity(cb.variables.len());
             for v in &cb.variables {
-                let idx = register(&v.var_type, &mut types);
+                let idx = register(&v.var_type, &mut types, &mut seen);
                 var_idxs.push(idx);
             }
             cb_var_idx.push(var_idxs);
         }
 
-        // Safety: we only use these as shared references within this function's
-        // caller scope, and the lifetimes are tied to &self.
-        let types_ref: Vec<&TypeDesc<'_>> = types.iter().map(|&p| unsafe { &*p }).collect();
-        (types_ref, cb_var_idx)
+        (types, cb_var_idx)
     }
 }
 
@@ -853,19 +861,18 @@ impl ChunkWriter for ResourceDef<'_> {
         }
 
         // Write member descriptors
-        for (i, td) in types.iter().enumerate() {
+        for td in &types {
             for m in &td.members {
                 out.extend_from_slice(&st.add(m.name).to_le_bytes());
                 // Find the type index for this member's type
-                let mtype_ptr = &m.member_type as *const TypeDesc<'_>;
+                let mtype_addr = &m.member_type as *const TypeDesc<'_> as usize;
                 let mtype_idx = types
                     .iter()
-                    .position(|t| core::ptr::eq(*t, mtype_ptr))
+                    .position(|t| (*t as *const TypeDesc<'_> as usize) == mtype_addr)
                     .unwrap_or(0);
                 out.extend_from_slice(&(type_offsets[mtype_idx] as u32).to_le_bytes());
                 out.extend_from_slice(&m.offset.to_le_bytes());
             }
-            let _ = i;
         }
 
         // Write default value blobs

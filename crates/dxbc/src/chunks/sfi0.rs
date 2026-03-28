@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{ReadLe, SliceCursor};
 
 use super::{ChunkParser, ChunkWriter};
 
@@ -49,15 +49,13 @@ pub struct ShaderFeatureInfo {
 
 /// Parse an SFI0 chunk.
 pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
+    let mut c = SliceCursor::new(data);
     let lo = if data.len() >= 4 {
-        let mut c = SliceCursor::new(data);
         c.read_u32_le().ok()? as u64
     } else {
         0
     };
     let hi = if data.len() >= 8 {
-        let mut c = SliceCursor::new(data);
-        c.seek(SeekFrom::Start(4)).ok()?;
         c.read_u32_le().ok()? as u64
     } else {
         0

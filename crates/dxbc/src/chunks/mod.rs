@@ -180,11 +180,8 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
         "RTS0" => try_parse!(d, cc, RootSignature, rts0::RootSignature),
         "STAT" => try_parse!(d, cc, Stats, stat::ShaderStats),
         "SFI0" => try_parse!(d, cc, FeatureInfo, sfi0::ShaderFeatureInfo),
-        "HASH" | "XHSH" => match hash::ShaderHash::parse(d) {
-            Some(mut h) => {
-                h.fourcc = cc;
-                ChunkData::Hash(h)
-            }
+        "HASH" | "XHSH" => match hash::parse_hash(d, cc) {
+            Some(h) => ChunkData::Hash(h),
             None => ChunkData::Unknown {
                 fourcc: cc,
                 data: d,
@@ -241,7 +238,7 @@ impl ChunkData<'_> {
             ChunkData::Rdef(rd) => Some(rd.to_writable()),
             ChunkData::Shader(p) => Some(WritableChunk {
                 fourcc: p.fourcc,
-                data: p.raw.clone(),
+                data: crate::shex::encode::encode(p),
             }),
             ChunkData::Unknown { fourcc, data } => Some(WritableChunk {
                 fourcc: *fourcc,

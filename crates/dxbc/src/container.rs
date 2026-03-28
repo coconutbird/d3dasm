@@ -7,21 +7,31 @@ use crate::chunks::WritableChunk;
 
 const DXBC_MAGIC: &[u8; 4] = b"DXBC";
 
+/// A parsed DXBC container with its chunk table.
 #[derive(Debug)]
 pub struct DxbcContainer<'a> {
+    /// Byte offset of this container within the source data.
     pub offset_in_file: usize,
+    /// Total size of the container in bytes (from the DXBC header).
     pub total_size: u32,
+    /// Parsed chunk entries.
     pub chunks: Vec<DxbcChunk<'a>>,
 }
 
+/// A single chunk within a DXBC container.
 #[derive(Debug)]
 pub struct DxbcChunk<'a> {
+    /// Four-character code identifying the chunk type (e.g. `RDEF`, `SHEX`).
     pub fourcc: [u8; 4],
+    /// Chunk payload size in bytes.
     pub size: u32,
+    /// Raw chunk payload.
     pub data: &'a [u8],
 }
 
 impl DxbcChunk<'_> {
+    /// Returns the FourCC as a UTF-8 string, or `"????"` if it contains
+    /// invalid bytes.
     pub fn fourcc_str(&self) -> &str {
         core::str::from_utf8(&self.fourcc).unwrap_or("????")
     }
