@@ -1,8 +1,6 @@
 //! Input/output/patch-constant signature parsing (ISGN, OSGN, PCSG, ISG1, OSG1, PSG1).
 
 use alloc::borrow::Cow;
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -237,15 +235,6 @@ pub struct SignatureElement<'a> {
 }
 
 impl SignatureElement<'_> {
-    /// The semantic name including the index suffix (e.g. `"TEXCOORD1"`).
-    pub fn name_with_index(&self) -> String {
-        if self.semantic_index > 0 {
-            format!("{}{}", self.semantic_name, self.semantic_index)
-        } else {
-            String::from(&*self.semantic_name)
-        }
-    }
-
     /// The component type name.
     pub fn component_type_name(&self) -> &'static str {
         match ComponentType::from_u32(self.component_type) {
@@ -254,26 +243,37 @@ impl SignatureElement<'_> {
         }
     }
 
-    /// Format the columns after the name: type and register.mask.
-    pub fn format_columns(&self) -> String {
-        let mask_str = format_mask(self.mask);
-        format!(
-            "{:>7} v{}.{}",
-            self.component_type_name(),
-            self.register,
-            mask_str
-        )
+    /// Length in characters of the "name with index" string.
+    pub fn name_with_index_len(&self) -> usize {
+        let base = self.semantic_name.len();
+        if self.semantic_index > 0 {
+            base + digit_count(self.semantic_index)
+        } else {
+            base
+        }
+    }
+
+    /// Write the semantic name with index suffix directly to a formatter.
+    pub fn fmt_name_with_index(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.semantic_name)?;
+        if self.semantic_index > 0 {
+            write!(f, "{}", self.semantic_index)?;
+        }
+        Ok(())
+    }
+
+    /// Write the columns after the name: type and register.mask.
+    pub fn fmt_columns(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:>7} v{}.", self.component_type_name(), self.register)?;
+        write_mask(f, self.mask)
     }
 }
 
 impl fmt::Display for SignatureElement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:<24} {}",
-            self.name_with_index(),
-            self.format_columns()
-        )?;
+        // Use padding via a Display wrapper to avoid allocating a String.
+        write!(f, "{:<24} ", DisplayNameWithIndex(self))?;
+        self.fmt_columns(f)?;
         if let Some(s) = self.stream
             && s != 0
         {
@@ -288,25 +288,39 @@ impl fmt::Display for SignatureElement<'_> {
     }
 }
 
-fn format_mask(mask: u8) -> String {
-    let mut s = String::with_capacity(4);
+/// Display adapter that writes `semantic_name` + optional index suffix.
+struct DisplayNameWithIndex<'a, 'b>(&'a SignatureElement<'b>);
+
+impl fmt::Display for DisplayNameWithIndex<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_name_with_index(f)
+    }
+}
+
+fn write_mask(f: &mut fmt::Formatter<'_>, mask: u8) -> fmt::Result {
     if mask & 1 != 0 {
-        s.push('x');
+        f.write_str("x")?;
     }
-
     if mask & 2 != 0 {
-        s.push('y');
+        f.write_str("y")?;
     }
-
     if mask & 4 != 0 {
-        s.push('z');
+        f.write_str("z")?;
     }
-
     if mask & 8 != 0 {
-        s.push('w');
+        f.write_str("w")?;
     }
+    Ok(())
+}
 
-    s
+/// Number of decimal digits in a u32.
+fn digit_count(mut n: u32) -> usize {
+    let mut count = 1;
+    while n >= 10 {
+        n /= 10;
+        count += 1;
+    }
+    count
 }
 
 /// Parse a signature chunk. The `fourcc` string determines the element layout:

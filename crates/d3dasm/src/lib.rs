@@ -300,7 +300,9 @@ fn fmt_resource_def(f: &mut fmt::Formatter<'_>, rd: &dxbc::chunks::ResourceDef<'
             "", "", "", "", ""
         )?;
         for b in &rd.bindings {
-            writeln!(f, "// {:<nw$} {}", b.name, b.format_columns())?;
+            write!(f, "// {:<nw$} ", b.name)?;
+            b.fmt_columns(f)?;
+            writeln!(f)?;
         }
     }
     for cb in &rd.constant_buffers {
@@ -334,18 +336,22 @@ fn fmt_signature(
     }
     let nw = elements
         .iter()
-        .map(|e| e.name_with_index().len())
+        .map(|e| e.name_with_index_len())
         .max()
         .unwrap_or(4)
         .max(4);
     writeln!(f, "// {header}:")?;
     for e in elements {
-        writeln!(
-            f,
-            "//   {:<nw$} {}",
-            e.name_with_index(),
-            e.format_columns()
-        )?;
+        write!(f, "//   ")?;
+        // Pad the name+index to nw columns, then columns.
+        let name_len = e.name_with_index_len();
+        e.fmt_name_with_index(f)?;
+        for _ in name_len..nw {
+            f.write_str(" ")?;
+        }
+        write!(f, " ")?;
+        e.fmt_columns(f)?;
+        writeln!(f)?;
     }
     writeln!(f, "//")?;
     Ok(())

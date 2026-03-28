@@ -300,67 +300,57 @@ impl ResourceBinding<'_> {
         }
     }
 
-    fn flags_str(&self) -> alloc::string::String {
+    fn write_flags(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.flags == 0 {
-            return alloc::string::String::new();
+            return Ok(());
         }
-        let mut parts = alloc::vec::Vec::new();
-        if self.flags & BIND_FLAG_USER_PACKED != 0 {
-            parts.push("userPacked");
-        }
-        if self.flags & BIND_FLAG_USED != 0 {
-            parts.push("used");
-        }
-        if self.flags & BIND_FLAG_COMPARISON_SAMPLER != 0 {
-            parts.push("comparisonSampler");
-        }
-        if self.flags & BIND_FLAG_TEX_COMP_0 != 0 {
-            parts.push("texComp0");
-        }
-        if self.flags & BIND_FLAG_TEX_COMP_1 != 0 {
-            parts.push("texComp1");
-        }
-        if parts.is_empty() {
-            alloc::format!("0x{:x}", self.flags)
-        } else {
-            let mut s = alloc::string::String::new();
-            for (i, p) in parts.iter().enumerate() {
-                if i > 0 {
-                    s.push(';');
+        let parts: &[(&str, u32)] = &[
+            ("userPacked", BIND_FLAG_USER_PACKED),
+            ("used", BIND_FLAG_USED),
+            ("comparisonSampler", BIND_FLAG_COMPARISON_SAMPLER),
+            ("texComp0", BIND_FLAG_TEX_COMP_0),
+            ("texComp1", BIND_FLAG_TEX_COMP_1),
+        ];
+        let mut first = true;
+        let mut matched = false;
+        for &(name, bit) in parts {
+            if self.flags & bit != 0 {
+                if !first {
+                    f.write_str(";")?;
                 }
-                s.push_str(p);
+                f.write_str(name)?;
+                first = false;
+                matched = true;
             }
-            s
         }
+        if !matched {
+            write!(f, "0x{:x}", self.flags)?;
+        }
+        Ok(())
     }
 
-    /// Format the type, dimension, slot, bind count, and flags columns.
-    pub fn format_columns(&self) -> alloc::string::String {
-        let flags = self.flags_str();
-        if flags.is_empty() {
-            alloc::format!(
-                "{:<12} {:<8} {:<4} {}",
-                self.type_name(),
-                self.dim_name(),
-                self.bind_point,
-                self.bind_count
-            )
-        } else {
-            alloc::format!(
-                "{:<12} {:<8} {:<4} {:<5} {}",
-                self.type_name(),
-                self.dim_name(),
-                self.bind_point,
-                self.bind_count,
-                flags
-            )
+    /// Write the type, dimension, slot, bind count, and flags columns.
+    pub fn fmt_columns(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:<12} {:<8} {:<4} {:<5}",
+            self.type_name(),
+            self.dim_name(),
+            self.bind_point,
+            self.bind_count,
+        )?;
+        if self.flags != 0 {
+            f.write_str(" ")?;
+            self.write_flags(f)?;
         }
+        Ok(())
     }
 }
 
 impl fmt::Display for ResourceBinding<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:<20} {}", self.name, self.format_columns())
+        write!(f, "{:<20} ", self.name)?;
+        self.fmt_columns(f)
     }
 }
 
