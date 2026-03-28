@@ -1,3 +1,13 @@
+//! SM4/SM5 shader bytecode handling: decode, encode, and format.
+//!
+//! The pipeline is **bytes → IR → text** (disassembly) or
+//! **IR → bytes** (encoding / round-trip).
+//!
+//! * `decode::decode` parses raw SHEX/SHDR chunk bytes into an `ir::Program`.
+//! * `fmt::format_program` renders a `Program` as human-readable text.
+//! * `encode::encode` serialises a `Program` back to the binary dword stream.
+//! * `disassemble` is a convenience that chains decode + format.
+
 use alloc::string::String;
 
 pub mod decode;
@@ -9,7 +19,7 @@ pub mod opcodes;
 /// Disassemble a SHEX or SHDR chunk into human-readable text.
 ///
 /// This is the main entry point. It decodes the raw bytes into a structured
-/// IR ([`ir::Program`]) and then formats it into text.
+/// IR (`ir::Program`) and then formats it into text.
 pub fn disassemble(data: &[u8]) -> String {
     match decode::decode(data) {
         Ok(program) => fmt::format_program(&program),

@@ -136,7 +136,8 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "nostdio"
 version = "0.1.0"
-source = "git+https://github.com/coconutbird/nostdio.git#19e2c5c827aa0925900e2af1791e746d112a14c9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dd90a73af33ea00621a62c02e1c918457df504135180c959577099f043b9e2e"
 
 [[package]]
 name = "once_cell_polyfill"

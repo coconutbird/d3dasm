@@ -123,17 +123,29 @@ pub struct MemberDesc<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ResourceInputType {
+    /// Constant buffer.
     CBuffer = 0,
+    /// Texture buffer.
     TBuffer = 1,
+    /// Texture (SRV).
     Texture = 2,
+    /// Sampler state.
     Sampler = 3,
+    /// Read-write typed UAV.
     UavRwTyped = 4,
+    /// Structured buffer (SRV).
     Structured = 5,
+    /// Read-write structured buffer (UAV).
     UavRwStructured = 6,
+    /// Byte-address buffer (SRV).
     ByteAddress = 7,
+    /// Read-write byte-address buffer (UAV).
     UavRwByteAddress = 8,
+    /// Append structured buffer (UAV).
     UavAppendStructured = 9,
+    /// Consume structured buffer (UAV).
     UavConsumeStructured = 10,
+    /// Read-write structured buffer with hidden counter (UAV).
     UavRwStructuredWithCounter = 11,
 }
 
@@ -180,15 +192,25 @@ impl ResourceInputType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ResourceDimension {
+    /// Buffer resource.
     Buffer = 1,
+    /// 1D texture.
     Texture1D = 2,
+    /// 2D texture.
     Texture2D = 3,
+    /// 2D multisampled texture.
     Texture2DMS = 4,
+    /// 3D (volume) texture.
     Texture3D = 5,
+    /// Cube-map texture.
     TextureCube = 6,
+    /// 1D texture array.
     Texture1DArray = 7,
+    /// 2D texture array.
     Texture2DArray = 8,
+    /// 2D multisampled texture array.
     Texture2DMSArray = 9,
+    /// Cube-map texture array.
     TextureCubeArray = 10,
 }
 
@@ -227,11 +249,15 @@ impl ResourceDimension {
     }
 }
 
-/// Resource binding flags (D3D_SHADER_CBUFFER_FLAGS / input bind flags).
+/// Binding was explicitly packed by the user.
 pub const BIND_FLAG_USER_PACKED: u32 = 0x1;
+/// Binding is actually used by the shader.
 pub const BIND_FLAG_USED: u32 = 0x2;
+/// Sampler is a comparison sampler.
 pub const BIND_FLAG_COMPARISON_SAMPLER: u32 = 0x4;
+/// Texture component flag bit 0.
 pub const BIND_FLAG_TEX_COMP_0: u32 = 0x8;
+/// Texture component flag bit 1.
 pub const BIND_FLAG_TEX_COMP_1: u32 = 0x10;
 
 /// Sentinel value for unused texture/sampler start slots.

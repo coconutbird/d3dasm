@@ -1,7 +1,7 @@
 //! Chunk parsers for every known DXBC chunk type.
 //!
 //! Each sub-module handles one (or a family of related) chunk FourCCs.
-//! [`parse_chunk`] dispatches on the FourCC and returns a typed [`ChunkData`]
+//! [`parse_chunk`](crate::chunks::parse_chunk) dispatches on the FourCC and returns a typed [`ChunkData`](crate::chunks::ChunkData)
 //! variant so callers never need to match on raw strings themselves.
 
 pub mod dxil;
@@ -129,7 +129,12 @@ pub enum ChunkData<'a> {
     /// LIBH — library header.
     LibraryHeader(libh::LibraryHeader),
     /// Unrecognised chunk — preserved so nothing is silently dropped.
-    Unknown { fourcc: [u8; 4], data: &'a [u8] },
+    Unknown {
+        /// FourCC identifier of the unknown chunk.
+        fourcc: [u8; 4],
+        /// Raw chunk data.
+        data: &'a [u8],
+    },
 }
 
 /// Helper: try a `ChunkParser` impl and fall back to `Unknown` on `None`.

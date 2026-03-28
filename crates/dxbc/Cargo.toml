@@ -5,4 +5,4 @@ edition = "2024"
 description = "DXBC (DirectX Bytecode) container parser and SM4/SM5 shader disassembler"
 
 [dependencies]
-nostdio = { git = "https://github.com/coconutbird/nostdio.git" }
+nostdio = "0.1.0"

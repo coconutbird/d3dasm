@@ -1,3 +1,5 @@
+//! Input/output/patch-constant signature parsing (ISGN, OSGN, PCSG, ISG1, OSG1, PSG1).
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -83,14 +85,23 @@ impl SignatureVersion {
 /// Minimum precision hint (ISG1 / OSG1 / PSG1 only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinPrecision {
+    /// Default (full) precision.
     Default,
+    /// 16-bit float minimum precision.
     Float16,
+    /// 2.8 fixed-point float minimum precision.
     Float2_8,
+    /// Reserved value.
     Reserved,
+    /// 16-bit signed integer minimum precision.
     SInt16,
+    /// 16-bit unsigned integer minimum precision.
     UInt16,
+    /// Any 16-bit precision.
     Any16,
+    /// Any 10-bit precision.
     Any10,
+    /// Unrecognised minimum precision (raw value preserved).
     Unknown(u32),
 }
 
@@ -144,15 +155,25 @@ impl fmt::Display for MinPrecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ComponentType {
+    /// Unknown / unspecified.
     Unknown = 0,
+    /// 32-bit unsigned integer.
     UInt = 1,
+    /// 32-bit signed integer.
     Int = 2,
+    /// 32-bit IEEE float.
     Float = 3,
+    /// 16-bit unsigned integer.
     UInt16 = 4,
+    /// 16-bit signed integer.
     Int16 = 5,
+    /// 16-bit IEEE float (half).
     Float16 = 6,
+    /// 64-bit unsigned integer.
     UInt64 = 7,
+    /// 64-bit signed integer.
     Int64 = 8,
+    /// 64-bit double-precision float.
     Float64 = 9,
 }
 
@@ -194,12 +215,19 @@ impl ComponentType {
 /// A parsed input or output signature element.
 #[derive(Debug)]
 pub struct SignatureElement<'a> {
+    /// Semantic name (e.g. `"POSITION"`, `"TEXCOORD"`).
     pub semantic_name: &'a str,
+    /// Semantic index (e.g. `0` for `TEXCOORD0`, `1` for `TEXCOORD1`).
     pub semantic_index: u32,
+    /// System-value semantic (`D3D_NAME` enum, 0 = none).
     pub system_value: u32,
+    /// Component data type (`D3D_REGISTER_COMPONENT_TYPE` value).
     pub component_type: u32,
+    /// Register number (`v#` for inputs, `o#` for outputs).
     pub register: u32,
+    /// Write mask — which `.xyzw` components are written.
     pub mask: u8,
+    /// Read/write mask — which components are actually read or written.
     pub rw_mask: u8,
     /// GS output stream index (OSG5 / ISG1 / OSG1 / PSG1 only).
     pub stream: Option<u32>,

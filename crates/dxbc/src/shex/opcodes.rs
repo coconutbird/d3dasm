@@ -7,233 +7,449 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum Opcode {
-    // D3D10 (0–87)
+    // D3D10 ALU / flow-control (0–87)
+    /// Floating-point add: `dest = src0 + src1`.
     Add,
+    /// Bitwise AND: `dest = src0 & src1`.
     And,
+    /// Break out of a loop.
     Break,
+    /// Conditional break.
     Breakc,
+    /// Call a subroutine label.
     Call,
+    /// Conditional call.
     Callc,
+    /// Switch-case label.
     Case,
+    /// Continue to the next loop iteration.
     Continue,
+    /// Conditional continue.
     Continuec,
+    /// Geometry shader: cut the current primitive strip.
     Cut,
+    /// Switch-default label.
     Default,
+    /// Partial derivative with respect to screen-space X.
     Deriv_rtx,
+    /// Partial derivative with respect to screen-space Y.
     Deriv_rty,
+    /// Conditionally discard the current pixel.
     Discard,
+    /// Floating-point divide: `dest = src0 / src1`.
     Div,
+    /// Two-component dot product.
     Dp2,
+    /// Three-component dot product.
     Dp3,
+    /// Four-component dot product.
     Dp4,
+    /// Else branch of an if/else block.
     Else,
+    /// Geometry shader: emit a vertex.
     Emit,
+    /// Geometry shader: emit a vertex then cut the strip.
     EmitThenCut,
+    /// End of an if/else block.
     EndIf,
+    /// End of a loop block.
     EndLoop,
+    /// End of a switch block.
     EndSwitch,
+    /// Floating-point equality comparison.
     Eq,
+    /// Base-2 exponent: `dest = 2^src`.
     Exp,
+    /// Fractional part: `dest = frac(src)`.
     Frc,
+    /// Float to signed integer conversion.
     Ftoi,
+    /// Float to unsigned integer conversion.
     Ftou,
+    /// Floating-point greater-or-equal comparison.
     Ge,
+    /// Signed integer add.
     Iadd,
+    /// Conditional branch.
     If,
+    /// Signed integer equality comparison.
     IEq,
+    /// Signed integer greater-or-equal comparison.
     IGe,
+    /// Signed integer less-than comparison.
     ILt,
+    /// Signed integer multiply-add.
     IMad,
+    /// Signed integer maximum.
     IMax,
+    /// Signed integer minimum.
     IMin,
+    /// Signed integer multiply (produces hi and lo results).
     IMul,
+    /// Signed integer not-equal comparison.
     INe,
+    /// Signed integer negate.
     INeg,
+    /// Integer shift left.
     Ishl,
+    /// Signed integer arithmetic shift right.
     Ishr,
+    /// Signed integer to float conversion.
     Itof,
+    /// Subroutine label definition.
     Label,
+    /// Load from a resource (no sampling).
     Ld,
+    /// Load from a multi-sampled resource.
     LdMs,
+    /// Base-2 logarithm: `dest = log2(src)`.
     Log,
+    /// Begin a loop block.
     Loop,
+    /// Floating-point less-than comparison.
     Lt,
+    /// Floating-point multiply-add: `dest = src0 * src1 + src2`.
     Mad,
+    /// Floating-point minimum.
     Min,
+    /// Floating-point maximum.
     Max,
+    /// Custom data block (e.g. immediate constant buffer).
     CustomData,
+    /// Move (copy) a value.
     Mov,
+    /// Conditional move: `dest = src0 ? src1 : src2`.
     Movc,
+    /// Floating-point multiply.
     Mul,
+    /// Floating-point not-equal comparison.
     Ne,
+    /// No operation.
     Nop,
+    /// Bitwise NOT.
     Not,
+    /// Bitwise OR.
     Or,
+    /// Query resource dimensions / element count.
     Resinfo,
+    /// Return from the current shader or subroutine.
     Ret,
+    /// Conditional return.
     Retc,
+    /// Round to nearest even.
     Round_ne,
+    /// Round towards negative infinity (floor).
     Round_ni,
+    /// Round towards positive infinity (ceil).
     Round_pi,
+    /// Round towards zero (truncate).
     Round_z,
+    /// Reciprocal square root: `dest = 1 / sqrt(src)`.
     Rsq,
+    /// Sample a texture.
     Sample,
+    /// Sample with comparison (shadow sampling).
     SampleC,
+    /// Sample-compare at LOD zero.
     SampleCLz,
+    /// Sample at an explicit LOD.
     SampleL,
+    /// Sample with explicit derivatives.
     SampleD,
+    /// Sample with a bias applied to the mip level.
     SampleB,
+    /// Floating-point square root.
     Sqrt,
+    /// Begin a switch block.
     Switch,
+    /// Simultaneous sine and cosine.
     Sincos,
+    /// Unsigned integer divide (quotient and remainder).
     UDiv,
+    /// Unsigned integer less-than comparison.
     ULt,
+    /// Unsigned integer greater-or-equal comparison.
     UGe,
+    /// Unsigned integer multiply (produces hi and lo results).
     UMul,
+    /// Unsigned integer multiply-add.
     UMad,
+    /// Unsigned integer maximum.
     UMax,
+    /// Unsigned integer minimum.
     UMin,
+    /// Unsigned integer (logical) shift right.
     Ushr,
+    /// Unsigned integer to float conversion.
     Utof,
+    /// Bitwise XOR.
     Xor,
-    // Declarations (88-106)
+    // Declarations (88–106)
+    /// Declare a shader resource (SRV).
     DclResource,
+    /// Declare a constant buffer binding.
     DclConstantBuffer,
+    /// Declare a sampler state.
     DclSampler,
+    /// Declare an index range for signature elements.
     DclIndexRange,
+    /// Declare GS output primitive topology.
     DclGsOutputPrimitiveTopology,
+    /// Declare GS input primitive type.
     DclGsInputPrimitive,
+    /// Declare the maximum output vertex count for a GS.
     DclMaxOutputVertexCount,
+    /// Declare a generic shader input register.
     DclInput,
+    /// Declare a system-generated value input.
     DclInputSgv,
+    /// Declare a system-interpreted value input.
     DclInputSiv,
+    /// Declare a pixel shader input with interpolation mode.
     DclInputPs,
+    /// Declare a PS system-generated value input.
     DclInputPsSgv,
+    /// Declare a PS system-interpreted value input.
     DclInputPsSiv,
+    /// Declare a shader output register.
     DclOutput,
+    /// Declare a system-generated value output.
     DclOutputSgv,
+    /// Declare a system-interpreted value output.
     DclOutputSiv,
+    /// Declare the number of temporary registers.
     DclTemps,
+    /// Declare an indexable temporary register array.
     DclIndexableTemp,
+    /// Declare global shader flags (refactoring, doubles, etc.).
     DclGlobalFlags,
-    // DX10.1 (108-111)
+    // DX10.1 (108–111)
+    /// Query texture LOD.
     Lod,
+    /// Four-sample gather from a texture.
     Gather4,
+    /// Query multisample sample position.
     SamplePos,
+    /// Query multisample sample info.
     SampleInfo,
-    // DX11 HS phases (113-116)
+    // DX11 HS phases (113–116)
+    /// Hull shader declarations phase marker.
     HsDecls,
+    /// Hull shader control-point phase marker.
     HsControlPointPhase,
+    /// Hull shader fork phase marker.
     HsForkPhase,
+    /// Hull shader join phase marker.
     HsJoinPhase,
-    // DX11 stream ops (117-120)
+    // DX11 stream ops (117–120)
+    /// GS: emit a vertex to a specific stream.
     EmitStream,
+    /// GS: cut the primitive strip on a specific stream.
     CutStream,
+    /// GS: emit then cut on a specific stream.
     EmitThenCutStream,
+    /// Call through a function-pointer interface.
     InterfaceCall,
-    // DX11 SM5 instructions (121-142)
+    // DX11 SM5 instructions (121–142)
+    /// Query buffer element count / stride.
     BufInfo,
+    /// Coarse partial derivative with respect to X.
     Deriv_rtx_coarse,
+    /// Fine partial derivative with respect to X.
     Deriv_rtx_fine,
+    /// Coarse partial derivative with respect to Y.
     Deriv_rty_coarse,
+    /// Fine partial derivative with respect to Y.
     Deriv_rty_fine,
+    /// Four-sample gather with comparison.
     Gather4C,
+    /// Four-sample gather with programmable offset.
     Gather4Po,
+    /// Four-sample gather with programmable offset and comparison.
     Gather4PoC,
+    /// Reciprocal: `dest = 1.0 / src`.
     Rcp,
+    /// Convert 32-bit float to 16-bit float (stored in low 16 bits).
     F32tof16,
+    /// Convert 16-bit float (in low 16 bits) to 32-bit float.
     F16tof32,
+    /// Unsigned integer add with carry out.
     Uaddc,
+    /// Unsigned integer subtract with borrow out.
     Usubb,
+    /// Count the number of set bits (population count).
     Countbits,
+    /// Find first set bit from MSB (unsigned).
     FirstbitHi,
+    /// Find first set bit from LSB.
     FirstbitLo,
+    /// Find first set bit from MSB (signed / sign bit aware).
     FirstbitShi,
+    /// Unsigned bitfield extract.
     Ubfe,
+    /// Signed bitfield extract.
     Ibfe,
+    /// Bitfield insert.
     Bfi,
+    /// Reverse all bits.
     Bfrev,
+    /// Conditional swap of two source pairs.
     Swapc,
-    // DX11 SM5 declarations (143-162)
+    // DX11 SM5 declarations (143–162)
+    /// Declare a GS output stream.
     DclStream,
+    /// Declare a function body for interface calls.
     DclFunctionBody,
+    /// Declare a function table for interface dispatch.
     DclFunctionTable,
+    /// Declare a class interface binding.
     DclInterface,
+    /// Declare the HS input control-point count.
     DclInputControlPointCount,
+    /// Declare the HS output control-point count.
     DclOutputControlPointCount,
+    /// Declare the tessellation domain (tri, quad, isoline).
     DclTessDomain,
+    /// Declare the tessellation partitioning mode.
     DclTessPartitioning,
+    /// Declare the tessellation output primitive topology.
     DclTessOutputPrimitive,
+    /// Declare the HS maximum tessellation factor.
     DclHsMaxTessFactor,
+    /// Declare the HS fork-phase instance count.
     DclHsForkPhaseInstanceCount,
+    /// Declare the HS join-phase instance count.
     DclHsJoinPhaseInstanceCount,
+    /// Declare the compute shader thread group dimensions.
     DclThreadGroup,
+    /// Declare a typed UAV binding.
     DclUnorderedAccessViewTyped,
+    /// Declare a raw (byte-addressed) UAV.
     DclUnorderedAccessViewRaw,
+    /// Declare a structured UAV.
     DclUnorderedAccessViewStructured,
+    /// Declare raw thread-group shared memory.
     DclThreadGroupSharedMemoryRaw,
+    /// Declare structured thread-group shared memory.
     DclThreadGroupSharedMemoryStructured,
+    /// Declare a raw (byte-addressed) SRV.
     DclResourceRaw,
+    /// Declare a structured SRV.
     DclResourceStructured,
-    // DX11 SM5 UAV/structured ops (163-190)
+    // DX11 SM5 UAV/structured ops (163–190)
+    /// Load from a typed UAV.
     LdUavTyped,
+    /// Store to a typed UAV.
     StoreUavTyped,
+    /// Load from a raw (byte-addressed) buffer.
     LdRaw,
+    /// Store to a raw (byte-addressed) buffer.
     StoreRaw,
+    /// Load from a structured buffer.
     LdStructured,
+    /// Store to a structured buffer.
     StoreStructured,
+    /// Atomic bitwise AND on a UAV/TGSM element.
     AtomicAnd,
+    /// Atomic bitwise OR on a UAV/TGSM element.
     AtomicOr,
+    /// Atomic bitwise XOR on a UAV/TGSM element.
     AtomicXor,
+    /// Atomic compare-and-store on a UAV/TGSM element.
     AtomicCmpStore,
+    /// Atomic signed integer add on a UAV/TGSM element.
     AtomicIAdd,
+    /// Atomic signed integer max on a UAV/TGSM element.
     AtomicIMax,
+    /// Atomic signed integer min on a UAV/TGSM element.
     AtomicIMin,
+    /// Atomic unsigned integer max on a UAV/TGSM element.
     AtomicUMax,
+    /// Atomic unsigned integer min on a UAV/TGSM element.
     AtomicUMin,
+    /// Allocate from an append/consume UAV counter.
     ImmAtomicAlloc,
+    /// Consume from an append/consume UAV counter.
     ImmAtomicConsume,
+    /// Immediate atomic signed integer add (returns original value).
     ImmAtomicIAdd,
+    /// Immediate atomic bitwise AND (returns original value).
     ImmAtomicAnd,
+    /// Immediate atomic bitwise OR (returns original value).
     ImmAtomicOr,
+    /// Immediate atomic bitwise XOR (returns original value).
     ImmAtomicXor,
+    /// Immediate atomic exchange (returns original value).
     ImmAtomicExch,
+    /// Immediate atomic compare-exchange (returns original value).
     ImmAtomicCmpExch,
+    /// Immediate atomic signed integer max (returns original value).
     ImmAtomicIMax,
+    /// Immediate atomic signed integer min (returns original value).
     ImmAtomicIMin,
+    /// Immediate atomic unsigned integer max (returns original value).
     ImmAtomicUMax,
+    /// Immediate atomic unsigned integer min (returns original value).
     ImmAtomicUMin,
+    /// Thread group memory barrier / sync.
     Sync,
-    // DX11 double-precision (191-202)
+    // DX11 double-precision (191–202)
+    /// Double-precision add.
     Dadd,
+    /// Double-precision maximum.
     Dmax,
+    /// Double-precision minimum.
     Dmin,
+    /// Double-precision multiply.
     Dmul,
+    /// Double-precision equality comparison.
     Deq,
+    /// Double-precision greater-or-equal comparison.
     Dge,
+    /// Double-precision less-than comparison.
     Dlt,
+    /// Double-precision not-equal comparison.
     Dne,
+    /// Double-precision move.
     Dmov,
+    /// Double-precision conditional move.
     Dmovc,
+    /// Double to float conversion.
     Dtof,
+    /// Float to double conversion.
     Ftod,
-    // DX11 eval (203-206)
+    // DX11 eval (203–206)
+    /// Evaluate an input attribute at a snapped pixel offset.
     Eval_snapped,
+    /// Evaluate an input attribute at a specific sample index.
     Eval_sampleIndex,
+    /// Evaluate an input attribute at the pixel centroid.
     Eval_centroid,
+    /// Declare the GS instance count.
     DclGsInstanceCount,
-    // DX11 misc (207-208)
+    // DX11 misc (207–208)
+    /// Abort shader execution (debug).
     Abort,
+    /// Trigger a debug breakpoint.
     DebugBreak,
-    // DX11.1 (210-217)
+    // DX11.1 (210–217)
+    /// Double-precision divide.
     Ddiv,
+    /// Double-precision fused multiply-add.
     Dfma,
+    /// Double-precision reciprocal.
     Drcp,
+    /// Masked sum of absolute differences (MSAD).
     Msad,
+    /// Double to signed integer conversion.
     Dtoi,
+    /// Double to unsigned integer conversion.
     Dtou,
+    /// Signed integer to double conversion.
     Itod,
+    /// Unsigned integer to double conversion.
     Utod,
+    /// Unknown or unrecognised opcode (preserved for forward compatibility).
     Unknown(u32),
 }
 

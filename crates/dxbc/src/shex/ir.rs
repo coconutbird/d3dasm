@@ -44,86 +44,169 @@ pub struct Instruction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstructionKind {
     /// A non-declaration instruction (ALU, flow-control, memory, etc.).
-    Generic { operands: Vec<Operand> },
+    Generic {
+        /// Instruction operands (destination first, then sources).
+        operands: Vec<Operand>,
+    },
     /// `dcl_globalFlags` — shader-wide capability flags.
-    DclGlobalFlags { flags: Vec<&'static str> },
+    DclGlobalFlags {
+        /// Active flag strings (e.g. `"refactoringAllowed"`, `"enableDoublePrecisionFloatOps"`).
+        flags: Vec<&'static str>,
+    },
     /// `dcl_input` / `dcl_input_ps` — input register declaration.
     DclInput {
+        /// PS interpolation mode (e.g. `"linear"`, `"constant"`), if applicable.
         interpolation: Option<&'static str>,
+        /// System value semantic (e.g. `"position"`, `"undefined"`), if present.
         system_value: Option<&'static str>,
+        /// Input register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_output` / `dcl_output_sgv` — output register declaration.
     DclOutput {
+        /// System value semantic, if present.
         system_value: Option<&'static str>,
+        /// Output register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_resource` — SRV resource declaration (Texture1D/2D/3D/Cube/etc.).
     DclResource {
+        /// Resource dimension name (e.g. `"texture2d"`, `"buffer"`).
         dimension: &'static str,
+        /// Per-component return types (e.g. `[Float, Float, Float, Float]`).
         return_type: [ReturnType; 4],
+        /// Resource register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_sampler` — sampler state declaration.
     DclSampler {
+        /// Sampler mode (`"default"`, `"comparison"`, `"mono"`).
         mode: &'static str,
+        /// Sampler register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_constantbuffer` — constant-buffer binding.
     DclConstantBuffer {
+        /// Access pattern (`"immediateIndexed"` or `"dynamicIndexed"`).
         access: &'static str,
+        /// Constant-buffer register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_temps` — number of temporary registers.
-    DclTemps { count: u32 },
+    DclTemps {
+        /// Number of temporary registers to allocate.
+        count: u32,
+    },
     /// `dcl_indexableTemp` — an indexable temporary register array.
     DclIndexableTemp {
+        /// Register array index.
         reg: u32,
+        /// Number of elements in the array.
         size: u32,
+        /// Number of components per element.
         components: u32,
     },
     /// `dcl_inputPrimitive` — geometry shader input primitive topology.
-    DclGsInputPrimitive { primitive: &'static str },
+    DclGsInputPrimitive {
+        /// Primitive name (e.g. `"triangle"`, `"line"`, `"point"`).
+        primitive: &'static str,
+    },
     /// `dcl_outputTopology` — geometry shader output topology.
-    DclGsOutputTopology { topology: &'static str },
+    DclGsOutputTopology {
+        /// Topology name (e.g. `"trianglestrip"`, `"linestrip"`, `"pointlist"`).
+        topology: &'static str,
+    },
     /// `dcl_maxOutputVertexCount` — GS max output vertex count.
-    DclMaxOutputVertexCount { count: u32 },
+    DclMaxOutputVertexCount {
+        /// Maximum vertices emitted per invocation.
+        count: u32,
+    },
     /// `dcl_gs_instance_count` — number of GS instances.
-    DclGsInstanceCount { count: u32 },
+    DclGsInstanceCount {
+        /// Number of geometry shader instances.
+        count: u32,
+    },
     /// `dcl_output_control_point_count` — HS output control point count.
-    DclOutputControlPointCount { count: u32 },
+    DclOutputControlPointCount {
+        /// Number of output control points.
+        count: u32,
+    },
     /// `dcl_input_control_point_count` — HS input control point count.
-    DclInputControlPointCount { count: u32 },
+    DclInputControlPointCount {
+        /// Number of input control points.
+        count: u32,
+    },
     /// `dcl_tess_domain` — tessellator domain (tri, quad, isoline).
-    DclTessDomain { domain: &'static str },
+    DclTessDomain {
+        /// Domain name string.
+        domain: &'static str,
+    },
     /// `dcl_tess_partitioning` — tessellator partitioning mode.
-    DclTessPartitioning { partitioning: &'static str },
+    DclTessPartitioning {
+        /// Partitioning mode string.
+        partitioning: &'static str,
+    },
     /// `dcl_tess_output_primitive` — tessellator output primitive type.
-    DclTessOutputPrimitive { primitive: &'static str },
+    DclTessOutputPrimitive {
+        /// Primitive type string.
+        primitive: &'static str,
+    },
     /// `dcl_hs_max_tessfactor` — maximum tessellation factor.
-    DclHsMaxTessFactor { value: f32 },
+    DclHsMaxTessFactor {
+        /// Maximum tessellation factor value.
+        value: f32,
+    },
     /// `dcl_hs_fork_phase_instance_count` — HS fork/join phase instance count.
-    DclHsForkPhaseInstanceCount { count: u32 },
+    DclHsForkPhaseInstanceCount {
+        /// Number of phase instances.
+        count: u32,
+    },
     /// `dcl_thread_group` — compute shader thread group dimensions.
-    DclThreadGroup { x: u32, y: u32, z: u32 },
+    DclThreadGroup {
+        /// Thread group X dimension.
+        x: u32,
+        /// Thread group Y dimension.
+        y: u32,
+        /// Thread group Z dimension.
+        z: u32,
+    },
     /// `dcl_uav_typed` — typed UAV declaration.
     DclUavTyped {
+        /// UAV resource dimension.
         dimension: &'static str,
+        /// Per-component return types.
         return_type: [ReturnType; 4],
+        /// UAV register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_uav_raw` — raw (byte-address) UAV declaration.
-    DclUavRaw { flags: u32, operands: Vec<Operand> },
+    DclUavRaw {
+        /// UAV flags (globally coherent, etc.).
+        flags: u32,
+        /// UAV register operands.
+        operands: Vec<Operand>,
+    },
     /// `dcl_uav_structured` — structured UAV declaration.
     DclUavStructured {
+        /// UAV flags (globally coherent, etc.).
         flags: u32,
+        /// Structure byte stride.
         stride: u32,
+        /// UAV register operands.
         operands: Vec<Operand>,
     },
     /// `dcl_resource_raw` — raw (byte-address) SRV declaration.
-    DclResourceRaw { operands: Vec<Operand> },
+    DclResourceRaw {
+        /// SRV register operands.
+        operands: Vec<Operand>,
+    },
     /// `dcl_resource_structured` — structured SRV declaration.
-    DclResourceStructured { stride: u32, operands: Vec<Operand> },
+    DclResourceStructured {
+        /// Structure byte stride.
+        stride: u32,
+        /// SRV register operands.
+        operands: Vec<Operand>,
+    },
     /// `dcl_function_body` — declares a function body slot.
     DclFunctionBody {
         /// Function body index.
@@ -146,13 +229,21 @@ pub enum InstructionKind {
         table_indices: Vec<u32>,
     },
     /// `dcl_index_range` — declares an indexable register range.
-    DclIndexRange { operands: Vec<Operand>, count: u32 },
+    DclIndexRange {
+        /// Register operands defining the range start.
+        operands: Vec<Operand>,
+        /// Number of registers in the range.
+        count: u32,
+    },
     /// Hull-shader phase marker (`hs_control_point_phase`, `hs_fork_phase`, etc.).
     HsPhase,
     /// `customdata` — embedded constant buffer or opaque blob.
     CustomData {
+        /// Custom data sub-type (ICB, comment, opaque, etc.).
         subtype: CustomDataType,
+        /// ICB values as four-component float vectors.
         values: Vec<[f32; 4]>,
+        /// Total dword count of the custom data block (including header).
         raw_dword_count: usize,
     },
 }
@@ -238,47 +329,89 @@ pub enum ComponentSelect {
 /// SM4/SM5 operand register type (`D3D10_SB_OPERAND_TYPE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterType {
+    /// General-purpose temporary register (`r#`).
     Temp,
+    /// Shader input register (`v#`).
     Input,
+    /// Shader output register (`o#`).
     Output,
+    /// Indexable temporary register array (`x#`).
     IndexableTemp,
+    /// 32-bit inline immediate value (`l(...)`).
     Immediate32,
+    /// 64-bit inline immediate value (`d(...)`).
     Immediate64,
+    /// Sampler state (`s#`).
     Sampler,
+    /// Shader resource view (`t#`).
     Resource,
+    /// Constant buffer (`cb#`).
     ConstantBuffer,
+    /// Immediate constant buffer (ICB, from `customdata`).
     ImmConstBuffer,
+    /// Subroutine label.
     Label,
+    /// System-generated primitive ID input.
     InputPrimitiveID,
+    /// Pixel shader depth output (`oDepth`).
     OutputDepth,
+    /// Null register (discard writes / unused reads).
     Null,
+    /// Rasterizer register.
     Rasterizer,
+    /// Sample coverage mask output (`oMask`).
     OutputCoverageMask,
+    /// GS output stream selector.
     Stream,
+    /// Function body reference (for interface dispatch).
     FunctionBody,
+    /// Function table reference (for interface dispatch).
     FunctionTable,
+    /// Class interface pointer.
     Interface,
+    /// Function input parameter.
     FunctionInput,
+    /// Function output parameter.
     FunctionOutput,
+    /// HS output control-point ID (`vOutputControlPointID`).
     OutputControlPointID,
+    /// HS fork-phase instance ID.
     ForkInstanceID,
+    /// HS join-phase instance ID.
     JoinInstanceID,
+    /// HS/DS input control point (`vicp`).
     InputControlPoint,
+    /// HS output control point (`vocp`).
     OutputControlPoint,
+    /// Patch constant data register (`vpc`).
     PatchConstant,
+    /// DS domain location input (`vDomain`).
     DomainLocation,
+    /// Class `this` pointer.
     ThisPointer,
+    /// Unordered access view (`u#`).
     Uav,
+    /// Thread-group shared memory (`g#`).
     ThreadGroupSharedMemory,
+    /// Compute shader thread ID (`vThreadID`).
     ThreadID,
+    /// Compute shader thread-group ID (`vThreadGroupID`).
     ThreadGroupID,
+    /// Thread ID within the group (`vThreadIDInGroup`).
     ThreadIDInGroup,
+    /// Sample coverage input (`vCoverage`).
     Coverage,
+    /// Flattened thread ID within the group.
     ThreadIDInGroupFlattened,
+    /// GS instance ID (`vGSInstanceID`).
     GsInstanceID,
+    /// Depth output with greater-or-equal constraint (`oDepthGE`).
     OutputDepthGE,
+    /// Depth output with less-or-equal constraint (`oDepthLE`).
     OutputDepthLE,
+    /// GPU cycle counter.
     CycleCounter,
+    /// Unrecognised register type (raw value preserved).
     Unknown(u32),
 }
 
@@ -298,15 +431,25 @@ pub enum OperandIndex {
 /// Resource return type for SRV / UAV declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnType {
+    /// Unsigned normalised (`[0, 1]`).
     Unorm,
+    /// Signed normalised (`[-1, 1]`).
     Snorm,
+    /// Signed 32-bit integer.
     Sint,
+    /// Unsigned 32-bit integer.
     Uint,
+    /// 32-bit IEEE float.
     Float,
+    /// Mixed return types across components.
     Mixed,
+    /// 64-bit double-precision float.
     Double,
+    /// Continuation of a previous component (unused in practice).
     Continued,
+    /// Component is unused.
     Unused,
+    /// Unrecognised return type (raw value preserved).
     Unknown(u32),
 }
 

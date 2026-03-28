@@ -9,21 +9,34 @@ pub const RDAT_VERSION_10: u32 = 0x10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PartType {
+    /// Invalid / sentinel.
     Invalid = 0,
+    /// Shared null-terminated string buffer.
     StringBuffer = 1,
+    /// Index arrays (offset → count + indices).
     IndexArrays = 2,
+    /// Resource binding table.
     ResourceTable = 3,
+    /// Function (entry point) table.
     FunctionTable = 4,
+    /// Raw bytes blob.
     RawBytes = 5,
+    /// DXR / pipeline subobject table.
     SubobjectTable = 6,
+    /// Work-graph node ID table.
     NodeIDTable = 7,
+    /// Work-graph node shader I/O attribute table.
     NodeShaderIOAttribTable = 8,
+    /// Work-graph node shader function attribute table.
     NodeShaderFuncAttribTable = 9,
+    /// Work-graph I/O node table.
     IONodeTable = 10,
+    /// Work-graph node shader info table.
     NodeShaderInfoTable = 11,
 }
 
 impl PartType {
+    /// Converts a raw `u32` part type value to the corresponding variant.
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Invalid,
@@ -58,6 +71,7 @@ impl PartType {
         )
     }
 
+    /// Returns the display name string for this part type.
     pub fn name(self) -> &'static str {
         match self {
             Self::Invalid => "Invalid",
@@ -89,12 +103,20 @@ pub enum RdatPart {
     RawBytes(Vec<u8>),
     /// A record table: stride + opaque record blobs.
     RecordTable {
+        /// Raw `PartType` discriminant.
         part_type: u32,
+        /// Byte stride of each record.
         record_stride: u32,
+        /// Opaque record blobs (each `record_stride` bytes).
         records: Vec<Vec<u8>>,
     },
     /// Unknown/unrecognised part — preserve raw for round-trip.
-    Unknown { part_type: u32, data: Vec<u8> },
+    Unknown {
+        /// Raw part type value.
+        part_type: u32,
+        /// Raw part data.
+        data: Vec<u8>,
+    },
 }
 
 /// Fully parsed RDAT (Runtime Data) chunk.

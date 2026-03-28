@@ -2,7 +2,7 @@
 //!
 //! Binary layout:
 //!   RuntimeDataHeader { u32 version, u32 part_count }
-//!   u32 offsets[part_count]   (relative to header start)
+//!   u32 offsets\[part_count\]   (relative to header start)
 //!   For each part at offset:
 //!     RuntimeDataPartHeader { u32 type, u32 size }
 //!     byte data[ALIGN4(size)]

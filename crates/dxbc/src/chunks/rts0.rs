@@ -87,20 +87,30 @@ pub struct DescriptorRange {
 /// Descriptor range type.
 #[derive(Debug, Clone, Copy)]
 pub enum DescriptorRangeType {
+    /// Shader resource view range.
     Srv,
+    /// Unordered access view range.
     Uav,
+    /// Constant buffer view range.
     Cbv,
+    /// Sampler state range.
     Sampler,
 }
 
 /// Which shader stage(s) a root parameter or static sampler is visible to.
 #[derive(Debug, Clone, Copy)]
 pub enum ShaderVisibility {
+    /// Visible to all shader stages.
     All,
+    /// Visible only to the vertex shader.
     Vertex,
+    /// Visible only to the hull shader.
     Hull,
+    /// Visible only to the domain shader.
     Domain,
+    /// Visible only to the geometry shader.
     Geometry,
+    /// Visible only to the pixel shader.
     Pixel,
 }
 
