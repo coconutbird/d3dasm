@@ -160,7 +160,7 @@ pub fn parse_stat(data: &[u8]) -> Option<ShaderStats> {
     Some(s)
 }
 
-impl ChunkParser for ShaderStats {
+impl ChunkParser<'_> for ShaderStats {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_stat(data)
     }

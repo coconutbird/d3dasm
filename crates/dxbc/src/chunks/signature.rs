@@ -1,5 +1,6 @@
 //! Input/output/patch-constant signature parsing (ISGN, OSGN, PCSG, ISG1, OSG1, PSG1).
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -216,7 +217,7 @@ impl ComponentType {
 #[derive(Debug)]
 pub struct SignatureElement<'a> {
     /// Semantic name (e.g. `"POSITION"`, `"TEXCOORD"`).
-    pub semantic_name: &'a str,
+    pub semantic_name: Cow<'a, str>,
     /// Semantic index (e.g. `0` for `TEXCOORD0`, `1` for `TEXCOORD1`).
     pub semantic_index: u32,
     /// System-value semantic (`D3D_NAME` enum, 0 = none).
@@ -241,7 +242,7 @@ impl SignatureElement<'_> {
         if self.semantic_index > 0 {
             format!("{}{}", self.semantic_name, self.semantic_index)
         } else {
-            String::from(self.semantic_name)
+            String::from(&*self.semantic_name)
         }
     }
 
@@ -357,7 +358,7 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
         };
 
         elements.push(SignatureElement {
-            semantic_name: read_cstring(data, name_offset),
+            semantic_name: Cow::Borrowed(read_cstring(data, name_offset)),
             semantic_index,
             system_value,
             component_type,
@@ -389,7 +390,7 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
     let mut name_offsets = Vec::with_capacity(elements.len());
 
     for elem in elements {
-        name_offsets.push(strings.add(elem.semantic_name));
+        name_offsets.push(strings.add(&elem.semantic_name));
     }
 
     let total = string_table_start + strings.len();

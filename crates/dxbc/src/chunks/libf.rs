@@ -40,7 +40,7 @@ pub fn parse_libf(data: &[u8]) -> Option<LibraryFunction> {
     })
 }
 
-impl ChunkParser for LibraryFunction {
+impl ChunkParser<'_> for LibraryFunction {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_libf(data)
     }

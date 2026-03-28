@@ -58,7 +58,7 @@ pub fn parse_hash(data: &[u8], fourcc: [u8; 4]) -> Option<ShaderHash> {
     }
 }
 
-impl ChunkParser for ShaderHash {
+impl ChunkParser<'_> for ShaderHash {
     fn parse(data: &[u8]) -> Option<Self> {
         // Default to HASH when called via the generic ChunkParser trait.
         // Prefer calling parse_hash(data, fourcc) directly when the FourCC is known.

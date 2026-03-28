@@ -22,7 +22,7 @@ use core::fmt;
 use super::ChunkWriter;
 pub use types::RuntimeData;
 
-impl super::ChunkParser for RuntimeData {
+impl super::ChunkParser<'_> for RuntimeData {
     fn parse(data: &[u8]) -> Option<Self> {
         parse::parse_rdat(data)
     }

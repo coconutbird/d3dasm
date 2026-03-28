@@ -18,7 +18,7 @@ use core::fmt;
 use super::ChunkWriter;
 pub use types::PipelineStateValidation;
 
-impl super::ChunkParser for PipelineStateValidation {
+impl super::ChunkParser<'_> for PipelineStateValidation {
     fn parse(data: &[u8]) -> Option<Self> {
         parse::parse_psv0(data)
     }

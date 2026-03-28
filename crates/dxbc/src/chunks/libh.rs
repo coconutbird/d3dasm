@@ -28,7 +28,7 @@ pub fn parse_libh(data: &[u8]) -> Option<LibraryHeader> {
     })
 }
 
-impl ChunkParser for LibraryHeader {
+impl ChunkParser<'_> for LibraryHeader {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_libh(data)
     }

@@ -8,19 +8,20 @@
 //!
 //! Some compilers write a simpler variant with just a null-terminated string.
 
+use alloc::borrow::Cow;
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
 
 /// Parsed ILDN (debug name) chunk.
 #[derive(Debug, Clone)]
-pub struct DebugName {
+pub struct DebugName<'a> {
     /// The debug name / original file path.
-    pub name: alloc::string::String,
+    pub name: Cow<'a, str>,
 }
 
 /// Parse an ILDN chunk.
-pub fn parse_ildn(data: &[u8]) -> Option<DebugName> {
+pub fn parse_ildn<'a>(data: &'a [u8]) -> Option<DebugName<'a>> {
     if data.len() < 4 {
         return None;
     }
@@ -30,8 +31,9 @@ pub fn parse_ildn(data: &[u8]) -> Option<DebugName> {
     if name_len > 0 && 4 + name_len <= data.len() {
         let name_bytes = &data[4..4 + name_len];
         if let Ok(s) = core::str::from_utf8(name_bytes) {
+            let s = s.trim_end_matches('\0');
             return Some(DebugName {
-                name: alloc::string::String::from(s.trim_end_matches('\0')),
+                name: Cow::Borrowed(s),
             });
         }
     }
@@ -43,18 +45,18 @@ pub fn parse_ildn(data: &[u8]) -> Option<DebugName> {
         None
     } else {
         Some(DebugName {
-            name: alloc::string::String::from(s),
+            name: Cow::Borrowed(s),
         })
     }
 }
 
-impl ChunkParser for DebugName {
-    fn parse(data: &[u8]) -> Option<Self> {
+impl<'a> ChunkParser<'a> for DebugName<'a> {
+    fn parse(data: &'a [u8]) -> Option<Self> {
         parse_ildn(data)
     }
 }
 
-impl ChunkWriter for DebugName {
+impl ChunkWriter for DebugName<'_> {
     fn fourcc(&self) -> [u8; 4] {
         *b"ILDN"
     }
@@ -70,7 +72,7 @@ impl ChunkWriter for DebugName {
     }
 }
 
-impl fmt::Display for DebugName {
+impl fmt::Display for DebugName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "// Debug Name: {}", self.name)
     }

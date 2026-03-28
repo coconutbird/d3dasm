@@ -10,6 +10,7 @@
 //!   0x14: u32 — compile flags
 //!   0x18: u32 — creator string offset
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -26,7 +27,7 @@ pub struct ResourceDef<'a> {
     /// Shader resource bindings (textures, samplers, UAVs, etc.).
     pub bindings: Vec<ResourceBinding<'a>>,
     /// Compiler identification string (e.g. `"Microsoft (R) HLSL Shader Compiler 10.1"`).
-    pub creator: &'a str,
+    pub creator: Cow<'a, str>,
     /// Target version (minor | major<<8 | type<<16).
     pub target_version: u32,
     /// Compile flags.
@@ -39,7 +40,7 @@ pub struct ResourceDef<'a> {
 #[derive(Debug)]
 pub struct CBufferDef<'a> {
     /// Constant buffer name (e.g. `"$Globals"`, `"cb0"`).
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// Variables declared inside the buffer.
     pub variables: Vec<CBufferVariable<'a>>,
     /// Total buffer size in bytes.
@@ -54,7 +55,7 @@ pub struct CBufferDef<'a> {
 #[derive(Debug)]
 pub struct CBufferVariable<'a> {
     /// Variable name.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// Byte offset within the constant buffer.
     pub offset: u32,
     /// Size in bytes.
@@ -64,7 +65,7 @@ pub struct CBufferVariable<'a> {
     /// Parsed type descriptor for this variable.
     pub var_type: TypeDesc<'a>,
     /// Default value bytes (empty if none).
-    pub default_value: Vec<u8>,
+    pub default_value: Cow<'a, [u8]>,
     /// SM5 extra: start texture slot (-1 if unused).
     pub texture_start: Option<u32>,
     /// SM5 extra: texture bind count.
@@ -100,7 +101,7 @@ pub struct TypeDesc<'a> {
     /// SM5 extra: 4 unknown u32 values preserved for round-trip.
     pub sm5_extra: Option<[u32; 4]>,
     /// Type name (SM5 interface types only, empty otherwise).
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
 }
 
 /// A struct member descriptor inside a type.
@@ -112,7 +113,7 @@ pub struct TypeDesc<'a> {
 #[derive(Debug, Clone)]
 pub struct MemberDesc<'a> {
     /// Member name.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// Parsed type for this member.
     pub member_type: TypeDesc<'a>,
     /// Byte offset within the parent structure.
@@ -267,7 +268,7 @@ pub const SLOT_UNUSED: u32 = 0xFFFFFFFF;
 #[derive(Debug)]
 pub struct ResourceBinding<'a> {
     /// Binding name.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// Resource type (0=cbuffer, 2=texture, 3=sampler, 4=uav_rwtyped, …).
     pub input_type: u32,
     /// Return type for typed resources.
@@ -393,10 +394,10 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
 
     // Creator string (at offset 24 in the RDEF header)
     let creator_off = c.read_u32_le().ok()? as usize;
-    let creator = if creator_off < data.len() {
-        read_cstring(data, creator_off)
+    let creator: Cow<'_, str> = if creator_off < data.len() {
+        Cow::Borrowed(read_cstring(data, creator_off))
     } else {
-        ""
+        Cow::Borrowed("")
     };
 
     // SM5 has an RD11 sub-header (8 u32s = 32 bytes) after the main header.
@@ -432,7 +433,7 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
         let bind_count = c.read_u32_le().ok()?;
         let flags = c.read_u32_le().ok()?;
         bindings.push(ResourceBinding {
-            name: read_cstring(data, name_off),
+            name: Cow::Borrowed(read_cstring(data, name_off)),
             input_type,
             return_type,
             dimension,
@@ -483,19 +484,19 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
             };
 
             let var_type = parse_type_desc(data, v_type_offset, is_sm5);
-            let default_value = if v_default_value_offset != 0 && v_size > 0 {
+            let default_value: Cow<'_, [u8]> = if v_default_value_offset != 0 && v_size > 0 {
                 let end = v_default_value_offset + v_size as usize;
                 if end <= data.len() {
-                    Vec::from(&data[v_default_value_offset..end])
+                    Cow::Borrowed(&data[v_default_value_offset..end])
                 } else {
-                    Vec::new()
+                    Cow::Borrowed(&[])
                 }
             } else {
-                Vec::new()
+                Cow::Borrowed(&[])
             };
 
             variables.push(CBufferVariable {
-                name: read_cstring(data, vname_off),
+                name: Cow::Borrowed(read_cstring(data, vname_off)),
                 offset: v_offset,
                 size: v_size,
                 flags: v_flags,
@@ -509,7 +510,7 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
         }
 
         constant_buffers.push(CBufferDef {
-            name: read_cstring(data, name_off),
+            name: Cow::Borrowed(read_cstring(data, name_off)),
             variables,
             size: cb_size,
             flags: cb_flags,
@@ -537,7 +538,7 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
         elements: 0,
         members: Vec::new(),
         sm5_extra: None,
-        name: "",
+        name: Cow::Borrowed(""),
     };
     if offset + 16 > data.len() {
         return empty;
@@ -593,7 +594,7 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
             let mtype_off = c.read_u32_le().unwrap_or(0) as usize;
             let moffset = c.read_u32_le().unwrap_or(0);
             members.push(MemberDesc {
-                name: read_cstring(data, mname_off),
+                name: Cow::Borrowed(read_cstring(data, mname_off)),
                 member_type: parse_type_desc(data, mtype_off, is_sm5),
                 offset: moffset,
             });
@@ -601,25 +602,25 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
     }
 
     // SM5: name offset comes after the 4 unknowns in the type descriptor body
-    let name = if is_sm5 {
+    let name: Cow<'a, str> = if is_sm5 {
         // Name offset is at: base + 16 (fixed) + 16 (4 unknowns) = base + 32
         let name_pos = offset + 32;
         if name_pos + 4 <= data.len() {
             if c.seek(SeekFrom::Start(name_pos as u64)).is_ok() {
                 let noff = c.read_u32_le().unwrap_or(0) as usize;
                 if noff > 0 && noff < data.len() {
-                    read_cstring(data, noff)
+                    Cow::Borrowed(read_cstring(data, noff))
                 } else {
-                    ""
+                    Cow::Borrowed("")
                 }
             } else {
-                ""
+                Cow::Borrowed("")
             }
         } else {
-            ""
+            Cow::Borrowed("")
         }
     } else {
-        ""
+        Cow::Borrowed("")
     };
 
     TypeDesc {
@@ -745,22 +746,22 @@ impl ChunkWriter for ResourceDef<'_> {
         let mut st = StringTableWriter::new(string_table_base);
 
         // Pass 2: register all strings.
-        st.add(self.creator);
+        st.add(&self.creator);
         for b in &self.bindings {
-            st.add(b.name);
+            st.add(&b.name);
         }
         for cb in &self.constant_buffers {
-            st.add(cb.name);
+            st.add(&cb.name);
             for v in &cb.variables {
-                st.add(v.name);
+                st.add(&v.name);
             }
         }
         for td in &types {
             if !td.name.is_empty() {
-                st.add(td.name);
+                st.add(&td.name);
             }
             for m in &td.members {
-                st.add(m.name);
+                st.add(&m.name);
             }
         }
 
@@ -778,7 +779,7 @@ impl ChunkWriter for ResourceDef<'_> {
         out.extend_from_slice(&(binding_offset as u32).to_le_bytes());
         out.extend_from_slice(&self.target_version.to_le_bytes());
         out.extend_from_slice(&self.compile_flags.to_le_bytes());
-        out.extend_from_slice(&st.add(self.creator).to_le_bytes());
+        out.extend_from_slice(&st.add(&self.creator).to_le_bytes());
 
         // Write RD11 sub-header if present
         if let Some(rd11) = &self.rd11_extra {
@@ -789,7 +790,7 @@ impl ChunkWriter for ResourceDef<'_> {
 
         // Write resource bindings (32 bytes each)
         for b in &self.bindings {
-            out.extend_from_slice(&st.add(b.name).to_le_bytes());
+            out.extend_from_slice(&st.add(&b.name).to_le_bytes());
             out.extend_from_slice(&b.input_type.to_le_bytes());
             out.extend_from_slice(&b.return_type.to_le_bytes());
             out.extend_from_slice(&b.dimension.to_le_bytes());
@@ -804,7 +805,7 @@ impl ChunkWriter for ResourceDef<'_> {
         let vars_base = cb_offset + cb_desc_size;
         let mut var_cursor = vars_base;
         for cb in &self.constant_buffers {
-            out.extend_from_slice(&st.add(cb.name).to_le_bytes());
+            out.extend_from_slice(&st.add(&cb.name).to_le_bytes());
             out.extend_from_slice(&(cb.variables.len() as u32).to_le_bytes());
             out.extend_from_slice(&(var_cursor as u32).to_le_bytes());
             out.extend_from_slice(&cb.size.to_le_bytes());
@@ -832,7 +833,7 @@ impl ChunkWriter for ResourceDef<'_> {
         let mut dv_write_cursor = default_values_start;
         for (cb_idx, cb) in self.constant_buffers.iter().enumerate() {
             for (v_idx, v) in cb.variables.iter().enumerate() {
-                out.extend_from_slice(&st.add(v.name).to_le_bytes());
+                out.extend_from_slice(&st.add(&v.name).to_le_bytes());
                 out.extend_from_slice(&v.offset.to_le_bytes());
                 out.extend_from_slice(&v.size.to_le_bytes());
                 out.extend_from_slice(&v.flags.to_le_bytes());
@@ -880,7 +881,7 @@ impl ChunkWriter for ResourceDef<'_> {
                 let name_off = if td.name.is_empty() {
                     0u32
                 } else {
-                    st.add(td.name)
+                    st.add(&td.name)
                 };
                 out.extend_from_slice(&name_off.to_le_bytes());
             }
@@ -889,7 +890,7 @@ impl ChunkWriter for ResourceDef<'_> {
         // Write member descriptors
         for td in &types {
             for m in &td.members {
-                out.extend_from_slice(&st.add(m.name).to_le_bytes());
+                out.extend_from_slice(&st.add(&m.name).to_le_bytes());
                 // Find the type index for this member's type
                 let mtype_addr = &m.member_type as *const TypeDesc<'_> as usize;
                 let mtype_idx = types

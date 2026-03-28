@@ -39,7 +39,7 @@ pub fn parse_lfs0(data: &[u8]) -> Option<LibraryFunctionSignatures> {
     })
 }
 
-impl ChunkParser for LibraryFunctionSignatures {
+impl ChunkParser<'_> for LibraryFunctionSignatures {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_lfs0(data)
     }

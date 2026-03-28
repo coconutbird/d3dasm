@@ -92,7 +92,7 @@ pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
     })
 }
 
-impl ChunkParser for ShaderFeatureInfo {
+impl ChunkParser<'_> for ShaderFeatureInfo {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_sfi0(data)
     }

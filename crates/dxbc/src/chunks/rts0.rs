@@ -390,7 +390,7 @@ impl fmt::Display for StaticSampler {
     }
 }
 
-impl ChunkParser for RootSignature {
+impl ChunkParser<'_> for RootSignature {
     fn parse(data: &[u8]) -> Option<Self> {
         parse_rts0(data)
     }

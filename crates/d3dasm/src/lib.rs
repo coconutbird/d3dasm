@@ -169,7 +169,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Debug name (ILDN chunk).
-    pub fn debug_name(&self) -> Option<&dxbc::chunks::DebugName> {
+    pub fn debug_name(&self) -> Option<&dxbc::chunks::DebugName<'_>> {
         match self.find_by_fourcc(&[b"ILDN"])? {
             ChunkData::DebugName(dn) => Some(dn),
             _ => None,
@@ -177,7 +177,7 @@ impl<'a> Shader<'a> {
     }
 
     /// DXIL bytecode (SM6.0+, DXIL chunk).
-    pub fn dxil(&self) -> Option<&dxbc::chunks::DxilData> {
+    pub fn dxil(&self) -> Option<&dxbc::chunks::DxilData<'_>> {
         match self.find_by_fourcc(&[b"DXIL"])? {
             ChunkData::Dxil(d) => Some(d),
             _ => None,

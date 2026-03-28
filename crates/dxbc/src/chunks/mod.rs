@@ -32,9 +32,12 @@ use crate::shex::Program;
 /// Provides a uniform `parse(data) -> Option<Self>` interface so all chunk
 /// types can be handled identically in the dispatcher.  Returning `None`
 /// signals that the data was too short or malformed to extract a valid chunk.
-pub trait ChunkParser: Sized + fmt::Debug + fmt::Display {
+///
+/// The lifetime `'a` allows parsers to borrow directly from the input slice
+/// (zero-copy strings, raw blobs) while still supporting owned data via `Cow`.
+pub trait ChunkParser<'a>: Sized + fmt::Debug + fmt::Display {
     /// Attempt to parse a chunk payload.  Returns `None` on invalid data.
-    fn parse(data: &[u8]) -> Option<Self>;
+    fn parse(data: &'a [u8]) -> Option<Self>;
 }
 
 /// A chunk payload serialized to bytes, ready for container assembly.
@@ -72,6 +75,7 @@ pub use dxil::DxilData;
 pub use hash::ShaderHash;
 pub use ildb::DebugData;
 pub use ildn::DebugName;
+
 pub use lfs0::LibraryFunctionSignatures;
 pub use libf::LibraryFunction;
 pub use libh::LibraryHeader;
@@ -112,13 +116,13 @@ pub enum ChunkData<'a> {
     /// HASH / XHSH — shader hash.
     Hash(hash::ShaderHash),
     /// ILDN — debug name.
-    DebugName(ildn::DebugName),
+    DebugName(ildn::DebugName<'a>),
     /// ILDB — embedded debug data blob.
-    DebugData(ildb::DebugData),
+    DebugData(ildb::DebugData<'a>),
     /// PRIV — private / tool-specific data.
-    PrivateData(priv_::PrivateData),
+    PrivateData(priv_::PrivateData<'a>),
     /// DXIL — SM6.0+ shader bytecode (LLVM IR).
-    Dxil(dxil::DxilData),
+    Dxil(dxil::DxilData<'a>),
     /// PSV0 — pipeline state validation.
     PipelineStateValidation(alloc::boxed::Box<psv0::PipelineStateValidation>),
     /// RDAT — runtime data tables.
@@ -141,7 +145,7 @@ pub enum ChunkData<'a> {
 /// Helper: try a `ChunkParser` impl and fall back to `Unknown` on `None`.
 macro_rules! try_parse {
     ($data:expr, $fourcc:expr, $variant:ident, $ty:ty) => {
-        match <$ty as ChunkParser>::parse($data) {
+        match <$ty as ChunkParser<'_>>::parse($data) {
             Some(v) => ChunkData::$variant(v),
             None => ChunkData::Unknown {
                 fourcc: $fourcc,
@@ -197,7 +201,7 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
         "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData),
         "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData),
         "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData),
-        "PSV0" => match psv0::PipelineStateValidation::parse(d) {
+        "PSV0" => match <psv0::PipelineStateValidation as ChunkParser<'_>>::parse(d) {
             Some(v) => ChunkData::PipelineStateValidation(alloc::boxed::Box::new(v)),
             None => ChunkData::Unknown {
                 fourcc: cc,

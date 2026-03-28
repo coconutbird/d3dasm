@@ -17,6 +17,7 @@
 //! mutable `Vec<u8>` so users can replace or modify the IL directly. The writer
 //! reconstructs the header with correct sizes.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -28,10 +29,11 @@ const DXIL_MAGIC: u32 = 0x4C495844;
 
 /// Parsed DXIL chunk — header fields + raw LLVM bitcode.
 ///
-/// The bitcode blob is fully mutable: users may replace it with modified IL
-/// and the writer will reconstruct the surrounding header with correct sizes.
+/// The bitcode blob borrows from the input on read (zero-copy). Assign
+/// `Cow::Owned(...)` to replace the IL for patching, and the writer will
+/// reconstruct the surrounding header with correct sizes.
 #[derive(Debug, Clone)]
-pub struct DxilData {
+pub struct DxilData<'a> {
     /// Shader kind from ProgramVersion (e.g. 0=Pixel, 1=Vertex, …).
     pub shader_kind: u16,
     /// Shader Model major version (e.g. 6).
@@ -41,11 +43,11 @@ pub struct DxilData {
     /// DXIL version field from the bitcode header.
     pub dxil_version: u32,
     /// LLVM bitcode payload. Replace this to swap the IL.
-    pub bitcode: Vec<u8>,
+    pub bitcode: Cow<'a, [u8]>,
 }
 
 /// Parse a DXIL chunk.
-pub fn parse_dxil(data: &[u8]) -> Option<DxilData> {
+pub fn parse_dxil<'a>(data: &'a [u8]) -> Option<DxilData<'a>> {
     if data.len() < 0x18 {
         return None;
     }
@@ -79,17 +81,17 @@ pub fn parse_dxil(data: &[u8]) -> Option<DxilData> {
         major_version: major,
         minor_version: minor,
         dxil_version,
-        bitcode: Vec::from(&data[bc_start..bc_end]),
+        bitcode: Cow::Borrowed(&data[bc_start..bc_end]),
     })
 }
 
-impl ChunkParser for DxilData {
-    fn parse(data: &[u8]) -> Option<Self> {
+impl<'a> ChunkParser<'a> for DxilData<'a> {
+    fn parse(data: &'a [u8]) -> Option<Self> {
         parse_dxil(data)
     }
 }
 
-impl ChunkWriter for DxilData {
+impl ChunkWriter for DxilData<'_> {
     fn fourcc(&self) -> [u8; 4] {
         *b"DXIL"
     }
@@ -122,7 +124,7 @@ impl ChunkWriter for DxilData {
     }
 }
 
-impl fmt::Display for DxilData {
+impl fmt::Display for DxilData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
