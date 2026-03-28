@@ -363,8 +363,8 @@ mod tests {
 
     #[test]
     fn dcl_gs_output_topology_trianglestrip() {
-        // opcode 92, trianglestrip = 3 in bits [13:11]
-        let tokens = [instr_token(92, 1) | (3 << 11)];
+        // opcode 92, trianglestrip = 5 per D3D10_SB_PRIMITIVE_TOPOLOGY enum
+        let tokens = [instr_token(92, 1) | (5 << 11)];
         let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
         let output = disassemble(&data);
         assert!(

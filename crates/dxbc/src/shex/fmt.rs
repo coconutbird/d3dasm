@@ -260,6 +260,7 @@ fn format_declaration(instr: &Instruction) -> String {
             dimension,
             return_type,
             operands,
+            ..
         } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
@@ -286,10 +287,14 @@ fn format_declaration(instr: &Instruction) -> String {
             format!("dcl_indexableTemp x{reg}[{size}], {components}")
         }
         InstructionKind::DclGsInputPrimitive { primitive } => {
-            format!("dcl_inputPrimitive {primitive}")
+            if let GsPrimitive::ControlPointPatch(n) = primitive {
+                format!("dcl_inputPrimitive patchlist_{n}")
+            } else {
+                format!("dcl_inputPrimitive {}", primitive.name())
+            }
         }
         InstructionKind::DclGsOutputTopology { topology } => {
-            format!("dcl_outputTopology {topology}")
+            format!("dcl_outputTopology {}", topology.name())
         }
         InstructionKind::DclMaxOutputVertexCount { count } => {
             format!("dcl_maxOutputVertexCount {count}")
@@ -323,6 +328,7 @@ fn format_declaration(instr: &Instruction) -> String {
             dimension,
             return_type,
             operands,
+            ..
         } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
@@ -608,7 +614,7 @@ fn format_index(idx: &OperandIndex) -> String {
 
 fn format_components_with_width(comp: &ComponentSelect, width: Option<usize>) -> String {
     match comp {
-        ComponentSelect::None => String::new(),
+        ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => String::new(),
         ComponentSelect::Mask(mask) => format_mask(*mask),
         ComponentSelect::Swizzle(s) => {
             let comps = ['x', 'y', 'z', 'w'];

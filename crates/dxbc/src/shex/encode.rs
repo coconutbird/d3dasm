@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use super::ir::*;
+use super::opcodes::Opcode;
 
 /// Encode a [`Program`] into raw SHEX/SHDR chunk bytes.
 ///
@@ -68,17 +69,170 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
     encode_kind(instr, out);
 
     // Compute instruction length and build token0.
-    // Start from the raw opcode-specific bits (11-23) preserved from the original
-    // token0 — this ensures round-trip fidelity for sample counts, test conditions,
-    // dimension fields, saturate, and all other instruction-embedded data.
+    // Reconstruct bits 11-23 from typed IR fields (no raw bit bucket).
     let instr_len = (out.len() - token0_idx) as u32;
-    let mut token0 = (opcode_val & 0x7FF) | instr.token0_opdata;
+    let mut token0 = (opcode_val & 0x7FF) | build_token0_opdata(instr);
     if has_extended {
         token0 |= 1 << 31;
     }
     token0 |= (instr_len & 0x7F) << 24;
 
     out[token0_idx] = token0;
+}
+
+/// Reconstruct the opcode-specific bits (11–23) of token0 from typed IR fields.
+///
+/// Declaration opcodes embed their payload entirely in these bits (dimension,
+/// interpolation mode, flags, etc.), while non-declaration opcodes use them
+/// for saturate, resinfo return type, test condition, precise mask, and sync.
+fn build_token0_opdata(instr: &Instruction) -> u32 {
+    // Declaration opcodes — payload is fully described by InstructionKind fields.
+    match &instr.kind {
+        InstructionKind::DclGlobalFlags { flags } => {
+            let names: &[&str] = &[
+                "refactoringAllowed",
+                "enableDoublePrecisionFloatOps",
+                "forceEarlyDepthStencil",
+                "enableRawAndStructuredBuffers",
+                "skipOptimization",
+                "enableMinPrecision",
+                "enable11_1DoubleExtensions",
+                "enable11_1ShaderExtensions",
+            ];
+            let mut bits = 0u32;
+            for flag in flags {
+                if let Some(i) = names.iter().position(|n| n == flag) {
+                    bits |= 1 << i;
+                }
+            }
+            return bits << 11;
+        }
+        InstructionKind::DclInput { interpolation, .. } => {
+            if let Some(interp) = interpolation {
+                let v = match *interp {
+                    "constant" => 1u32,
+                    "linear" => 2,
+                    "linearCentroid" => 3,
+                    "linearNoperspective" => 4,
+                    "linearNoperspectiveCentroid" => 5,
+                    "linearSample" => 6,
+                    "linearNoperspectiveSample" => 7,
+                    _ => 0,
+                };
+                return v << 11;
+            }
+            return 0;
+        }
+        InstructionKind::DclResource {
+            dimension,
+            sample_count,
+            ..
+        } => {
+            return (dimension_to_u32(dimension) << 11) | ((sample_count & 0x7F) << 16);
+        }
+        InstructionKind::DclSampler { mode, .. } => {
+            let v = match *mode {
+                "default" => 0u32,
+                "comparison" => 1,
+                "mono" => 2,
+                _ => 0,
+            };
+            return v << 11;
+        }
+        InstructionKind::DclConstantBuffer { access, .. } => {
+            let v = if *access == "dynamicIndexed" { 1u32 } else { 0 };
+            return v << 11;
+        }
+        InstructionKind::DclGsInputPrimitive { primitive } => {
+            return (primitive.to_raw() & 0x3F) << 11;
+        }
+        InstructionKind::DclGsOutputTopology { topology } => {
+            return (topology.to_raw() & 0xF) << 11;
+        }
+        InstructionKind::DclOutputControlPointCount { count }
+        | InstructionKind::DclInputControlPointCount { count } => {
+            return (count & 0x3F) << 11;
+        }
+        InstructionKind::DclTessDomain { domain } => {
+            let v = match *domain {
+                "isoline" => 1u32,
+                "tri" => 2,
+                "quad" => 3,
+                _ => 0,
+            };
+            return v << 11;
+        }
+        InstructionKind::DclTessPartitioning { partitioning } => {
+            let v = match *partitioning {
+                "integer" => 1u32,
+                "pow2" => 2,
+                "fractional_odd" => 3,
+                "fractional_even" => 4,
+                _ => 0,
+            };
+            return v << 11;
+        }
+        InstructionKind::DclTessOutputPrimitive { primitive } => {
+            let v = match *primitive {
+                "point" => 1u32,
+                "line" => 2,
+                "triangle_cw" => 3,
+                "triangle_ccw" => 4,
+                _ => 0,
+            };
+            return v << 11;
+        }
+        InstructionKind::DclUavTyped {
+            dimension, flags, ..
+        } => {
+            return (dimension_to_u32(dimension) << 11) | ((flags & 0xFF) << 16);
+        }
+        InstructionKind::DclUavRaw { flags, .. } => {
+            return (flags & 0xFF) << 16;
+        }
+        InstructionKind::DclUavStructured { flags, .. } => {
+            return (flags & 0xFF) << 16;
+        }
+        _ => {}
+    }
+
+    // Non-declaration opcodes: reconstruct from instruction-level typed fields.
+    let mut bits = 0u32;
+
+    // Sync uses bits 11-14 for its own flags (overlaps with saturate/resinfo).
+    if instr.opcode == Opcode::Sync {
+        bits |= (instr.sync_flags as u32 & 0xF) << 11;
+    } else {
+        if instr.saturate {
+            bits |= 1 << 13;
+        }
+        if let Some(rt) = instr.resinfo_return_type {
+            bits |= (rt & 0x3) << 11;
+        }
+    }
+    if instr.test_nonzero {
+        bits |= 1 << 18;
+    }
+    bits |= (instr.precise_mask as u32 & 0xF) << 19;
+
+    bits
+}
+
+/// Map a resource dimension string back to its token0 integer value.
+fn dimension_to_u32(dim: &str) -> u32 {
+    match dim {
+        "buffer" => 1,
+        "texture1d" => 2,
+        "texture2d" => 3,
+        "texture2dms" => 4,
+        "texture3d" => 5,
+        "texturecube" => 6,
+        "texture1darray" => 7,
+        "texture2darray" => 8,
+        "texture2dmsarray" => 9,
+        "texturecubearray" => 10,
+        _ => 0,
+    }
 }
 
 /// Encode a `customdata` block. CustomData has a special two-dword header
@@ -264,10 +418,9 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
     let op_type_val = op.reg_type.to_u32();
     let index_dim = op.indices.len() as u32;
 
-    // Use the preserved num_components from the original operand token.
-    let num_components = op.num_components;
+    let num_components = op.components.num_components();
     let sel_bits = match &op.components {
-        ComponentSelect::None => 0u32,
+        ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => 0u32,
         ComponentSelect::Mask(m) => (*m as u32) << 4,
         ComponentSelect::Swizzle(s) => {
             let swiz =

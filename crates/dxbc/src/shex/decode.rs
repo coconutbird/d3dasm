@@ -140,22 +140,40 @@ fn instruction_length(
 fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     let op = Opcode::from_u32(opcode_val);
     let token0 = tokens[0];
-    let saturate = (token0 >> 13) & 1 != 0;
 
-    // Extract resinfo return type (bits [11:12]) for resinfo opcode
+    // Saturate (bit 13) — not applicable to Sync (which reuses bits 11-14).
+    let saturate = op != Opcode::Sync && (token0 >> 13) & 1 != 0;
+
+    // Conditional test condition: bit 18 (0 = zero, 1 = non-zero).
+    let test_nonzero = matches!(
+        op,
+        Opcode::If
+            | Opcode::Breakc
+            | Opcode::Callc
+            | Opcode::Continuec
+            | Opcode::Discard
+            | Opcode::Retc
+    ) && ((token0 >> 18) & 1 != 0);
+
+    // SM5 precise modifier: bits 19-22.
+    let precise_mask = ((token0 >> 19) & 0xF) as u8;
+
+    // Extract resinfo return type (bits [11:12]) for resinfo opcode.
     let resinfo_return_type = if op == Opcode::Resinfo {
         Some((token0 >> 11) & 0x3)
     } else {
         None
     };
 
+    // Sync flags: bits 11-14 (only meaningful for Sync opcode).
+    let sync_flags = if op == Opcode::Sync {
+        ((token0 >> 11) & 0xF) as u8
+    } else {
+        0
+    };
+
     // Parse all extended opcode tokens from the instruction header chain.
     let (tex_offsets, resource_dim, resource_return_type) = decode_extended_tokens(tokens);
-
-    // Preserve raw opcode-specific bits (11-23) from token0 for round-trip fidelity.
-    // This captures sample count, test condition, and any other instruction-embedded
-    // data that isn't separately decoded into explicit IR fields.
-    let token0_opdata = token0 & 0x00FF_F800;
 
     let kind = match op {
         Opcode::CustomData => decode_custom_data(tokens),
@@ -233,11 +251,13 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     Instruction {
         opcode: op,
         saturate,
+        test_nonzero,
+        precise_mask,
         resinfo_return_type,
+        sync_flags,
         tex_offsets,
         resource_dim,
         resource_return_type,
-        token0_opdata,
         kind,
     }
 }
@@ -371,6 +391,8 @@ fn decode_dcl_resource(tokens: &[u32]) -> InstructionKind {
         10 => "texturecubearray",
         _ => "unknown",
     };
+    // MSAA sample count in bits 16-22 (relevant for texture2dms/texture2dmsarray).
+    let sample_count = (tokens[0] >> 16) & 0x7F;
     let return_type = if tokens.len() > 2 {
         let rt = tokens[tokens.len() - 1];
         [
@@ -390,6 +412,7 @@ fn decode_dcl_resource(tokens: &[u32]) -> InstructionKind {
     };
     InstructionKind::DclResource {
         dimension,
+        sample_count,
         return_type,
         operands: decode_operands(&tokens[..operand_end], 1),
     }
@@ -410,6 +433,8 @@ fn decode_dcl_uav_typed(tokens: &[u32]) -> InstructionKind {
         10 => "texturecubearray",
         _ => "unknown",
     };
+    // UAV flags: bit 16 = globallyCoherent, bit 17 = rasterizer ordered (ROV).
+    let flags = (tokens[0] >> 16) & 0xFF;
     let return_type = if tokens.len() > 2 {
         let rt = tokens[tokens.len() - 1];
         [
@@ -428,6 +453,7 @@ fn decode_dcl_uav_typed(tokens: &[u32]) -> InstructionKind {
     };
     InstructionKind::DclUavTyped {
         dimension,
+        flags,
         return_type,
         operands: decode_operands(&tokens[..operand_end], 1),
     }
@@ -605,32 +631,16 @@ fn decode_dcl_indexable_temp(tokens: &[u32]) -> InstructionKind {
 
 fn decode_dcl_gs_input(token: u32) -> InstructionKind {
     let prim = (token >> 11) & 0x3F;
-    let primitive = if (6..=37).contains(&prim) {
-        // patchlist — we can't return a dynamic string from a &'static str,
-        // so we handle this in the formatter
-        "patchlist"
-    } else {
-        match prim {
-            1 => "point",
-            2 => "line",
-            3 => "triangle",
-            4 => "lineAdj",
-            5 => "triangleAdj",
-            _ => "?",
-        }
-    };
-    InstructionKind::DclGsInputPrimitive { primitive }
+    InstructionKind::DclGsInputPrimitive {
+        primitive: GsPrimitive::from_raw(prim),
+    }
 }
 
 fn decode_dcl_gs_output_topo(token: u32) -> InstructionKind {
-    let topo = (token >> 11) & 0x7;
-    let topology = match topo {
-        1 => "pointlist",
-        2 => "linestrip",
-        3 => "trianglestrip",
-        _ => "?",
-    };
-    InstructionKind::DclGsOutputTopology { topology }
+    let topo = (token >> 11) & 0xF;
+    InstructionKind::DclGsOutputTopology {
+        topology: GsOutputTopology::from_raw(topo),
+    }
 }
 
 fn decode_dcl_tess_domain(token: u32) -> InstructionKind {
@@ -771,6 +781,7 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
     };
 
     let components = decode_components(token, num_components);
+    let num_components = components.num_components();
 
     // Decode indices and immediates
     let mut indices = Vec::new();
@@ -845,7 +856,6 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
         Operand {
             reg_type,
             components,
-            num_components,
             negate,
             abs,
             indices,
@@ -858,11 +868,8 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
 fn decode_components(token: u32, num_components: u32) -> ComponentSelect {
     let sel_mode = (token >> 2) & 0x3;
     match num_components {
-        0 => ComponentSelect::None,
-        1 => {
-            let mask = ((token >> 4) & 0xF) as u8;
-            ComponentSelect::Mask(mask)
-        }
+        0 => ComponentSelect::ZeroComponent,
+        1 => ComponentSelect::OneComponent,
         2 => match sel_mode {
             0 => ComponentSelect::Mask(((token >> 4) & 0xF) as u8),
             1 => {
@@ -873,9 +880,9 @@ fn decode_components(token: u32, num_components: u32) -> ComponentSelect {
                 ComponentSelect::Swizzle(s)
             }
             2 => ComponentSelect::Scalar(((token >> 4) & 0x3) as u8),
-            _ => ComponentSelect::None,
+            _ => ComponentSelect::ZeroComponent,
         },
-        _ => ComponentSelect::None,
+        _ => ComponentSelect::ZeroComponent,
     }
 }
 
@@ -919,8 +926,7 @@ fn decode_index(tokens: &[u32], pos: usize, repr: u32) -> (OperandIndex, usize) 
 fn empty_operand() -> Operand {
     Operand {
         reg_type: RegisterType::Unknown(0),
-        components: ComponentSelect::None,
-        num_components: 0,
+        components: ComponentSelect::ZeroComponent,
         negate: false,
         abs: false,
         indices: Vec::new(),
