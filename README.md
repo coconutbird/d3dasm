@@ -9,8 +9,10 @@ Parses DXBC containers, decodes SM4/SM5 shader bytecode into a fully typed inter
 - **Full SM4/SM5 bytecode round-trip** — Decode → IR → encode produces bit-identical output across all 217+ opcodes. Verified against 1,152 real-world shader chunks with zero failures.
 - **Typed IR with no raw bit hacks** — Every opcode field (GS primitives, topologies, component selection modes, sample counts, test conditions) is represented as a proper Rust enum. No raw bit buckets.
 - **18 chunk types parsed** — RDEF, ISGN/ISG1, OSGN/OSG1/OSG5, PCSG/PSG1, SHEX/SHDR, STAT, RTS0, SFI0, HASH/XHSH, ILDN, ILDB, PRIV, DXIL, PSV0, RDAT, LIBF, LFS0, LIBH. Unknown chunks are preserved for lossless container rebuilds.
+- **Zero-copy reads, copy-on-write mutation** — Metadata strings and raw blobs borrow directly from the input buffer via `Cow<'a, T>`. Assigning `Cow::Owned(...)` transparently enables shader patching without touching the original data.
+- **Lazy chunk parsing** — Non-program chunks (RDEF, signatures, STAT, etc.) are parsed on first access via `OnceCell`. Callers that only need the shader program pay zero overhead for metadata.
 - **Container scanning** — Automatically finds DXBC containers in arbitrary byte streams (raw files, `fxb0` wrappers, custom game archives).
-- **`no_std` core** — The `dxbc` crate uses only `alloc`, no filesystem or I/O.
+- **`no_std` core** — The `dxbc` crate uses only `core` and `alloc`, no filesystem or I/O.
 - **All shader stages** — VS, PS, GS, HS, DS, CS.
 
 ## Crates
@@ -119,7 +121,7 @@ d3dasm/
 cargo build
 ```
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.85+ (edition 2024, `core::cell::OnceCell` stable since 1.70).
 
 ## Testing
 
