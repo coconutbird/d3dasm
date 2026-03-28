@@ -43,7 +43,8 @@ fn print_dxbc(path: &Path, data: &[u8]) {
         println!("// ============================================================");
         println!(
             "// Shader #{i}: DXBC at 0x{:X}, size={}",
-            shader.offset, shader.size
+            shader.offset(),
+            shader.size()
         );
         println!("// ============================================================");
         print!("{shader}");

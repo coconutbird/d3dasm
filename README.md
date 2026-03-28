@@ -1,20 +1,25 @@
 # d3dasm
 
-A zero-dependency Direct3D shader bytecode disassembler written in Rust.
+Direct3D shader bytecode disassembler and encoder written in Rust.
 
-Parses DXBC (DirectX Bytecode) shader binaries and produces human-readable assembly output matching the output of Microsoft's `fxc.exe` compiler. Supports the full SM4/SM5 instruction set used by Direct3D 11 across all shader stages.
+Parses DXBC containers, decodes SM4/SM5 shader bytecode into a fully typed intermediate representation, and produces `fxc.exe`-compatible disassembly output. The IR can be re-encoded to byte-identical bytecode, enabling shader inspection and modification workflows.
 
 ## Features
 
-- **DXBC container parsing** — Reads standard DXBC containers with chunk-based layout (RDEF, ISGN, OSGN, SHEX/SHDR, STAT)
-- **fxb0 container support** — Automatically scans and extracts DXBC blobs from `fxb0` wrapper files containing multiple shaders
-- **Full SM5 opcode coverage** — All 217+ opcodes mapped from the `d3d12TokenizedProgramFormat.hpp` specification
-- **Parser → IR → Formatter pipeline** — Clean three-stage architecture: binary decoding into a structured IR, then formatted to text
-- **Resource definitions** — Parses RDEF chunks including constant buffers, resource bindings, and SM5 variable descriptors
-- **Input/Output signatures** — Parses ISGN/OSGN/ISG1/OSG1/OSG5 chunks with semantic names, register assignments, and component masks
-- **All shader stages** — VS, PS, GS, HS, DS, CS
-- **Operand decoding** — Handles swizzles, masks, scalar selects, relative indexing, nested operands, immediate constants (32-bit and 64-bit), and extended modifiers (negate, absolute value)
-- **Declaration support** — Constant buffers (immediate/dynamic indexed), samplers, resources, UAVs, temps, indexable temps, thread groups, tessellation parameters, GS topology, and system values
+- **Full SM4/SM5 bytecode round-trip** — Decode → IR → encode produces bit-identical output across all 217+ opcodes. Verified against 1,152 real-world shader chunks with zero failures.
+- **Typed IR with no raw bit hacks** — Every opcode field (GS primitives, topologies, component selection modes, sample counts, test conditions) is represented as a proper Rust enum. No raw bit buckets.
+- **18 chunk types parsed** — RDEF, ISGN/ISG1, OSGN/OSG1/OSG5, PCSG/PSG1, SHEX/SHDR, STAT, RTS0, SFI0, HASH/XHSH, ILDN, ILDB, PRIV, DXIL, PSV0, RDAT, LIBF, LFS0, LIBH. Unknown chunks are preserved for lossless container rebuilds.
+- **Container scanning** — Automatically finds DXBC containers in arbitrary byte streams (raw files, `fxb0` wrappers, custom game archives).
+- **`no_std` core** — The `dxbc` crate uses only `alloc`, no filesystem or I/O.
+- **All shader stages** — VS, PS, GS, HS, DS, CS.
+
+## Crates
+
+| Crate        | Type           | Purpose                                                                                       |
+| ------------ | -------------- | --------------------------------------------------------------------------------------------- |
+| `dxbc`       | lib (`no_std`) | DXBC container parser/writer, chunk decoders, SM4/SM5 bytecode decode/encode/format           |
+| `d3dasm`     | lib            | High-level disassembly interface — wraps `dxbc` with typed accessors and `Display` formatting |
+| `d3dasm-cli` | bin            | Command-line disassembler                                                                     |
 
 ## Usage
 
@@ -22,7 +27,36 @@ Parses DXBC (DirectX Bytecode) shader binaries and produces human-readable assem
 cargo run -- <shader.bin>
 ```
 
-Accepts both raw DXBC files and `fxb0` container files containing multiple shaders.
+### As a library
+
+```rust
+let data = std::fs::read("shader.bin").unwrap();
+for shader in d3dasm::parse(&data) {
+    // Typed access to parsed chunks.
+    if let Some(program) = shader.program() {
+        println!("SM {}.{}", program.version_major, program.version_minor);
+    }
+
+    // fxc.exe-compatible disassembly via Display.
+    print!("{shader}");
+}
+```
+
+### Lower-level access via `dxbc`
+
+```rust
+let container = dxbc::DxbcContainer::parse(bytes).unwrap();
+for chunk in &container.chunks {
+    match chunk.parse() {
+        dxbc::ChunkData::Shader(program) => {
+            // Round-trip: decode → encode → identical bytes.
+            let encoded = dxbc::shex::encode(&program);
+            assert_eq!(chunk.data, &encoded[..]);
+        }
+        _ => {}
+    }
+}
+```
 
 ## Example Output
 
@@ -30,50 +64,31 @@ Accepts both raw DXBC files and `fxb0` container files containing multiple shade
 // Compiled with: Microsoft (R) HLSL Shader Compiler 10.0.10011.0
 //
 // Resource Bindings:
-// Name                         Type         Dim      Slot
-// ---------------------------- ------------ -------- ----
-// $Globals                       cbuffer               4
-// TerrainCompositePSC            cbuffer               5
-//
-// cbuffer $Globals (16 bytes)
-//   g_explicitMipValue             offset=0    size=4
-//   g_RCPnumLayers                 offset=4    size=4
+// Name            Type         Dim      Slot Count Flags
+// --------------- ------------ -------- ---- ----- -----
+// gPointSampler0  sampler      NA       0    1
+// gPointTexture0  texture      2dMS     0    1     comparisonSampler;texComp0
 //
 // Input Signature:
-//   SV_Position                     float v0.xyzw
-//   TEXCOORD                     float v1.xy
+//   TEXCOORD      float v0.xy
+//   TEXCOORD1     float v0.zw
+//   SV_Position   float v1.xyzw
 //
-vs_5_0
+// Output Signature:
+//   SV_Target   float v0.xyzw
+//
+ps_5_0
 dcl_globalFlags refactoringAllowed
-dcl_constantbuffer cb4[1].xyzw, immediateIndexed
-dcl_constantbuffer cb5[32].xyzw, dynamicIndexed
-dcl_input_sgv v0.x, vertex_id
-dcl_input v1.xyzw
-dcl_output_siv o0.xyzw, position
-dcl_output o1.xy
+dcl_sampler s0, mode_default
+dcl_resource_texture2d (float,float,float,float) t0
+dcl_input_ps linear v0.xy
+dcl_input_ps linear v0.zw
+dcl_output o0.xyzw
 dcl_temps 1
-mov o0.xyzw, v1.xyzw
-mov o1.xy, v3.xy
-utof r0.x, v0.x
-mul r0.x, r0.x, l(0.041667)
-mul o1.zw, v2.xxxy, cb5[r0.x].yyyz
+sample r0.xyzw, v0.xyxx, t0.xyzw, s0
+mov o0.xyzw, r0.xyzw
 ret
 ```
-
-## Architecture
-
-```
-  ┌──────────┐     ┌────────────┐     ┌───────────┐
-  │  Binary   │────▶│  Decoder   │────▶│    IR     │────▶  Assembly text
-  │  (DXBC)   │     │ decode.rs  │     │  ir.rs    │      fmt.rs
-  └──────────┘     └────────────┘     └───────────┘
-```
-
-The disassembler uses a three-stage pipeline:
-
-1. **Decode** (`decode.rs`) — Reads raw token streams and produces a structured intermediate representation. Handles operand token layout, extended operand modifiers, index representations (immediate, relative, relative+offset), and component selection modes.
-2. **IR** (`ir.rs`) — Type-safe representation of the full instruction set: opcodes, operands, register types, component selects, index modes, and declaration metadata.
-3. **Format** (`fmt.rs`) — Walks the IR and emits `fxc.exe`-compatible assembly text. Handles instruction-aware swizzle truncation (e.g., `dp3` always shows 3 source components regardless of destination mask), operand modifier formatting, and immediate value display.
 
 ## Project Structure
 
@@ -81,30 +96,22 @@ The disassembler uses a three-stage pipeline:
 d3dasm/
 ├── Cargo.toml                        # Workspace root (resolver = "3")
 ├── crates/
-│   ├── dxbc/                         # DXBC parsing & disassembly library
+│   ├── dxbc/                         # no_std DXBC library
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── container.rs          # DXBC container parser + fxb0 scanning
-│   │       ├── rdef.rs               # Resource definition (RDEF) parser
-│   │       ├── signature.rs          # Input/Output signature parser
-│   │       └── shex/
-│   │           ├── decode.rs         # Token stream → IR decoder
-│   │           ├── ir.rs             # Structured intermediate representation
-│   │           ├── fmt.rs            # IR → assembly text formatter
-│   │           └── opcodes.rs        # SM4/SM5 opcode enum (217+ opcodes)
-│   ├── d3dasm/                       # Generic disassembly interface
-│   │   └── src/
-│   │       └── lib.rs               # Shader/ShaderContainer traits + scan()
+│   │       ├── container.rs          # DXBC container parser, writer, scanner
+│   │       ├── chunks/               # Per-chunk parsers (rdef, signature, stat, …)
+│   │       ├── shex/                 # SM4/SM5 bytecode
+│   │       │   ├── ir.rs             # Typed intermediate representation
+│   │       │   ├── decode.rs         # Bytes → IR
+│   │       │   ├── encode.rs         # IR → bytes
+│   │       │   ├── fmt.rs            # IR → disassembly text
+│   │       │   └── opcodes.rs        # Opcode enum (217+ opcodes)
+│   │       └── util.rs              # Shared helpers
+│   ├── d3dasm/                       # High-level disassembly API
+│   │   └── src/lib.rs
 │   └── d3dasm-cli/                   # CLI binary
-│       └── src/
-│           └── main.rs
+│       └── src/main.rs
 ```
-
-| Crate | Type | Purpose |
-|-------|------|---------|
-| `dxbc` | lib | Low-level DXBC container parsing, RDEF/signature/SHEX decoding, SM4/SM5 bytecode disassembly |
-| `d3dasm` | lib | Backend-agnostic disassembly traits and scanning interface |
-| `d3dasm-cli` | bin | Command-line disassembler tool |
 
 ## Building
 
@@ -117,34 +124,11 @@ Requires Rust 1.85+ (edition 2024).
 ## Testing
 
 ```sh
-cargo test --all
+cargo test --workspace
 ```
 
-## Development
-
-Pre-commit hooks are configured via [pre-commit](https://pre-commit.com/). After cloning:
+Round-trip verification across all test shaders:
 
 ```sh
-pre-commit install
+cargo run --release --example roundtrip -- shaders/shaders-pc/**/*.bin
 ```
-
-Hooks run automatically on every commit:
-
-- `cargo fmt --check` — formatting
-- `cargo clippy -- -D warnings` — linting
-- `cargo check` — compilation
-- Trailing whitespace, end-of-file fixes, merge conflict detection
-
-## Reference
-
-The decoder is implemented against the operand token layout defined in Microsoft's `d3d12TokenizedProgramFormat.hpp`. Key bit-field positions:
-
-| Field | Bits | Description |
-|-------|------|-------------|
-| Num Components | [1:0] | 0=none, 1=scalar, 2=four-component |
-| Selection Mode | [3:2] | 0=mask, 1=swizzle, 2=select_1 |
-| Component Data | [11:4] | Mask, swizzle, or scalar index |
-| Operand Type | [19:12] | Register type (temp, input, output, CB, etc.) |
-| Index Dimension | [21:20] | Number of index levels (0–3) |
-| Index Repr | [30:22] | Encoding per index (imm32, imm64, relative, relative+imm) |
-| Extended | [31] | Extended operand token follows |
