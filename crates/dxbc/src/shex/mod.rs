@@ -3,26 +3,32 @@
 //! The pipeline is **bytes → IR → text** (disassembly) or
 //! **IR → bytes** (encoding / round-trip).
 //!
-//! * `decode::decode` parses raw SHEX/SHDR chunk bytes into an `ir::Program`.
-//! * `fmt::format_program` renders a `Program` as human-readable text.
-//! * `encode::encode` serialises a `Program` back to the binary dword stream.
+//! * `decode` parses raw SHEX/SHDR chunk bytes into a `Program`.
+//! * `format_program` renders a `Program` as human-readable text.
+//! * `encode` serialises a `Program` back to the binary dword stream.
 //! * `disassemble` is a convenience that chains decode + format.
 
 use alloc::string::String;
 
-pub mod decode;
-pub mod encode;
-pub mod fmt;
-pub mod ir;
-pub mod opcodes;
+mod decode;
+mod encode;
+mod fmt;
+mod ir;
+mod opcodes;
+
+pub use self::decode::*;
+pub use self::encode::*;
+pub use self::fmt::*;
+pub use self::ir::*;
+pub use self::opcodes::*;
 
 /// Disassemble a SHEX or SHDR chunk into human-readable text.
 ///
 /// This is the main entry point. It decodes the raw bytes into a structured
-/// IR (`ir::Program`) and then formats it into text.
+/// IR ([`Program`]) and then formats it into text.
 pub fn disassemble(data: &[u8]) -> String {
-    match decode::decode(data) {
-        Ok(program) => fmt::format_program(&program),
+    match self::decode::decode(data) {
+        Ok(program) => self::fmt::format_program(&program),
         Err(_) => String::new(),
     }
 }

@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::container::DxbcChunk;
-use crate::shex::ir::Program;
+use crate::shex::Program;
 
 /// Trait implemented by every chunk parser.
 ///
@@ -174,7 +174,7 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
             fourcc: cc,
             elements: signature::parse_signature(cc_str, d),
         }),
-        "SHEX" | "SHDR" => match crate::shex::decode::decode_with_fourcc(d, cc) {
+        "SHEX" | "SHDR" => match crate::shex::decode_with_fourcc(d, cc) {
             Ok(prog) => ChunkData::Shader(prog),
             Err(_) => ChunkData::Unknown {
                 fourcc: cc,
@@ -243,7 +243,7 @@ impl ChunkData<'_> {
             ChunkData::Rdef(rd) => Some(rd.to_writable()),
             ChunkData::Shader(p) => Some(WritableChunk {
                 fourcc: p.fourcc,
-                data: crate::shex::encode::encode(p),
+                data: crate::shex::encode(p),
             }),
             ChunkData::Unknown { fourcc, data } => Some(WritableChunk {
                 fourcc: *fourcc,

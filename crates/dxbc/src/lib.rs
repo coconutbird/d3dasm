@@ -14,7 +14,7 @@
 //! for chunk in &container.chunks {
 //!     match parse_chunk(chunk) {
 //!         ChunkData::Shader(program) => {
-//!             println!("{}", dxbc::shex::fmt::format_program(&program));
+//!             println!("{}", dxbc::shex::format_program(&program));
 //!         }
 //!         _ => {}
 //!     }
@@ -24,11 +24,11 @@
 //! # Crate features
 //!
 //! * **`no_std`** — the crate depends only on `alloc`; no filesystem or I/O.
-//! * **Decode** — [`shex::decode::decode`] turns raw SHEX/SHDR bytes into
+//! * **Decode** — `shex::decode` turns raw SHEX/SHDR bytes into
 //!   a [`Program`].
-//! * **Format** — [`shex::fmt::format_program`] renders a `Program` as
+//! * **Format** — `shex::format_program` renders a `Program` as
 //!   human-readable disassembly text.
-//! * **Encode** — [`shex::encode::encode`] serialises a `Program` back to
+//! * **Encode** — `shex::encode` serialises a `Program` back to
 //!   bytes, enabling shader modification and round-trip workflows.
 
 #![no_std]
@@ -46,5 +46,5 @@ pub mod util;
 // Re-export the most commonly used types at the crate root.
 pub use chunks::{ChunkData, parse_chunk};
 pub use container::{DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
+pub use shex::Program;
 pub use shex::disassemble;
-pub use shex::ir::Program;

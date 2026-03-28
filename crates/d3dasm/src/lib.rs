@@ -8,7 +8,7 @@ use dxbc::chunks::{
     ShaderFeatureInfo, ShaderHash, ShaderStats, SignatureElement,
 };
 use dxbc::container::DxbcContainer;
-use dxbc::shex::ir::Program;
+use dxbc::shex::Program;
 
 /// A fully parsed shader from a DXBC container.
 ///
@@ -264,7 +264,7 @@ impl fmt::Display for Shader<'_> {
 
         // Shader instructions
         if let Some(program) = &self.program {
-            write!(f, "{}", dxbc::shex::fmt::format_program(program))?;
+            write!(f, "{}", dxbc::shex::format_program(program))?;
         }
 
         // Statistics
