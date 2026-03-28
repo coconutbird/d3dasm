@@ -96,12 +96,91 @@ pub fn format_mnemonic(instr: &Instruction) -> String {
     format!("{name}{suffix}{sat}{offsets}")
 }
 
+/// Operand value type, used to select the correct immediate formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImmediateType {
+    /// Display immediates as floating-point (e.g. `1.000000`).
+    Float,
+    /// Display immediates as signed decimal integers (e.g. `-3`).
+    Int,
+    /// Display immediates as unsigned hex integers (e.g. `0x000000FF`).
+    Uint,
+}
+
+/// Classify an opcode's source operand type for immediate formatting.
+fn opcode_imm_type(op: Opcode) -> ImmediateType {
+    match op {
+        // Float ALU
+        Opcode::Add | Opcode::Div | Opcode::Dp2 | Opcode::Dp3 | Opcode::Dp4
+        | Opcode::Eq | Opcode::Exp | Opcode::Frc | Opcode::Ge | Opcode::Log
+        | Opcode::Lt | Opcode::Mad | Opcode::Min | Opcode::Max | Opcode::Mul
+        | Opcode::Ne | Opcode::Round_ne | Opcode::Round_ni | Opcode::Round_pi
+        | Opcode::Round_z | Opcode::Rsq | Opcode::Sqrt | Opcode::Sincos
+        | Opcode::Rcp | Opcode::Lod | Opcode::Deriv_rtx | Opcode::Deriv_rty
+        | Opcode::Deriv_rtx_coarse | Opcode::Deriv_rtx_fine
+        | Opcode::Deriv_rty_coarse | Opcode::Deriv_rty_fine
+        | Opcode::Sample | Opcode::SampleC | Opcode::SampleCLz
+        | Opcode::SampleL | Opcode::SampleD | Opcode::SampleB
+        | Opcode::SamplePos | Opcode::SampleInfo
+        | Opcode::Gather4 | Opcode::Gather4C | Opcode::Gather4Po | Opcode::Gather4PoC
+        | Opcode::Eval_snapped | Opcode::Eval_sampleIndex | Opcode::Eval_centroid
+        | Opcode::Discard
+        // Conversion: float sources
+        | Opcode::Ftoi | Opcode::Ftou | Opcode::Ftod | Opcode::F32tof16
+        // Double-precision (double sources, but float formatting works)
+        | Opcode::Dadd | Opcode::Dmax | Opcode::Dmin | Opcode::Dmul
+        | Opcode::Deq | Opcode::Dge | Opcode::Dlt | Opcode::Dne
+        | Opcode::Dmov | Opcode::Dmovc | Opcode::Dtof | Opcode::Ddiv
+        | Opcode::Dfma | Opcode::Drcp | Opcode::Dtoi | Opcode::Dtou
+        => ImmediateType::Float,
+
+        // Signed integer ALU
+        | Opcode::Iadd | Opcode::IEq | Opcode::IGe | Opcode::ILt
+        | Opcode::IMad | Opcode::IMax | Opcode::IMin | Opcode::IMul
+        | Opcode::INe | Opcode::INeg | Opcode::Ishl | Opcode::Ishr
+        | Opcode::Ibfe | Opcode::FirstbitShi
+        // Conversion: int sources
+        | Opcode::Itof | Opcode::Itod
+        // Signed atomics
+        | Opcode::AtomicIAdd | Opcode::AtomicIMax | Opcode::AtomicIMin
+        | Opcode::ImmAtomicIAdd | Opcode::ImmAtomicIMax | Opcode::ImmAtomicIMin
+        => ImmediateType::Int,
+
+        // Unsigned / bitwise — render as hex
+        | Opcode::And | Opcode::Or | Opcode::Xor | Opcode::Not
+        | Opcode::UDiv | Opcode::ULt | Opcode::UGe | Opcode::UMul | Opcode::UMad
+        | Opcode::UMax | Opcode::UMin | Opcode::Ushr
+        | Opcode::Ubfe | Opcode::Bfi | Opcode::Bfrev | Opcode::Countbits
+        | Opcode::FirstbitHi | Opcode::FirstbitLo
+        | Opcode::Uaddc | Opcode::Usubb
+        | Opcode::Utof | Opcode::Utod | Opcode::F16tof32
+        | Opcode::AtomicAnd | Opcode::AtomicOr | Opcode::AtomicXor
+        | Opcode::AtomicCmpStore | Opcode::AtomicUMax | Opcode::AtomicUMin
+        | Opcode::ImmAtomicAnd | Opcode::ImmAtomicOr | Opcode::ImmAtomicXor
+        | Opcode::ImmAtomicExch | Opcode::ImmAtomicCmpExch
+        | Opcode::ImmAtomicUMax | Opcode::ImmAtomicUMin
+        | Opcode::Msad
+        => ImmediateType::Uint,
+
+        // mov/movc/swapc copy bits — use float as default since most shaders are float-heavy
+        | Opcode::Mov | Opcode::Movc | Opcode::Swapc
+        // load/store — typically uint addressing, but payload may be float
+        | Opcode::Ld | Opcode::LdMs | Opcode::LdUavTyped | Opcode::LdRaw
+        | Opcode::LdStructured | Opcode::StoreUavTyped | Opcode::StoreRaw
+        | Opcode::StoreStructured | Opcode::Resinfo | Opcode::BufInfo
+        => ImmediateType::Float,
+
+        // Everything else (flow control, declarations, etc.) — float is a safe default
+        _ => ImmediateType::Float,
+    }
+}
+
 /// Format a single [`Operand`] into its disassembly text.
 ///
 /// Examples: `"r0.xy"`, `"cb5[r0.x].yyyz"`, `"l(1.000000, 0.000000)"`,
 /// `"-|r1.x|"`.
 pub fn format_operand(op: &Operand) -> String {
-    format_operand_core(op, None)
+    format_operand_core(op, None, ImmediateType::Float)
 }
 
 /// Format a generic ALU / flow-control / sample instruction.
@@ -112,15 +191,21 @@ fn format_generic(instr: &Instruction, operands: &[Operand]) -> String {
         return opcode;
     }
 
+    let imm_type = opcode_imm_type(instr.opcode);
+
     // Determine active component count from the destination (first operand) mask.
     let dest_width = dest_component_count(operands.first());
     let src_width = source_width_override(instr.opcode, dest_width);
     let mut ops = Vec::with_capacity(operands.len());
     for (i, op) in operands.iter().enumerate() {
         if i == 0 {
-            ops.push(format_operand(op));
+            ops.push(format_operand_core(op, None, imm_type));
         } else {
-            ops.push(format_operand_with_width(op, src_width));
+            ops.push(format_operand_core(
+                op,
+                src_width.map(|w| w as usize),
+                imm_type,
+            ));
         }
     }
 
@@ -175,6 +260,7 @@ fn format_declaration(instr: &Instruction) -> String {
             dimension,
             return_type,
             operands,
+            ..
         } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
@@ -201,10 +287,14 @@ fn format_declaration(instr: &Instruction) -> String {
             format!("dcl_indexableTemp x{reg}[{size}], {components}")
         }
         InstructionKind::DclGsInputPrimitive { primitive } => {
-            format!("dcl_inputPrimitive {primitive}")
+            if let GsPrimitive::ControlPointPatch(n) = primitive {
+                format!("dcl_inputPrimitive patchlist_{n}")
+            } else {
+                format!("dcl_inputPrimitive {}", primitive.name())
+            }
         }
         InstructionKind::DclGsOutputTopology { topology } => {
-            format!("dcl_outputTopology {topology}")
+            format!("dcl_outputTopology {}", topology.name())
         }
         InstructionKind::DclMaxOutputVertexCount { count } => {
             format!("dcl_maxOutputVertexCount {count}")
@@ -238,6 +328,7 @@ fn format_declaration(instr: &Instruction) -> String {
             dimension,
             return_type,
             operands,
+            ..
         } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
@@ -273,6 +364,31 @@ fn format_declaration(instr: &Instruction) -> String {
         InstructionKind::DclIndexRange { operands, count } => {
             let ops: Vec<String> = operands.iter().map(format_operand).collect();
             format!("dcl_indexRange {}, {count}", ops.join(", "))
+        }
+        InstructionKind::DclFunctionBody { index } => {
+            format!("dcl_function_body fb{index}")
+        }
+        InstructionKind::DclFunctionTable {
+            table_index,
+            body_indices,
+        } => {
+            let bodies: Vec<String> = body_indices.iter().map(|b| format!("fb{b}")).collect();
+            format!(
+                "dcl_function_table ft{table_index} = {{{}}}",
+                bodies.join(", ")
+            )
+        }
+        InstructionKind::DclInterface {
+            interface_index,
+            num_call_sites,
+            table_indices,
+        } => {
+            let tables: Vec<String> = table_indices.iter().map(|t| format!("ft{t}")).collect();
+            format!(
+                "dcl_interface fp{interface_index}[{num_call_sites}][{}] = {{{}}}",
+                table_indices.len(),
+                tables.join(", ")
+            )
         }
         // Generic, HsPhase, and CustomData are handled by format_instruction
         // before calling this function.
@@ -311,10 +427,10 @@ fn format_custom_data(
         for v in values {
             s.push_str(&format!(
                 "\n  {{ {}, {}, {}, {} }}",
-                format_immediate(v[0].to_bits()),
-                format_immediate(v[1].to_bits()),
-                format_immediate(v[2].to_bits()),
-                format_immediate(v[3].to_bits()),
+                format_immediate(v[0].to_bits(), ImmediateType::Float),
+                format_immediate(v[1].to_bits(), ImmediateType::Float),
+                format_immediate(v[2].to_bits(), ImmediateType::Float),
+                format_immediate(v[3].to_bits(), ImmediateType::Float),
             ));
         }
         s.push_str("\n}");
@@ -409,11 +525,11 @@ fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
 ///
 /// Truncation is applied at the component level (before modifiers like abs/negate)
 /// to avoid breaking closing delimiters like `|`.
-fn format_operand_with_width(op: &Operand, width: Option<u8>) -> String {
-    format_operand_core(op, width.map(|w| w as usize))
-}
-
-fn format_operand_core(op: &Operand, swizzle_width: Option<usize>) -> String {
+fn format_operand_core(
+    op: &Operand,
+    swizzle_width: Option<usize>,
+    imm_type: ImmediateType,
+) -> String {
     let prefix = op.reg_type.prefix();
 
     // Immediates
@@ -421,7 +537,7 @@ fn format_operand_core(op: &Operand, swizzle_width: Option<usize>) -> String {
         let vals: Vec<String> = op
             .immediate_values
             .iter()
-            .map(|&v| format_immediate(v))
+            .map(|&v| format_immediate(v, imm_type))
             .collect();
         return format!("l({})", vals.join(", "));
     }
@@ -498,7 +614,7 @@ fn format_index(idx: &OperandIndex) -> String {
 
 fn format_components_with_width(comp: &ComponentSelect, width: Option<usize>) -> String {
     match comp {
-        ComponentSelect::None => String::new(),
+        ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => String::new(),
         ComponentSelect::Mask(mask) => format_mask(*mask),
         ComponentSelect::Swizzle(s) => {
             let comps = ['x', 'y', 'z', 'w'];
@@ -542,22 +658,35 @@ fn trim_swizzle(s: &str) -> String {
     chars[..end].iter().collect()
 }
 
-fn format_immediate(val: u32) -> String {
-    let f = f32::from_bits(val);
-    if f == 0.0 || f == 1.0 || f == -1.0 || f == 0.5 || f == -0.5 || f == 2.0 {
-        format!("{f:.6}")
-    } else if val == 0 {
-        "0".to_string()
-    } else if f.is_finite() && f.abs() > 0.0001 && f.abs() < 1_000_000.0 {
-        format!("{f:.6}")
-    } else {
-        format!("0x{val:08X}")
+/// Format a single immediate value according to its type classification.
+fn format_immediate(val: u32, imm_type: ImmediateType) -> String {
+    match imm_type {
+        ImmediateType::Float => {
+            let f = f32::from_bits(val);
+            if f.is_finite() {
+                format!("{f:.6}")
+            } else if f.is_nan() {
+                format!("0x{val:08X}")
+            } else {
+                // ±Infinity
+                format!("{f:.6}")
+            }
+        }
+        ImmediateType::Int => {
+            let i = val as i32;
+            format!("{i}")
+        }
+        ImmediateType::Uint => {
+            if val == 0 {
+                "0".to_string()
+            } else {
+                format!("0x{val:08x}")
+            }
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display impls — delegate to the public format_* functions
-// ---------------------------------------------------------------------------
+// Display impls — delegate to the public format_* functions.
 
 impl core::fmt::Display for Instruction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

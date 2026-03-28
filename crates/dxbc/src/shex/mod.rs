@@ -1,17 +1,34 @@
+//! SM4/SM5 shader bytecode handling: decode, encode, and format.
+//!
+//! The pipeline is **bytes → IR → text** (disassembly) or
+//! **IR → bytes** (encoding / round-trip).
+//!
+//! * `decode` parses raw SHEX/SHDR chunk bytes into a `Program`.
+//! * `format_program` renders a `Program` as human-readable text.
+//! * `encode` serialises a `Program` back to the binary dword stream.
+//! * `disassemble` is a convenience that chains decode + format.
+
 use alloc::string::String;
 
-pub mod decode;
-pub mod fmt;
-pub mod ir;
-pub mod opcodes;
+mod decode;
+mod encode;
+mod fmt;
+mod ir;
+mod opcodes;
+
+pub use self::decode::*;
+pub use self::encode::*;
+pub use self::fmt::*;
+pub use self::ir::*;
+pub use self::opcodes::*;
 
 /// Disassemble a SHEX or SHDR chunk into human-readable text.
 ///
 /// This is the main entry point. It decodes the raw bytes into a structured
-/// IR ([`ir::Program`]) and then formats it into text.
+/// IR ([`Program`]) and then formats it into text.
 pub fn disassemble(data: &[u8]) -> String {
-    match decode::decode(data) {
-        Ok(program) => fmt::format_program(&program),
+    match self::decode::decode(data) {
+        Ok(program) => self::fmt::format_program(&program),
         Err(_) => String::new(),
     }
 }
@@ -78,7 +95,7 @@ mod tests {
     /// Swizzle constants
     const XYZW: u32 = 0b11_10_01_00; // x=0,y=1,z=2,w=3
 
-    // ==================== Version header tests ====================
+    // Version header tests.
 
     #[test]
     fn version_ps_5_0() {
@@ -108,7 +125,7 @@ mod tests {
         assert!(output.starts_with("cs_5_0\n"), "got: {output}");
     }
 
-    // ==================== Simple instruction tests ====================
+    // Simple instruction tests.
 
     #[test]
     fn instr_ret() {
@@ -187,7 +204,7 @@ mod tests {
         );
     }
 
-    // ==================== Saturate modifier ====================
+    // Saturate modifier.
 
     #[test]
     fn instr_mov_sat() {
@@ -200,7 +217,7 @@ mod tests {
         assert!(output.contains("mov_sat r0.xyzw, r1.xyzw"), "got: {output}");
     }
 
-    // ==================== Declaration tests ====================
+    // Declaration tests.
 
     #[test]
     fn dcl_global_flags_refactoring() {
@@ -246,7 +263,7 @@ mod tests {
         assert!(output.contains("dcl_thread_group"), "got: {output}");
     }
 
-    // ==================== Control flow ====================
+    // Control flow.
 
     #[test]
     fn control_flow_if_else_endif() {
@@ -279,7 +296,7 @@ mod tests {
         assert!(output.contains("endloop"), "missing 'endloop' in: {output}");
     }
 
-    // ==================== SM5 instructions ====================
+    // SM5 instructions.
 
     #[test]
     fn instr_emit_stream() {
@@ -318,7 +335,7 @@ mod tests {
         assert!(output.contains("hs_fork_phase"), "got: {output}");
     }
 
-    // ==================== Partial mask tests ====================
+    // Partial mask tests.
 
     #[test]
     fn instr_mov_partial_mask() {
@@ -330,7 +347,7 @@ mod tests {
         assert!(output.contains("mov r0.xy,"), "got: {output}");
     }
 
-    // ==================== GS declarations ====================
+    // GS declarations.
 
     #[test]
     fn dcl_gs_input_primitive() {
@@ -346,8 +363,8 @@ mod tests {
 
     #[test]
     fn dcl_gs_output_topology_trianglestrip() {
-        // opcode 92, trianglestrip = 3 in bits [13:11]
-        let tokens = [instr_token(92, 1) | (3 << 11)];
+        // opcode 92, trianglestrip = 5 per D3D10_SB_PRIMITIVE_TOPOLOGY enum
+        let tokens = [instr_token(92, 1) | (5 << 11)];
         let data = build_shex(2, &[&tokens, &[instr_token(62, 1)]]);
         let output = disassemble(&data);
         assert!(
@@ -356,7 +373,7 @@ mod tests {
         );
     }
 
-    // ==================== Tessellation declarations ====================
+    // Tessellation declarations.
 
     #[test]
     fn dcl_tess_domain_tri() {
@@ -377,7 +394,7 @@ mod tests {
         );
     }
 
-    // ==================== Empty / minimal input ====================
+    // Empty / minimal input.
 
     #[test]
     fn empty_data() {
@@ -389,5 +406,109 @@ mod tests {
     fn too_short() {
         let output = disassemble(&[0, 0, 0, 0]);
         assert!(output.is_empty() || output.contains("unknown"));
+    }
+
+    // Round-trip tests: decode → encode should produce identical bytes.
+
+    /// Helper: assert that decoding then re-encoding produces identical bytes.
+    fn assert_roundtrip(raw: &[u8]) {
+        let program = decode::decode(raw).expect("decode failed");
+        let encoded = encode::encode(&program);
+        assert_eq!(
+            raw,
+            &encoded[..],
+            "round-trip mismatch:\n  original: {:?}\n  encoded:  {:?}",
+            raw.iter().collect::<Vec<_>>(),
+            encoded.iter().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn roundtrip_ret() {
+        assert_roundtrip(&build_ps(&[&[instr_token(62, 1)]]));
+    }
+
+    #[test]
+    fn roundtrip_nop_ret() {
+        assert_roundtrip(&build_ps(&[&[instr_token(58, 1)], &[instr_token(62, 1)]]));
+    }
+
+    #[test]
+    fn roundtrip_mov() {
+        let d = temp_dest(0, 0xF);
+        let s = temp_src(1, XYZW);
+        assert_roundtrip(&build_ps(&[
+            &[instr_token(54, 5), d[0], d[1], s[0], s[1]],
+            &[instr_token(62, 1)],
+        ]));
+    }
+
+    #[test]
+    fn roundtrip_add() {
+        let d = temp_dest(0, 0xF);
+        let s0 = temp_src(1, XYZW);
+        let s1 = temp_src(2, XYZW);
+        assert_roundtrip(&build_ps(&[
+            &[instr_token(0, 7), d[0], d[1], s0[0], s0[1], s1[0], s1[1]],
+            &[instr_token(62, 1)],
+        ]));
+    }
+
+    #[test]
+    fn roundtrip_dcl_temps() {
+        assert_roundtrip(&build_ps(&[
+            &[instr_token(104, 2), 4],
+            &[instr_token(62, 1)],
+        ]));
+    }
+
+    #[test]
+    fn roundtrip_dcl_global_flags() {
+        assert_roundtrip(&build_ps(&[
+            &[instr_token(106, 1) | (1 << 11)], // refactoringAllowed
+            &[instr_token(62, 1)],
+        ]));
+    }
+
+    #[test]
+    fn roundtrip_dcl_gs_input_primitive() {
+        assert_roundtrip(&build_shex(
+            2,
+            &[
+                &[instr_token(93, 1) | (3 << 11)], // triangle
+                &[instr_token(62, 1)],
+            ],
+        ));
+    }
+
+    #[test]
+    fn roundtrip_dcl_thread_group() {
+        assert_roundtrip(&build_shex(
+            5,
+            &[&[instr_token(155, 4), 8, 8, 1], &[instr_token(62, 1)]],
+        ));
+    }
+
+    #[test]
+    fn roundtrip_mov_sat() {
+        let d = temp_dest(0, 0xF);
+        let s = temp_src(1, XYZW);
+        assert_roundtrip(&build_ps(&[
+            &[instr_token(54, 5) | (1 << 13), d[0], d[1], s[0], s[1]],
+            &[instr_token(62, 1)],
+        ]));
+    }
+
+    #[test]
+    fn roundtrip_hs_phases() {
+        assert_roundtrip(&build_shex(
+            3,
+            &[
+                &[instr_token(113, 1)], // hs_decls
+                &[instr_token(114, 1)], // hs_control_point_phase
+                &[instr_token(115, 1)], // hs_fork_phase
+                &[instr_token(62, 1)],
+            ],
+        ));
     }
 }

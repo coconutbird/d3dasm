@@ -6,13 +6,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+
 use super::ir::*;
 use super::opcodes::Opcode;
-use crate::util::read_u32;
 
 /// Error returned when decoding a SHEX/SHDR chunk fails.
 #[derive(Debug, Clone)]
 pub struct DecodeError {
+    /// Human-readable description of the decode failure.
     pub message: String,
 }
 
@@ -24,6 +26,11 @@ impl fmt::Display for DecodeError {
 
 /// Decode a SHEX/SHDR chunk into a structured [`Program`].
 pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
+    decode_with_fourcc(data, *b"SHEX")
+}
+
+/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original FourCC.
+pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, DecodeError> {
     if data.len() < 8 {
         return Err(DecodeError {
             message: format!(
@@ -33,8 +40,13 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
         });
     }
 
-    let version_token = read_u32(data, 0);
-    let length_dwords = read_u32(data, 4) as usize;
+    let mut c = SliceCursor::new(data);
+    let version_token = c.read_u32_le().map_err(|_| DecodeError {
+        message: String::from("failed to read version token"),
+    })?;
+    let length_dwords = c.read_u32_le().map_err(|_| DecodeError {
+        message: String::from("failed to read length"),
+    })? as usize;
     let shader_type_val = (version_token >> 16) & 0xFFFF;
     let major = (version_token >> 4) & 0xF;
     let minor = version_token & 0xF;
@@ -64,9 +76,10 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
     }
 
     while offset + 4 <= end {
-        let token = read_u32(data, offset);
+        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let token = c.read_u32_le().unwrap();
         let opcode_val = token & 0x7FF;
-        let instr_len = instruction_length(token, opcode_val, data, offset, end);
+        let instr_len = instruction_length(token, opcode_val, &mut c, offset, end);
 
         if instr_len == 0 {
             warnings.push(format!(
@@ -84,9 +97,11 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
             break;
         }
 
-        let tokens: Vec<u32> = (0..instr_len)
-            .map(|i| read_u32(data, offset + i * 4))
-            .collect();
+        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let mut tokens = Vec::with_capacity(instr_len);
+        for _ in 0..instr_len {
+            tokens.push(c.read_u32_le().unwrap());
+        }
 
         instructions.push(decode_instruction(&tokens, opcode_val));
         offset += instr_len * 4;
@@ -98,14 +113,23 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
         minor_version: minor,
         instructions,
         warnings,
+        fourcc,
+        raw: Vec::from(data),
     })
 }
 
-fn instruction_length(token: u32, opcode: u32, data: &[u8], offset: usize, end: usize) -> usize {
+fn instruction_length(
+    token: u32,
+    opcode: u32,
+    c: &mut SliceCursor<'_>,
+    offset: usize,
+    end: usize,
+) -> usize {
     let op = Opcode::from_u32(opcode);
     if matches!(op, Opcode::CustomData) {
         if offset + 8 <= end {
-            return read_u32(data, offset + 4) as usize;
+            c.seek(SeekFrom::Start((offset + 4) as u64)).unwrap();
+            return c.read_u32_le().unwrap() as usize;
         }
         return 0;
     }
@@ -116,17 +140,40 @@ fn instruction_length(token: u32, opcode: u32, data: &[u8], offset: usize, end: 
 fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     let op = Opcode::from_u32(opcode_val);
     let token0 = tokens[0];
-    let saturate = (token0 >> 13) & 1 != 0;
 
-    // Extract resinfo return type (bits [11:12]) for resinfo opcode
+    // Saturate (bit 13) — not applicable to Sync (which reuses bits 11-14).
+    let saturate = op != Opcode::Sync && (token0 >> 13) & 1 != 0;
+
+    // Conditional test condition: bit 18 (0 = zero, 1 = non-zero).
+    let test_nonzero = matches!(
+        op,
+        Opcode::If
+            | Opcode::Breakc
+            | Opcode::Callc
+            | Opcode::Continuec
+            | Opcode::Discard
+            | Opcode::Retc
+    ) && ((token0 >> 18) & 1 != 0);
+
+    // SM5 precise modifier: bits 19-22.
+    let precise_mask = ((token0 >> 19) & 0xF) as u8;
+
+    // Extract resinfo return type (bits [11:12]) for resinfo opcode.
     let resinfo_return_type = if op == Opcode::Resinfo {
         Some((token0 >> 11) & 0x3)
     } else {
         None
     };
 
-    // Extract texture offsets from extended opcode token if present
-    let tex_offsets = decode_extended_tex_offsets(tokens);
+    // Sync flags: bits 11-14 (only meaningful for Sync opcode).
+    let sync_flags = if op == Opcode::Sync {
+        ((token0 >> 11) & 0xF) as u8
+    } else {
+        0
+    };
+
+    // Parse all extended opcode tokens from the instruction header chain.
+    let (tex_offsets, resource_dim, resource_return_type) = decode_extended_tokens(tokens);
 
     let kind = match op {
         Opcode::CustomData => decode_custom_data(tokens),
@@ -181,14 +228,19 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
                 0.0
             },
         },
-        Opcode::DclHsForkPhaseInstanceCount => InstructionKind::DclHsForkPhaseInstanceCount {
-            count: if tokens.len() > 1 { tokens[1] } else { 0 },
-        },
+        Opcode::DclHsForkPhaseInstanceCount | Opcode::DclHsJoinPhaseInstanceCount => {
+            InstructionKind::DclHsForkPhaseInstanceCount {
+                count: if tokens.len() > 1 { tokens[1] } else { 0 },
+            }
+        }
         Opcode::DclThreadGroup => InstructionKind::DclThreadGroup {
             x: if tokens.len() > 1 { tokens[1] } else { 0 },
             y: if tokens.len() > 2 { tokens[2] } else { 0 },
             z: if tokens.len() > 3 { tokens[3] } else { 0 },
         },
+        Opcode::DclFunctionBody => decode_dcl_function_body(tokens),
+        Opcode::DclFunctionTable => decode_dcl_function_table(tokens),
+        Opcode::DclInterface => decode_dcl_interface(tokens),
         Opcode::HsDecls
         | Opcode::HsControlPointPhase
         | Opcode::HsForkPhase
@@ -199,13 +251,18 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     Instruction {
         opcode: op,
         saturate,
+        test_nonzero,
+        precise_mask,
         resinfo_return_type,
+        sync_flags,
         tex_offsets,
+        resource_dim,
+        resource_return_type,
         kind,
     }
 }
 
-// ── Declaration decoders ──────────────────────────────────────────────
+// Declaration decoders.
 
 fn decode_custom_data(tokens: &[u32]) -> InstructionKind {
     let subtype_val = (tokens[0] >> 11) & 0x1F;
@@ -274,35 +331,48 @@ fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
     } else {
         None
     };
-    // System value is in the last token for sgv/siv variants
+    // When the instruction carries a system value, the last token is the
+    // SV enum — decode operands only from the tokens *before* it so the
+    // greedy operand decoder doesn't consume the SV token as a degenerate
+    // operand.
     let has_sv = matches!(
         op,
         Opcode::DclInputSgv | Opcode::DclInputSiv | Opcode::DclInputPsSgv | Opcode::DclInputPsSiv
     );
-    let (system_value, operand_end) = if has_sv && tokens.len() >= 3 {
-        let sv = tokens[tokens.len() - 1];
-        (Some(system_value_name(sv)), tokens.len() - 1)
+    let system_value = if has_sv && tokens.len() >= 3 {
+        Some(system_value_name(tokens[tokens.len() - 1]))
     } else {
-        (None, tokens.len())
+        None
     };
+    let operand_end = if has_sv && tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    let operands = decode_operands(&tokens[..operand_end], 1);
     InstructionKind::DclInput {
         interpolation,
         system_value,
-        operands: decode_operands(&tokens[..operand_end], 1),
+        operands,
     }
 }
 
 fn decode_dcl_output(tokens: &[u32], op: &Opcode) -> InstructionKind {
     let has_sv = matches!(op, Opcode::DclOutputSgv | Opcode::DclOutputSiv);
-    let (system_value, operand_end) = if has_sv && tokens.len() >= 3 {
-        let sv = tokens[tokens.len() - 1];
-        (Some(system_value_name(sv)), tokens.len() - 1)
+    let system_value = if has_sv && tokens.len() >= 3 {
+        Some(system_value_name(tokens[tokens.len() - 1]))
     } else {
-        (None, tokens.len())
+        None
     };
+    let operand_end = if has_sv && tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    let operands = decode_operands(&tokens[..operand_end], 1);
     InstructionKind::DclOutput {
         system_value,
-        operands: decode_operands(&tokens[..operand_end], 1),
+        operands,
     }
 }
 
@@ -321,6 +391,8 @@ fn decode_dcl_resource(tokens: &[u32]) -> InstructionKind {
         10 => "texturecubearray",
         _ => "unknown",
     };
+    // MSAA sample count in bits 16-22 (relevant for texture2dms/texture2dmsarray).
+    let sample_count = (tokens[0] >> 16) & 0x7F;
     let return_type = if tokens.len() > 2 {
         let rt = tokens[tokens.len() - 1];
         [
@@ -340,6 +412,7 @@ fn decode_dcl_resource(tokens: &[u32]) -> InstructionKind {
     };
     InstructionKind::DclResource {
         dimension,
+        sample_count,
         return_type,
         operands: decode_operands(&tokens[..operand_end], 1),
     }
@@ -360,6 +433,8 @@ fn decode_dcl_uav_typed(tokens: &[u32]) -> InstructionKind {
         10 => "texturecubearray",
         _ => "unknown",
     };
+    // UAV flags: bit 16 = globallyCoherent, bit 17 = rasterizer ordered (ROV).
+    let flags = (tokens[0] >> 16) & 0xFF;
     let return_type = if tokens.len() > 2 {
         let rt = tokens[tokens.len() - 1];
         [
@@ -378,6 +453,7 @@ fn decode_dcl_uav_typed(tokens: &[u32]) -> InstructionKind {
     };
     InstructionKind::DclUavTyped {
         dimension,
+        flags,
         return_type,
         operands: decode_operands(&tokens[..operand_end], 1),
     }
@@ -453,24 +529,54 @@ fn decode_dcl_index_range(tokens: &[u32]) -> InstructionKind {
     }
 }
 
-/// Extract texture offsets (u, v, w) from the extended opcode token.
-/// Returns None if there's no extended token or if it's not a sample offset type.
-fn decode_extended_tex_offsets(tokens: &[u32]) -> Option<[i8; 3]> {
+/// Walk the extended opcode token chain and extract all extended data.
+///
+/// Returns `(tex_offsets, resource_dim, resource_return_type)`.
+fn decode_extended_tokens(tokens: &[u32]) -> (Option<[i8; 3]>, Option<u32>, Option<u32>) {
     let token0 = tokens[0];
     if (token0 >> 31) & 1 == 0 || tokens.len() < 2 {
-        return None;
+        return (None, None, None);
     }
-    let ext = tokens[1];
-    let ext_type = ext & 0x3F;
-    // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
-    if ext_type != 1 {
-        return None;
+
+    let mut tex_offsets = None;
+    let mut resource_dim = None;
+    let mut resource_return_type = None;
+    let mut idx = 1;
+
+    loop {
+        if idx >= tokens.len() {
+            break;
+        }
+        let ext = tokens[idx];
+        let ext_type = ext & 0x3F;
+
+        match ext_type {
+            // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
+            1 => {
+                let u = sign_extend_4bit((ext >> 9) & 0xF);
+                let v = sign_extend_4bit((ext >> 13) & 0xF);
+                let w = sign_extend_4bit((ext >> 17) & 0xF);
+                tex_offsets = Some([u, v, w]);
+            }
+            // Type 2 = D3D10_SB_EXTENDED_OPCODE_RESOURCE_DIM
+            2 => {
+                resource_dim = Some(ext);
+            }
+            // Type 3 = D3D10_SB_EXTENDED_OPCODE_RESOURCE_RETURN_TYPE
+            3 => {
+                resource_return_type = Some(ext);
+            }
+            _ => {}
+        }
+
+        // Bit 31 of the extended token indicates whether another extended token follows.
+        if (ext >> 31) & 1 == 0 {
+            break;
+        }
+        idx += 1;
     }
-    // Offsets are 4-bit signed values at bits [9:12], [13:16], [17:20]
-    let u = sign_extend_4bit((ext >> 9) & 0xF);
-    let v = sign_extend_4bit((ext >> 13) & 0xF);
-    let w = sign_extend_4bit((ext >> 17) & 0xF);
-    Some([u, v, w])
+
+    (tex_offsets, resource_dim, resource_return_type)
 }
 
 /// Sign-extend a 4-bit value to i8.
@@ -525,32 +631,16 @@ fn decode_dcl_indexable_temp(tokens: &[u32]) -> InstructionKind {
 
 fn decode_dcl_gs_input(token: u32) -> InstructionKind {
     let prim = (token >> 11) & 0x3F;
-    let primitive = if (6..=37).contains(&prim) {
-        // patchlist — we can't return a dynamic string from a &'static str,
-        // so we handle this in the formatter
-        "patchlist"
-    } else {
-        match prim {
-            1 => "point",
-            2 => "line",
-            3 => "triangle",
-            4 => "lineAdj",
-            5 => "triangleAdj",
-            _ => "?",
-        }
-    };
-    InstructionKind::DclGsInputPrimitive { primitive }
+    InstructionKind::DclGsInputPrimitive {
+        primitive: GsPrimitive::from_raw(prim),
+    }
 }
 
 fn decode_dcl_gs_output_topo(token: u32) -> InstructionKind {
-    let topo = (token >> 11) & 0x7;
-    let topology = match topo {
-        1 => "pointlist",
-        2 => "linestrip",
-        3 => "trianglestrip",
-        _ => "?",
-    };
-    InstructionKind::DclGsOutputTopology { topology }
+    let topo = (token >> 11) & 0xF;
+    InstructionKind::DclGsOutputTopology {
+        topology: GsOutputTopology::from_raw(topo),
+    }
 }
 
 fn decode_dcl_tess_domain(token: u32) -> InstructionKind {
@@ -588,7 +678,49 @@ fn decode_dcl_tess_output_prim(token: u32) -> InstructionKind {
     InstructionKind::DclTessOutputPrimitive { primitive }
 }
 
-// ── Generic instruction decoder ───────────────────────────────────────
+fn decode_dcl_function_body(tokens: &[u32]) -> InstructionKind {
+    // dcl_function_body fb<N>
+    // Token layout: [opcode_token, function_body_index]
+    InstructionKind::DclFunctionBody {
+        index: if tokens.len() > 1 { tokens[1] } else { 0 },
+    }
+}
+
+fn decode_dcl_function_table(tokens: &[u32]) -> InstructionKind {
+    // dcl_function_table ft<N> = { fb0, fb1, ... }
+    // Token layout: [opcode_token, table_index, count, body0, body1, ...]
+    let table_index = if tokens.len() > 1 { tokens[1] } else { 0 };
+    let count = if tokens.len() > 2 {
+        tokens[2] as usize
+    } else {
+        0
+    };
+    let body_indices: Vec<u32> = tokens.iter().skip(3).take(count).copied().collect();
+    InstructionKind::DclFunctionTable {
+        table_index,
+        body_indices,
+    }
+}
+
+fn decode_dcl_interface(tokens: &[u32]) -> InstructionKind {
+    // dcl_interface fp<N>[<num_call_sites>][<num_types>] = { ft0, ft1, ... }
+    // Token layout: [opcode_token, interface_index, num_call_sites, num_types, ft0, ft1, ...]
+    let interface_index = if tokens.len() > 1 { tokens[1] } else { 0 };
+    let num_call_sites = if tokens.len() > 2 { tokens[2] } else { 0 };
+    let num_types = if tokens.len() > 3 {
+        tokens[3] as usize
+    } else {
+        0
+    };
+    let table_indices: Vec<u32> = tokens.iter().skip(4).take(num_types).copied().collect();
+    InstructionKind::DclInterface {
+        interface_index,
+        num_call_sites,
+        table_indices,
+    }
+}
+
+// Generic instruction decoder.
 
 fn decode_generic(tokens: &[u32]) -> InstructionKind {
     let mut start = 1;
@@ -604,9 +736,11 @@ fn decode_generic(tokens: &[u32]) -> InstructionKind {
     }
 }
 
-// ── Operand decoder ───────────────────────────────────────────────────
+// Operand decoder.
 
-fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
+/// Decode operands starting at `start`, returning the operands and the
+/// token index just past the last consumed operand token.
+fn decode_operands_with_pos(tokens: &[u32], start: usize) -> (Vec<Operand>, usize) {
     let mut result = Vec::new();
     let mut pos = start;
     while pos < tokens.len() {
@@ -617,7 +751,11 @@ fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
         result.push(op);
         pos += consumed;
     }
-    result
+    (result, pos)
+}
+
+fn decode_operands(tokens: &[u32], start: usize) -> Vec<Operand> {
+    decode_operands_with_pos(tokens, start).0
 }
 
 fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
@@ -643,6 +781,7 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
     };
 
     let components = decode_components(token, num_components);
+    let num_components = components.num_components();
 
     // Decode indices and immediates
     let mut indices = Vec::new();
@@ -729,11 +868,8 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
 fn decode_components(token: u32, num_components: u32) -> ComponentSelect {
     let sel_mode = (token >> 2) & 0x3;
     match num_components {
-        0 => ComponentSelect::None,
-        1 => {
-            let mask = ((token >> 4) & 0xF) as u8;
-            ComponentSelect::Mask(mask)
-        }
+        0 => ComponentSelect::ZeroComponent,
+        1 => ComponentSelect::OneComponent,
         2 => match sel_mode {
             0 => ComponentSelect::Mask(((token >> 4) & 0xF) as u8),
             1 => {
@@ -744,9 +880,9 @@ fn decode_components(token: u32, num_components: u32) -> ComponentSelect {
                 ComponentSelect::Swizzle(s)
             }
             2 => ComponentSelect::Scalar(((token >> 4) & 0x3) as u8),
-            _ => ComponentSelect::None,
+            _ => ComponentSelect::ZeroComponent,
         },
-        _ => ComponentSelect::None,
+        _ => ComponentSelect::ZeroComponent,
     }
 }
 
@@ -790,7 +926,7 @@ fn decode_index(tokens: &[u32], pos: usize, repr: u32) -> (OperandIndex, usize) 
 fn empty_operand() -> Operand {
     Operand {
         reg_type: RegisterType::Unknown(0),
-        components: ComponentSelect::None,
+        components: ComponentSelect::ZeroComponent,
         negate: false,
         abs: false,
         indices: Vec::new(),
