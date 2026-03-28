@@ -14,11 +14,12 @@
 //!
 //! for shader in &shaders {
 //!     // Structured access to parsed chunks.
+//!     // Chunks are parsed lazily — only the shader program is decoded here.
 //!     if let Some(program) = shader.program() {
 //!         println!("SM {}.{}", program.version_major, program.version_minor);
 //!     }
 //!
-//!     // Full disassembly via Display.
+//!     // Full disassembly via Display (parses remaining chunks on demand).
 //!     print!("{shader}");
 //! }
 //! ```
@@ -27,6 +28,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 use core::fmt;
 
 use dxbc::chunks::ChunkData;
@@ -37,21 +39,51 @@ pub use dxbc;
 
 /// A parsed DXBC shader container with typed chunk access and formatting.
 ///
-/// Created by [`parse`] or [`Shader::from_container`]. All chunks are
-/// parsed eagerly on construction; accessor methods query the cached results.
-#[derive(Debug)]
+/// Created by [`parse`] or [`Shader::from_container`]. Chunks are parsed
+/// lazily on first access through the typed accessor methods, so
+/// constructing a `Shader` is cheap.
 pub struct Shader<'a> {
     /// The underlying DXBC container (chunk table + raw data).
     container: DxbcContainer<'a>,
-    /// Eagerly parsed chunks, cached for accessor methods and `Display`.
-    chunks: Vec<ChunkData<'a>>,
+    /// Lazily parsed chunks, one cell per container chunk index.
+    parsed: Vec<OnceCell<ChunkData<'a>>>,
+}
+
+impl fmt::Debug for Shader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Shader")
+            .field("container", &self.container)
+            .field(
+                "parsed_count",
+                &self.parsed.iter().filter(|c| c.get().is_some()).count(),
+            )
+            .field("total_chunks", &self.container.chunks.len())
+            .finish()
+    }
 }
 
 impl<'a> Shader<'a> {
-    /// Wrap a [`DxbcContainer`], parsing all chunks eagerly.
+    /// Wrap a [`DxbcContainer`]. No chunks are parsed until accessed.
     pub fn from_container(container: DxbcContainer<'a>) -> Self {
-        let chunks: Vec<ChunkData<'a>> = container.chunks.iter().map(|c| c.parse()).collect();
-        Self { container, chunks }
+        let parsed = (0..container.chunks.len())
+            .map(|_| OnceCell::new())
+            .collect();
+        Self { container, parsed }
+    }
+
+    /// Parse and return the chunk at `index`, caching the result.
+    fn chunk_at(&self, index: usize) -> &ChunkData<'a> {
+        self.parsed[index].get_or_init(|| self.container.chunks[index].parse())
+    }
+
+    /// Find the first chunk whose fourcc matches, parsing it on demand.
+    fn find_by_fourcc(&self, fourccs: &[&[u8; 4]]) -> Option<&ChunkData<'a>> {
+        for (i, raw) in self.container.chunks.iter().enumerate() {
+            if fourccs.iter().any(|f| raw.fourcc == **f) {
+                return Some(self.chunk_at(i));
+            }
+        }
+        None
     }
 
     /// Byte offset of this container in the source file.
@@ -66,90 +98,90 @@ impl<'a> Shader<'a> {
 
     /// The decoded shader program (SM4/SM5 instructions), if present.
     pub fn program(&self) -> Option<&dxbc::shex::Program> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"SHEX", b"SHDR"])? {
             ChunkData::Shader(p) => Some(p),
             _ => None,
-        })
+        }
     }
 
     /// Resource definitions (constant buffers, bindings, creator string).
     pub fn resource_def(&self) -> Option<&dxbc::chunks::ResourceDef<'a>> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"RDEF"])? {
             ChunkData::Rdef(rd) => Some(rd),
             _ => None,
-        })
+        }
     }
 
     /// Input signature elements.
     pub fn input_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"ISGN", b"ISG1"])? {
             ChunkData::InputSignature(s) => Some(s),
             _ => None,
-        })
+        }
     }
 
     /// Output signature elements.
     pub fn output_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"OSGN", b"OSG1", b"OSG5"])? {
             ChunkData::OutputSignature(s) => Some(s),
             _ => None,
-        })
+        }
     }
 
     /// Patch constant signature elements (hull/domain shaders).
     pub fn patch_constant_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"PCSG", b"PSG1"])? {
             ChunkData::PatchConstantSignature(s) => Some(s),
             _ => None,
-        })
+        }
     }
 
     /// Shader statistics (instruction counts, register usage, etc.).
     pub fn stats(&self) -> Option<&dxbc::chunks::ShaderStats> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"STAT"])? {
             ChunkData::Stats(s) => Some(s),
             _ => None,
-        })
+        }
     }
 
     /// Shader hash (HASH or XHSH chunk).
     pub fn hash(&self) -> Option<&dxbc::chunks::ShaderHash> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"HASH", b"XHSH"])? {
             ChunkData::Hash(h) => Some(h),
             _ => None,
-        })
+        }
     }
 
     /// D3D12 root signature (RTS0 chunk).
     pub fn root_signature(&self) -> Option<&dxbc::chunks::RootSignature> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"RTS0"])? {
             ChunkData::RootSignature(rs) => Some(rs),
             _ => None,
-        })
+        }
     }
 
     /// Shader feature info flags (SFI0 chunk).
     pub fn feature_info(&self) -> Option<&dxbc::chunks::ShaderFeatureInfo> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"SFI0"])? {
             ChunkData::FeatureInfo(fi) => Some(fi),
             _ => None,
-        })
+        }
     }
 
     /// Debug name (ILDN chunk).
     pub fn debug_name(&self) -> Option<&dxbc::chunks::DebugName> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"ILDN"])? {
             ChunkData::DebugName(dn) => Some(dn),
             _ => None,
-        })
+        }
     }
 
     /// DXIL bytecode (SM6.0+, DXIL chunk).
     pub fn dxil(&self) -> Option<&dxbc::chunks::DxilData> {
-        self.chunks.iter().find_map(|c| match c {
+        match self.find_by_fourcc(&[b"DXIL"])? {
             ChunkData::Dxil(d) => Some(d),
             _ => None,
-        })
+        }
     }
 
     /// Access to the underlying [`DxbcContainer`] for advanced use.
@@ -157,9 +189,9 @@ impl<'a> Shader<'a> {
         &self.container
     }
 
-    /// Access to all parsed chunks.
-    pub fn chunks(&self) -> &[ChunkData<'a>] {
-        &self.chunks
+    /// Iterate over all parsed chunks, parsing any that haven't been yet.
+    pub fn chunks(&self) -> impl Iterator<Item = &ChunkData<'a>> {
+        (0..self.container.chunks.len()).map(move |i| self.chunk_at(i))
     }
 }
 
@@ -225,7 +257,7 @@ impl fmt::Display for Shader<'_> {
         }
 
         // Remaining chunks: PSV0, RDAT, debug data, private, library.
-        for chunk in &self.chunks {
+        for chunk in self.chunks() {
             match chunk {
                 ChunkData::PipelineStateValidation(p) => write!(f, "{p}")?,
                 ChunkData::RuntimeData(r) => write!(f, "{r}")?,
