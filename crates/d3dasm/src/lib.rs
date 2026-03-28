@@ -3,7 +3,7 @@ use std::fmt;
 /// Re-export the DXBC backend.
 pub use dxbc;
 use dxbc::chunks::{
-    self, ChunkData, DebugData, DebugName, DxilData, LibraryFunction, LibraryFunctionSignatures,
+    ChunkData, DebugData, DebugName, DxilData, LibraryFunction, LibraryFunctionSignatures,
     LibraryHeader, PipelineStateValidation, PrivateData, ResourceDef, RootSignature, RuntimeData,
     ShaderFeatureInfo, ShaderHash, ShaderStats, SignatureElement,
 };
@@ -97,7 +97,7 @@ pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
     };
 
     for chunk in &container.chunks {
-        match chunks::parse_chunk(chunk) {
+        match chunk.parse() {
             ChunkData::RootSignature(rs) => shader.root_sig = Some(rs),
             ChunkData::Rdef(rd) => shader.resource_def = Some(rd),
             ChunkData::InputSignature(s) => shader.input_signature = s.elements,

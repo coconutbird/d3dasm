@@ -1,8 +1,9 @@
 //! Chunk parsers for every known DXBC chunk type.
 //!
 //! Each sub-module handles one (or a family of related) chunk FourCCs.
-//! [`parse_chunk`](crate::chunks::parse_chunk) dispatches on the FourCC and returns a typed [`ChunkData`](crate::chunks::ChunkData)
-//! variant so callers never need to match on raw strings themselves.
+//! [`DxbcChunk::parse`](crate::container::DxbcChunk::parse) dispatches on the
+//! FourCC and returns a typed [`ChunkData`] variant so callers never need to
+//! match on raw strings themselves.
 
 pub mod dxil;
 pub mod hash;

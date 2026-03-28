@@ -29,11 +29,16 @@ pub struct DxbcChunk<'a> {
     pub data: &'a [u8],
 }
 
-impl DxbcChunk<'_> {
+impl<'a> DxbcChunk<'a> {
     /// Returns the FourCC as a UTF-8 string, or `"????"` if it contains
     /// invalid bytes.
     pub fn fourcc_str(&self) -> &str {
         core::str::from_utf8(&self.fourcc).unwrap_or("????")
+    }
+
+    /// Parse the raw chunk payload into a typed [`ChunkData`](crate::chunks::ChunkData).
+    pub fn parse(&self) -> crate::chunks::ChunkData<'a> {
+        crate::chunks::parse_chunk(self)
     }
 }
 
