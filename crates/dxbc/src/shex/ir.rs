@@ -405,7 +405,7 @@ impl CustomDataType {
     }
 }
 
-/// Decode a system value name from its encoded value.
+/// Decode a system value name from its encoded D3D10_SB_NAME / D3D11_SB_NAME value.
 pub fn system_value_name(val: u32) -> &'static str {
     match val {
         0 => "undefined",
@@ -419,17 +419,28 @@ pub fn system_value_name(val: u32) -> &'static str {
         8 => "instance_id",
         9 => "is_front_face",
         10 => "sample_index",
-        11 => "finalQuadEdgeTessfactor",
-        12 => "finalQuadInsideTessfactor",
-        13 => "finalTriEdgeTessfactor",
-        14 => "finalTriInsideTessfactor",
-        15 => "finalLineDetailTessfactor",
-        16 => "finalLineDensityTessfactor",
+        // Quad tessellation factors (4 edges + 2 inside)
+        11 => "finalQuadUeq0EdgeTessFactor",
+        12 => "finalQuadVeq0EdgeTessFactor",
+        13 => "finalQuadUeq1EdgeTessFactor",
+        14 => "finalQuadVeq1EdgeTessFactor",
+        15 => "finalQuadUInsideTessFactor",
+        16 => "finalQuadVInsideTessFactor",
+        // Triangle tessellation factors (3 edges + 1 inside)
+        17 => "finalTriUeq0EdgeTessFactor",
+        18 => "finalTriVeq0EdgeTessFactor",
+        19 => "finalTriWeq0EdgeTessFactor",
+        20 => "finalTriInsideTessFactor",
+        // Line tessellation factors
+        21 => "finalLineDetailTessFactor",
+        22 => "finalLineDensityTessFactor",
         23 => "target",
         24 => "depth",
         25 => "coverage",
         26 => "depth_greater_equal",
         27 => "depth_less_equal",
+        64 => "stencil_ref",
+        65 => "inner_coverage",
         _ => "unknown_sv",
     }
 }

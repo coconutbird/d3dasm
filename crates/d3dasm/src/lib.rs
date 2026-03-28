@@ -2,11 +2,13 @@ use std::fmt;
 
 /// Re-export the DXBC backend.
 pub use dxbc;
+use dxbc::chunks::{
+    self, ChunkData, DebugData, DebugName, DxilData, LibraryFunction, LibraryFunctionSignatures,
+    LibraryHeader, PipelineStateValidation, PrivateData, ResourceDef, RootSignature, RuntimeData,
+    ShaderFeatureInfo, ShaderHash, ShaderStats, SignatureElement,
+};
 use dxbc::container::DxbcContainer;
-use dxbc::rdef::ResourceDef;
 use dxbc::shex::ir::Program;
-use dxbc::signature::SignatureElement;
-use dxbc::stat::ShaderStats;
 
 /// A fully parsed shader from a DXBC container.
 ///
@@ -32,8 +34,30 @@ pub struct Shader<'a> {
     pub patch_constant_signature: Vec<SignatureElement<'a>>,
     /// Shader statistics (instruction counts, register usage, etc.).
     pub stats: Option<ShaderStats>,
-    /// Shader hash from the XHSH chunk (8 bytes).
-    pub hash: Option<[u8; 8]>,
+    /// Shader hash (HASH or XHSH chunk).
+    pub hash: Option<ShaderHash>,
+    /// Root Signature (RTS0 chunk).
+    pub root_sig: Option<RootSignature>,
+    /// Shader feature info (SFI0 chunk).
+    pub feature_info: Option<ShaderFeatureInfo>,
+    /// Debug name (ILDN chunk).
+    pub debug_name: Option<DebugName>,
+    /// Debug data (ILDB chunk).
+    pub debug_data: Option<DebugData>,
+    /// Private data (PRIV chunk).
+    pub private_data: Option<PrivateData>,
+    /// DXIL shader bytecode stub (DXIL chunk).
+    pub dxil: Option<DxilData>,
+    /// Pipeline state validation (PSV0 chunk).
+    pub psv: Option<PipelineStateValidation>,
+    /// Runtime data (RDAT chunk).
+    pub rdat: Option<RuntimeData>,
+    /// Library function table (LIBF chunk).
+    pub library_functions: Option<LibraryFunction>,
+    /// Library function signatures (LFS0 chunk).
+    pub library_signatures: Option<LibraryFunctionSignatures>,
+    /// Library header (LIBH chunk).
+    pub library_header: Option<LibraryHeader>,
 }
 
 /// Parse all DXBC shaders found in a raw byte buffer.
@@ -59,30 +83,40 @@ pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
         patch_constant_signature: Vec::new(),
         stats: None,
         hash: None,
+        root_sig: None,
+        feature_info: None,
+        debug_name: None,
+        debug_data: None,
+        private_data: None,
+        dxil: None,
+        psv: None,
+        rdat: None,
+        library_functions: None,
+        library_signatures: None,
+        library_header: None,
     };
 
     for chunk in &container.chunks {
-        match chunk.fourcc_str() {
-            "RDEF" => shader.resource_def = dxbc::rdef::parse_rdef(chunk.data),
-            "ISGN" | "ISG1" => {
-                shader.input_signature = dxbc::signature::parse_signature(chunk.data);
-            }
-            "OSGN" | "OSG1" | "OSG5" => {
-                shader.output_signature = dxbc::signature::parse_signature(chunk.data);
-            }
-            "PCSG" => {
-                shader.patch_constant_signature = dxbc::signature::parse_signature(chunk.data);
-            }
-            "SHEX" | "SHDR" => shader.program = dxbc::shex::decode::decode(chunk.data).ok(),
-            "STAT" => shader.stats = dxbc::stat::parse_stat(chunk.data),
-            "XHSH" => {
-                if chunk.data.len() >= 8 {
-                    let mut h = [0u8; 8];
-                    h.copy_from_slice(&chunk.data[..8]);
-                    shader.hash = Some(h);
-                }
-            }
-            _ => {}
+        match chunks::parse_chunk(chunk) {
+            ChunkData::RootSignature(rs) => shader.root_sig = Some(rs),
+            ChunkData::Rdef(rd) => shader.resource_def = Some(rd),
+            ChunkData::InputSignature(s) => shader.input_signature = s,
+            ChunkData::OutputSignature(s) => shader.output_signature = s,
+            ChunkData::PatchConstantSignature(s) => shader.patch_constant_signature = s,
+            ChunkData::Shader(p) => shader.program = Some(p),
+            ChunkData::Stats(s) => shader.stats = Some(s),
+            ChunkData::Hash(h) => shader.hash = Some(h),
+            ChunkData::FeatureInfo(fi) => shader.feature_info = Some(fi),
+            ChunkData::DebugName(dn) => shader.debug_name = Some(dn),
+            ChunkData::DebugData(dd) => shader.debug_data = Some(dd),
+            ChunkData::PrivateData(pd) => shader.private_data = Some(pd),
+            ChunkData::Dxil(d) => shader.dxil = Some(d),
+            ChunkData::PipelineStateValidation(p) => shader.psv = Some(p),
+            ChunkData::RuntimeData(r) => shader.rdat = Some(r),
+            ChunkData::LibraryFunction(lf) => shader.library_functions = Some(lf),
+            ChunkData::LibraryFunctionSignatures(ls) => shader.library_signatures = Some(ls),
+            ChunkData::LibraryHeader(lh) => shader.library_header = Some(lh),
+            ChunkData::Unknown { .. } => {}
         }
     }
 
@@ -95,6 +129,11 @@ pub fn parse_container<'a>(container: &DxbcContainer<'a>) -> Shader<'a> {
 
 impl fmt::Display for Shader<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Root Signature
+        if let Some(rs) = &self.root_sig {
+            write!(f, "{rs}")?;
+        }
+
         // Resource definitions
         if let Some(rd) = &self.resource_def {
             if !rd.creator.is_empty() {
@@ -206,13 +245,20 @@ impl fmt::Display for Shader<'_> {
             writeln!(f, "//")?;
         }
 
+        // Debug name
+        if let Some(dn) = &self.debug_name {
+            write!(f, "{dn}")?;
+        }
+
+        // Shader feature info
+        if let Some(fi) = &self.feature_info {
+            write!(f, "{fi}")?;
+            writeln!(f, "//")?;
+        }
+
         // Shader hash
         if let Some(h) = &self.hash {
-            writeln!(
-                f,
-                "// Hash: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
-            )?;
+            write!(f, "{h}")?;
             writeln!(f, "//")?;
         }
 
@@ -224,6 +270,40 @@ impl fmt::Display for Shader<'_> {
         // Statistics
         if let Some(stats) = &self.stats {
             write!(f, "{stats}")?;
+        }
+
+        // DXIL
+        if let Some(d) = &self.dxil {
+            write!(f, "{d}")?;
+        }
+
+        // PSV0
+        if let Some(p) = &self.psv {
+            write!(f, "{p}")?;
+        }
+
+        // RDAT
+        if let Some(r) = &self.rdat {
+            write!(f, "{r}")?;
+        }
+
+        // Debug data / private data (at the end, less important)
+        if let Some(dd) = &self.debug_data {
+            write!(f, "{dd}")?;
+        }
+        if let Some(pd) = &self.private_data {
+            write!(f, "{pd}")?;
+        }
+
+        // Library chunks
+        if let Some(lh) = &self.library_header {
+            write!(f, "{lh}")?;
+        }
+        if let Some(lf) = &self.library_functions {
+            write!(f, "{lf}")?;
+        }
+        if let Some(ls) = &self.library_signatures {
+            write!(f, "{ls}")?;
         }
 
         Ok(())

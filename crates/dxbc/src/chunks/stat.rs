@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use super::ChunkParser;
 use crate::util::read_u32;
 
 /// Shader statistics extracted from the STAT chunk.
@@ -74,6 +75,12 @@ pub fn parse_stat(data: &[u8]) -> Option<ShaderStats> {
         // Offsets 108 and 112 are unknown fields
         is_sample_frequency: data.len() >= 120 && read_u32(data, 116) != 0,
     })
+}
+
+impl ChunkParser for ShaderStats {
+    fn parse(data: &[u8]) -> Option<Self> {
+        parse_stat(data)
+    }
 }
 
 impl fmt::Display for ShaderStats {

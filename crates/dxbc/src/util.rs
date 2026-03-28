@@ -19,9 +19,11 @@ pub fn read_cstring(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
         return "";
     }
+
     let mut end = offset;
     while end < data.len() && data[end] != 0 {
         end += 1;
     }
+
     core::str::from_utf8(&data[offset..end]).unwrap_or("")
 }

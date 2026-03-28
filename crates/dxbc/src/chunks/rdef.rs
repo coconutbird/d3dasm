@@ -1,37 +1,69 @@
+//! RDEF chunk parser — resource definitions.
+//!
+//! The RDEF chunk describes constant buffers, resource bindings, and the
+//! compiler creator string. Layout (28-byte header):
+//!   0x00: u32 — constant buffer count
+//!   0x04: u32 — constant buffer offset
+//!   0x08: u32 — bound resource count
+//!   0x0C: u32 — bound resource offset
+//!   0x10: u32 — target version (minor | major<<8 | type<<16)
+//!   0x14: u32 — compile flags
+//!   0x18: u32 — creator string offset
+
 use alloc::vec::Vec;
 use core::fmt;
 
 use crate::util::{read_cstring, read_u32};
 
+/// Parsed RDEF chunk — constant buffers, resource bindings, and creator string.
 #[derive(Debug)]
 pub struct ResourceDef<'a> {
+    /// Constant buffer definitions (layouts and variables).
     pub constant_buffers: Vec<CBufferDef<'a>>,
+    /// Shader resource bindings (textures, samplers, UAVs, etc.).
     pub bindings: Vec<ResourceBinding<'a>>,
+    /// Compiler identification string (e.g. `"Microsoft (R) HLSL Shader Compiler 10.1"`).
     pub creator: &'a str,
 }
 
+/// A single constant buffer and its variable layout.
 #[derive(Debug)]
 pub struct CBufferDef<'a> {
+    /// Constant buffer name (e.g. `"$Globals"`, `"cb0"`).
     pub name: &'a str,
+    /// Variables declared inside the buffer.
     pub variables: Vec<CBufferVariable<'a>>,
+    /// Total buffer size in bytes.
     pub size: u32,
 }
 
+/// A variable inside a constant buffer.
 #[derive(Debug)]
 pub struct CBufferVariable<'a> {
+    /// Variable name.
     pub name: &'a str,
+    /// Byte offset within the constant buffer.
     pub offset: u32,
+    /// Size in bytes.
     pub size: u32,
 }
 
+/// A shader resource binding (texture, sampler, cbuffer, UAV, etc.).
 #[derive(Debug)]
 pub struct ResourceBinding<'a> {
+    /// Binding name.
     pub name: &'a str,
+    /// Resource type (0=cbuffer, 2=texture, 3=sampler, 4=uav_rwtyped, …).
     pub input_type: u32,
+    /// Return type for typed resources.
     pub return_type: u32,
+    /// Resource dimension (1=buffer, 2=1d, 3=2d, …).
     pub dimension: u32,
+    /// Register slot (e.g. `t0`, `s1`, `b2`).
     pub bind_point: u32,
+    /// Number of contiguous registers bound.
     pub bind_count: u32,
+    /// Binding flags (userPacked, used, comparisonSampler, …).
     pub flags: u32,
 }
 

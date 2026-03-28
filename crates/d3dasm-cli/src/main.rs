@@ -1,12 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
 
 /// Direct3D shader bytecode disassembler.
 ///
-/// Supports DXBC containers (SM4/SM5) found in raw .bin files
-/// and fxb0 container bundles.
+/// Supports DXBC containers (SM4/SM5) found in raw .bin files.
 #[derive(Parser)]
 #[command(name = "d3dasm", version, about)]
 struct Cli {
@@ -26,7 +25,11 @@ fn main() {
         }
     };
 
-    let shaders = d3dasm::parse(&data);
+    print_dxbc(path, &data);
+}
+
+fn print_dxbc(path: &Path, data: &[u8]) {
+    let shaders = d3dasm::parse(data);
     if shaders.is_empty() {
         eprintln!("No DXBC shader bytecode found in {}", path.display());
         process::exit(1);
