@@ -55,35 +55,28 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
     let token0_idx = out.len();
     out.push(0);
 
-    // Build extended opcode token for tex offsets if present.
-    let has_extended = instr.tex_offsets.is_some();
-    if let Some(offsets) = &instr.tex_offsets {
-        let u = (offsets[0] as u32) & 0xF;
-        let v = (offsets[1] as u32) & 0xF;
-        let w = (offsets[2] as u32) & 0xF;
-        // Type 1 = sample controls, bit 31 = 0 (no further extended tokens)
-        out.push(1 | (u << 9) | (v << 13) | (w << 17));
+    // Build extended opcode token chain. Tokens are emitted in order:
+    // sample_controls (type 1), resource_dim (type 2), resource_return_type (type 3).
+    // Bit 31 of each token is set if another extended token follows.
+    let ext_tokens = build_extended_tokens(instr);
+    let has_extended = !ext_tokens.is_empty();
+    for &ext in &ext_tokens {
+        out.push(ext);
     }
 
     // Encode instruction-kind-specific payload.
     encode_kind(instr, out);
 
     // Compute instruction length and build token0.
+    // Start from the raw opcode-specific bits (11-23) preserved from the original
+    // token0 — this ensures round-trip fidelity for sample counts, test conditions,
+    // dimension fields, saturate, and all other instruction-embedded data.
     let instr_len = (out.len() - token0_idx) as u32;
-    let mut token0 = opcode_val & 0x7FF;
-    if instr.saturate {
-        token0 |= 1 << 13;
-    }
-    if let Some(rt) = instr.resinfo_return_type {
-        token0 |= (rt & 0x3) << 11;
-    }
+    let mut token0 = (opcode_val & 0x7FF) | instr.token0_opdata;
     if has_extended {
         token0 |= 1 << 31;
     }
     token0 |= (instr_len & 0x7F) << 24;
-
-    // Apply declaration-specific bits to token0.
-    apply_token0_dcl_bits(instr, &mut token0);
 
     out[token0_idx] = token0;
 }
@@ -259,142 +252,6 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
 
 /// Set declaration-specific bits in token0 that the decoder extracts from
 /// the primary instruction token rather than from trailing dwords.
-fn apply_token0_dcl_bits(instr: &Instruction, token0: &mut u32) {
-    match &instr.kind {
-        InstructionKind::DclGlobalFlags { flags } => {
-            let names: &[&str] = &[
-                "refactoringAllowed",
-                "enableDoublePrecisionFloatOps",
-                "forceEarlyDepthStencil",
-                "enableRawAndStructuredBuffers",
-                "skipOptimization",
-                "enableMinPrecision",
-                "enable11_1DoubleExtensions",
-                "enable11_1ShaderExtensions",
-            ];
-            let mut bits = 0u32;
-            for flag in flags {
-                if let Some(pos) = names.iter().position(|n| n == flag) {
-                    bits |= 1 << pos;
-                }
-            }
-            *token0 |= bits << 11;
-        }
-        InstructionKind::DclInput {
-            interpolation: Some(interp),
-            ..
-        } => {
-            let mode = match *interp {
-                "undefined" => 0u32,
-                "constant" => 1,
-                "linear" => 2,
-                "linearCentroid" => 3,
-                "linearNoperspective" => 4,
-                "linearNoperspectiveCentroid" => 5,
-                "linearSample" => 6,
-                "linearNoperspectiveSample" => 7,
-                _ => 0,
-            };
-            *token0 |= mode << 11;
-        }
-        InstructionKind::DclInput { .. } => {}
-        InstructionKind::DclResource { dimension, .. }
-        | InstructionKind::DclUavTyped { dimension, .. } => {
-            let dim = match *dimension {
-                "buffer" => 1u32,
-                "texture1d" => 2,
-                "texture2d" => 3,
-                "texture2dms" => 4,
-                "texture3d" => 5,
-                "texturecube" => 6,
-                "texture1darray" => 7,
-                "texture2darray" => 8,
-                "texture2dmsarray" => 9,
-                "texturecubearray" => 10,
-                _ => 0,
-            };
-            *token0 |= dim << 11;
-        }
-        InstructionKind::DclSampler { mode, .. } => {
-            let m = match *mode {
-                "default" => 0u32,
-                "comparison" => 1,
-                "mono" => 2,
-                _ => 0,
-            };
-            *token0 |= m << 11;
-        }
-        InstructionKind::DclConstantBuffer { access, .. } => {
-            if *access == "dynamicIndexed" {
-                *token0 |= 1 << 11;
-            }
-        }
-        InstructionKind::DclGsInputPrimitive { primitive } => {
-            let prim = match *primitive {
-                "point" => 1u32,
-                "line" => 2,
-                "triangle" => 3,
-                "lineAdj" => 4,
-                "triangleAdj" => 5,
-                _ => 0,
-            };
-            *token0 |= prim << 11;
-        }
-        InstructionKind::DclGsOutputTopology { topology } => {
-            let topo = match *topology {
-                "pointlist" => 1u32,
-                "linestrip" => 2,
-                "trianglestrip" => 3,
-                _ => 0,
-            };
-            *token0 |= topo << 11;
-        }
-        InstructionKind::DclOutputControlPointCount { count }
-        | InstructionKind::DclInputControlPointCount { count } => {
-            *token0 |= (count & 0x3F) << 11;
-        }
-        InstructionKind::DclTessDomain { domain } => {
-            let d = match *domain {
-                "undefined" => 0u32,
-                "isoline" => 1,
-                "tri" => 2,
-                "quad" => 3,
-                _ => 0,
-            };
-            *token0 |= d << 11;
-        }
-        InstructionKind::DclTessPartitioning { partitioning } => {
-            let p = match *partitioning {
-                "undefined" => 0u32,
-                "integer" => 1,
-                "pow2" => 2,
-                "fractional_odd" => 3,
-                "fractional_even" => 4,
-                _ => 0,
-            };
-            *token0 |= p << 11;
-        }
-        InstructionKind::DclTessOutputPrimitive { primitive } => {
-            let p = match *primitive {
-                "undefined" => 0u32,
-                "point" => 1,
-                "line" => 2,
-                "triangle_cw" => 3,
-                "triangle_ccw" => 4,
-                _ => 0,
-            };
-            *token0 |= p << 11;
-        }
-        InstructionKind::DclUavRaw { flags, .. } => {
-            *token0 |= (flags & 0xFF) << 16;
-        }
-        InstructionKind::DclUavStructured { flags, .. } => {
-            *token0 |= (flags & 0xFF) << 16;
-        }
-        _ => {}
-    }
-}
-
 /// Encode a sequence of operands into the dword stream.
 fn encode_operands(operands: &[Operand], out: &mut Vec<u32>) {
     for op in operands {
@@ -407,24 +264,17 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
     let op_type_val = op.reg_type.to_u32();
     let index_dim = op.indices.len() as u32;
 
-    // Determine num_components and selection mode.
-    let (num_components, sel_bits) = match &op.components {
-        ComponentSelect::None => (0u32, 0u32),
-        ComponentSelect::Mask(m) => {
-            // N-component with mask mode (sel_mode=0).
-            // Use num_components=2 for 4-component registers, 1 for 1-component.
-            (2, (*m as u32) << 4)
-        }
+    // Use the preserved num_components from the original operand token.
+    let num_components = op.num_components;
+    let sel_bits = match &op.components {
+        ComponentSelect::None => 0u32,
+        ComponentSelect::Mask(m) => (*m as u32) << 4,
         ComponentSelect::Swizzle(s) => {
             let swiz =
                 (s[0] as u32) | ((s[1] as u32) << 2) | ((s[2] as u32) << 4) | ((s[3] as u32) << 6);
-            // sel_mode=1 (swizzle), num_components=2
-            (2, (1u32 << 2) | (swiz << 4))
+            (1u32 << 2) | (swiz << 4)
         }
-        ComponentSelect::Scalar(c) => {
-            // sel_mode=2 (scalar), num_components=2
-            (2, (2u32 << 2) | ((*c as u32) << 4))
-        }
+        ComponentSelect::Scalar(c) => (2u32 << 2) | ((*c as u32) << 4),
     };
 
     let has_extended = op.negate || op.abs;
@@ -534,4 +384,36 @@ fn system_value_to_u32(name: &str) -> u32 {
         "inner_coverage" => 65,
         _ => 0,
     }
+}
+
+/// Build the chain of extended opcode tokens for an instruction.
+///
+/// Returns an empty vec if no extended tokens are needed. Each token
+/// has bit 31 set correctly to indicate whether another follows.
+fn build_extended_tokens(instr: &Instruction) -> Vec<u32> {
+    let mut tokens: Vec<u32> = Vec::new();
+
+    if let Some(offsets) = &instr.tex_offsets {
+        let u = (offsets[0] as u32) & 0xF;
+        let v = (offsets[1] as u32) & 0xF;
+        let w = (offsets[2] as u32) & 0xF;
+        // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
+        tokens.push(1 | (u << 9) | (v << 13) | (w << 17));
+    }
+
+    if let Some(raw) = instr.resource_dim {
+        // Preserve the raw token but clear bit 31 (we'll set it below if needed).
+        tokens.push(raw & 0x7FFF_FFFF);
+    }
+
+    if let Some(raw) = instr.resource_return_type {
+        tokens.push(raw & 0x7FFF_FFFF);
+    }
+
+    // Set bit 31 (continuation) on all tokens except the last.
+    for i in 0..tokens.len().saturating_sub(1) {
+        tokens[i] |= 1 << 31;
+    }
+
+    tokens
 }

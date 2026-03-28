@@ -36,6 +36,19 @@ pub struct Instruction {
     pub resinfo_return_type: Option<u32>,
     /// Texture sample/ld offsets from extended opcode token (u, v, w as signed 4-bit).
     pub tex_offsets: Option<[i8; 3]>,
+    /// SM5.0 extended opcode type 2: resource dimension + stride for structured buffers.
+    ///
+    /// Encoded as the raw extended token dword (bits \[6:10\] = dimension, \[11:31\] = stride).
+    pub resource_dim: Option<u32>,
+    /// SM5.0 extended opcode type 3: per-component resource return types.
+    ///
+    /// Encoded as the raw extended token dword (bits \[6:9\], \[10:13\], \[14:17\], \[18:21\]).
+    pub resource_return_type: Option<u32>,
+    /// Raw opcode-specific bits from token0 (bits 11-23), preserved for round-trip
+    /// fidelity. This captures fields like sample count (dcl\_resource with MS types),
+    /// test condition (`if_nz` vs `if_z`), and any other instruction-embedded data
+    /// that isn't separately decoded into IR fields.
+    pub token0_opdata: u32,
     /// Instruction-specific payload (operands, declaration data, etc.).
     pub kind: InstructionKind,
 }
@@ -303,6 +316,11 @@ pub struct Operand {
     pub reg_type: RegisterType,
     /// Component selection (mask, swizzle, or scalar select).
     pub components: ComponentSelect,
+    /// Raw `num_components` field from the operand token (bits 0–1).
+    ///
+    /// This is preserved for round-trip fidelity: `0` = zero-component,
+    /// `1` = 1-component (single scalar), `2` = N-component (4-channel).
+    pub num_components: u32,
     /// Source modifier: negate.
     pub negate: bool,
     /// Source modifier: absolute value.

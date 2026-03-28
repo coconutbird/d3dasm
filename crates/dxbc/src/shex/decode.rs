@@ -149,13 +149,13 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
         None
     };
 
-    // Extract texture offsets from extended opcode token if present.
-    // NOTE: SM5.0 extended opcode types 2 (resource_dim) and 3 (resource_return_type)
-    // on instructions are intentionally not parsed — SM5.1 removes them in favor of
-    // 3D declaration operands (range ID, lower/upper bound) plus a register space
-    // token. Full SM5.1 support requires parsing those declaration operands rather
-    // than instruction-level extended tokens.
-    let tex_offsets = decode_extended_tex_offsets(tokens);
+    // Parse all extended opcode tokens from the instruction header chain.
+    let (tex_offsets, resource_dim, resource_return_type) = decode_extended_tokens(tokens);
+
+    // Preserve raw opcode-specific bits (11-23) from token0 for round-trip fidelity.
+    // This captures sample count, test condition, and any other instruction-embedded
+    // data that isn't separately decoded into explicit IR fields.
+    let token0_opdata = token0 & 0x00FF_F800;
 
     let kind = match op {
         Opcode::CustomData => decode_custom_data(tokens),
@@ -235,6 +235,9 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
         saturate,
         resinfo_return_type,
         tex_offsets,
+        resource_dim,
+        resource_return_type,
+        token0_opdata,
         kind,
     }
 }
@@ -308,19 +311,25 @@ fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
     } else {
         None
     };
-    // Parse operands first, then read the trailing system-value token
-    // from whatever remains. This is robust against extended opcode tokens
-    // or other fields that might shift the layout.
+    // When the instruction carries a system value, the last token is the
+    // SV enum — decode operands only from the tokens *before* it so the
+    // greedy operand decoder doesn't consume the SV token as a degenerate
+    // operand.
     let has_sv = matches!(
         op,
         Opcode::DclInputSgv | Opcode::DclInputSiv | Opcode::DclInputPsSgv | Opcode::DclInputPsSiv
     );
-    let (operands, next_pos) = decode_operands_with_pos(tokens, 1);
-    let system_value = if has_sv && next_pos < tokens.len() {
-        Some(system_value_name(tokens[next_pos]))
+    let system_value = if has_sv && tokens.len() >= 3 {
+        Some(system_value_name(tokens[tokens.len() - 1]))
     } else {
         None
     };
+    let operand_end = if has_sv && tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    let operands = decode_operands(&tokens[..operand_end], 1);
     InstructionKind::DclInput {
         interpolation,
         system_value,
@@ -330,12 +339,17 @@ fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
 
 fn decode_dcl_output(tokens: &[u32], op: &Opcode) -> InstructionKind {
     let has_sv = matches!(op, Opcode::DclOutputSgv | Opcode::DclOutputSiv);
-    let (operands, next_pos) = decode_operands_with_pos(tokens, 1);
-    let system_value = if has_sv && next_pos < tokens.len() {
-        Some(system_value_name(tokens[next_pos]))
+    let system_value = if has_sv && tokens.len() >= 3 {
+        Some(system_value_name(tokens[tokens.len() - 1]))
     } else {
         None
     };
+    let operand_end = if has_sv && tokens.len() >= 3 {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    };
+    let operands = decode_operands(&tokens[..operand_end], 1);
     InstructionKind::DclOutput {
         system_value,
         operands,
@@ -489,24 +503,54 @@ fn decode_dcl_index_range(tokens: &[u32]) -> InstructionKind {
     }
 }
 
-/// Extract texture offsets (u, v, w) from the extended opcode token.
-/// Returns None if there's no extended token or if it's not a sample offset type.
-fn decode_extended_tex_offsets(tokens: &[u32]) -> Option<[i8; 3]> {
+/// Walk the extended opcode token chain and extract all extended data.
+///
+/// Returns `(tex_offsets, resource_dim, resource_return_type)`.
+fn decode_extended_tokens(tokens: &[u32]) -> (Option<[i8; 3]>, Option<u32>, Option<u32>) {
     let token0 = tokens[0];
     if (token0 >> 31) & 1 == 0 || tokens.len() < 2 {
-        return None;
+        return (None, None, None);
     }
-    let ext = tokens[1];
-    let ext_type = ext & 0x3F;
-    // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
-    if ext_type != 1 {
-        return None;
+
+    let mut tex_offsets = None;
+    let mut resource_dim = None;
+    let mut resource_return_type = None;
+    let mut idx = 1;
+
+    loop {
+        if idx >= tokens.len() {
+            break;
+        }
+        let ext = tokens[idx];
+        let ext_type = ext & 0x3F;
+
+        match ext_type {
+            // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
+            1 => {
+                let u = sign_extend_4bit((ext >> 9) & 0xF);
+                let v = sign_extend_4bit((ext >> 13) & 0xF);
+                let w = sign_extend_4bit((ext >> 17) & 0xF);
+                tex_offsets = Some([u, v, w]);
+            }
+            // Type 2 = D3D10_SB_EXTENDED_OPCODE_RESOURCE_DIM
+            2 => {
+                resource_dim = Some(ext);
+            }
+            // Type 3 = D3D10_SB_EXTENDED_OPCODE_RESOURCE_RETURN_TYPE
+            3 => {
+                resource_return_type = Some(ext);
+            }
+            _ => {}
+        }
+
+        // Bit 31 of the extended token indicates whether another extended token follows.
+        if (ext >> 31) & 1 == 0 {
+            break;
+        }
+        idx += 1;
     }
-    // Offsets are 4-bit signed values at bits [9:12], [13:16], [17:20]
-    let u = sign_extend_4bit((ext >> 9) & 0xF);
-    let v = sign_extend_4bit((ext >> 13) & 0xF);
-    let w = sign_extend_4bit((ext >> 17) & 0xF);
-    Some([u, v, w])
+
+    (tex_offsets, resource_dim, resource_return_type)
 }
 
 /// Sign-extend a 4-bit value to i8.
@@ -801,6 +845,7 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
         Operand {
             reg_type,
             components,
+            num_components,
             negate,
             abs,
             indices,
@@ -875,6 +920,7 @@ fn empty_operand() -> Operand {
     Operand {
         reg_type: RegisterType::Unknown(0),
         components: ComponentSelect::None,
+        num_components: 0,
         negate: false,
         abs: false,
         indices: Vec::new(),
