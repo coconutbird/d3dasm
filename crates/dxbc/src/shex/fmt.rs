@@ -1,30 +1,33 @@
 //! Formatter: IR → human-readable disassembly text.
+//!
+//! The primary API is the set of `write_*` functions that accept any
+//! `core::fmt::Write` sink, avoiding intermediate `String` allocations.
+//! The `format_*` helpers are thin wrappers that allocate a `String` for
+//! callers that need an owned value.
 
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::string::String;
 use core::fmt::Write;
 
 use super::ir::*;
 use super::opcodes::Opcode;
 
-/// Format a decoded [`Program`] into disassembly text.
-pub fn format_program(program: &Program) -> String {
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
+// Write functions: stream directly into a fmt::Write sink.
+
+/// Write a decoded [`Program`] as disassembly text into `w`.
+pub fn write_program(w: &mut dyn Write, program: &Program) -> core::fmt::Result {
+    writeln!(
+        w,
         "{}_{}_{}",
         program.shader_type, program.major_version, program.minor_version
-    );
+    )?;
 
     let mut indent = 0u32;
 
-    for w in &program.warnings {
-        let _ = writeln!(out, "// WARNING: {w}");
+    for warning in &program.warnings {
+        writeln!(w, "// WARNING: {warning}")?;
     }
 
     for instr in &program.instructions {
-        // Pre-indent decrease for closing control flow
         match instr.opcode {
             Opcode::Else | Opcode::EndIf | Opcode::EndLoop | Opcode::EndSwitch => {
                 indent = indent.saturating_sub(1);
@@ -32,11 +35,12 @@ pub fn format_program(program: &Program) -> String {
             _ => {}
         }
 
-        let line = format_instruction(instr);
-        let pad = "  ".repeat(indent as usize);
-        let _ = writeln!(out, "{pad}{line}");
+        for _ in 0..indent {
+            w.write_str("  ")?;
+        }
+        write_instruction(w, instr)?;
+        w.write_char('\n')?;
 
-        // Post-indent increase for opening control flow
         match instr.opcode {
             Opcode::If | Opcode::Else | Opcode::Loop | Opcode::Switch => {
                 indent += 1;
@@ -45,55 +49,80 @@ pub fn format_program(program: &Program) -> String {
         }
     }
 
-    out
+    Ok(())
 }
 
-/// Format a single [`Instruction`] into its disassembly text.
-///
-/// Returns the full line, e.g. `"mad_sat r0.x, r1.y, r2.z, r3.w"` or
-/// `"dcl_constantbuffer cb4[1].xyzw, immediateIndexed"`.
-pub fn format_instruction(instr: &Instruction) -> String {
+/// Write a single [`Instruction`] into `w`.
+pub fn write_instruction(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
     match &instr.kind {
-        InstructionKind::Generic { operands } => format_generic(instr, operands),
-        InstructionKind::HsPhase => format_mnemonic(instr),
+        InstructionKind::Generic { operands } => write_generic(w, instr, operands),
+        InstructionKind::HsPhase => write_mnemonic(w, instr),
         InstructionKind::CustomData {
             subtype,
             values,
             raw_dword_count,
-        } => format_custom_data(subtype, values, *raw_dword_count),
-        _ => format_declaration(instr),
+        } => write_custom_data(w, subtype, values, *raw_dword_count),
+        _ => write_declaration(w, instr),
     }
 }
 
+/// Write the full instruction mnemonic (opcode + modifier suffixes) into `w`.
+pub fn write_mnemonic(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
+    w.write_str(instr.opcode.name())?;
+    match instr.resinfo_return_type {
+        Some(1) => w.write_str("_rcpFloat")?,
+        Some(2) => w.write_str("_uint")?,
+        _ => {}
+    }
+    if instr.saturate {
+        w.write_str("_sat")?;
+    }
+    if let Some([u, v, ww]) = instr.tex_offsets
+        && (u != 0 || v != 0 || ww != 0)
+    {
+        write!(w, "({u}, {v}, {ww})")?;
+    }
+    Ok(())
+}
+
+/// Write a single [`Operand`] into `w` (float immediate formatting).
+pub fn write_operand(w: &mut dyn Write, op: &Operand) -> core::fmt::Result {
+    write_operand_core(w, op, None, ImmediateType::Float)
+}
+
+// String-returning wrappers for backward compatibility.
+
+/// Format a decoded [`Program`] into disassembly text.
+pub fn format_program(program: &Program) -> String {
+    let mut out = String::new();
+    let _ = write_program(&mut out, program);
+    out
+}
+
+/// Format a single [`Instruction`] into its disassembly text.
+pub fn format_instruction(instr: &Instruction) -> String {
+    let mut out = String::new();
+    let _ = write_instruction(&mut out, instr);
+    out
+}
+
 /// Format the bare opcode name.
-///
-/// Examples: `"mov"`, `"mad"`, `"sample"`, `"dcl_constantbuffer"`.
 pub fn format_opcode(opcode: &Opcode) -> &'static str {
     opcode.name()
 }
 
-/// Format the full instruction mnemonic, including any modifier suffixes
-/// (saturate, resinfo return type, texture offsets).
-///
-/// Examples: `"mad_sat"`, `"resinfo_uint"`, `"sample(1, 2, 0)"`, `"mov"`.
+/// Format the full instruction mnemonic, including modifier suffixes.
 pub fn format_mnemonic(instr: &Instruction) -> String {
-    let name = instr.opcode.name();
-    let sat = if instr.saturate { "_sat" } else { "" };
+    let mut out = String::new();
+    let _ = write_mnemonic(&mut out, instr);
+    out
+}
 
-    let suffix = match instr.resinfo_return_type {
-        Some(1) => "_rcpFloat",
-        Some(2) => "_uint",
-        _ => "",
-    };
-
-    let offsets = match instr.tex_offsets {
-        Some([u, v, w]) if u != 0 || v != 0 || w != 0 => {
-            format!("({u}, {v}, {w})")
-        }
-        _ => String::new(),
-    };
-
-    format!("{name}{suffix}{sat}{offsets}")
+/// Format a single [`Operand`].
+pub fn format_operand(op: &Operand) -> String {
+    let mut out = String::new();
+    let _ = write_operand(&mut out, op);
+    out
 }
 
 /// Operand value type, used to select the correct immediate formatting.
@@ -175,86 +204,83 @@ fn opcode_imm_type(op: Opcode) -> ImmediateType {
     }
 }
 
-/// Format a single [`Operand`] into its disassembly text.
-///
-/// Examples: `"r0.xy"`, `"cb5[r0.x].yyyz"`, `"l(1.000000, 0.000000)"`,
-/// `"-|r1.x|"`.
-pub fn format_operand(op: &Operand) -> String {
-    format_operand_core(op, None, ImmediateType::Float)
-}
-
-/// Format a generic ALU / flow-control / sample instruction.
-fn format_generic(instr: &Instruction, operands: &[Operand]) -> String {
-    let opcode = format_mnemonic(instr);
+/// Write a generic ALU / flow-control / sample instruction into `w`.
+fn write_generic(
+    w: &mut dyn Write,
+    instr: &Instruction,
+    operands: &[Operand],
+) -> core::fmt::Result {
+    write_mnemonic(w, instr)?;
 
     if operands.is_empty() {
-        return opcode;
+        return Ok(());
     }
 
     let imm_type = opcode_imm_type(instr.opcode);
-
-    // Determine active component count from the destination (first operand) mask.
     let dest_width = dest_component_count(operands.first());
     let src_width = source_width_override(instr.opcode, dest_width);
-    let mut ops = Vec::with_capacity(operands.len());
+
+    w.write_char(' ')?;
     for (i, op) in operands.iter().enumerate() {
+        if i > 0 {
+            w.write_str(", ")?;
+        }
         if i == 0 {
-            ops.push(format_operand_core(op, None, imm_type));
+            write_operand_core(w, op, None, imm_type)?;
         } else {
-            ops.push(format_operand_core(
-                op,
-                src_width.map(|w| w as usize),
-                imm_type,
-            ));
+            write_operand_core(w, op, src_width.map(|v| v as usize), imm_type)?;
         }
     }
-
-    format!("{opcode} {}", ops.join(", "))
+    Ok(())
 }
 
-/// Format a declaration instruction (`dcl_*` variants).
-fn format_declaration(instr: &Instruction) -> String {
+/// Write a declaration instruction into `w`.
+fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
     let name = instr.opcode.name();
     match &instr.kind {
         InstructionKind::DclGlobalFlags { flags } => {
-            format!("dcl_globalFlags {}", flags.join("|"))
+            w.write_str("dcl_globalFlags ")?;
+            for (i, f) in flags.iter().enumerate() {
+                if i > 0 {
+                    w.write_char('|')?;
+                }
+                w.write_str(f)?;
+            }
+            Ok(())
         }
         InstructionKind::DclInput {
             interpolation,
             system_value,
             operands,
         } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let sv = system_value
-                .filter(|s| *s != "undefined")
-                .map(|s| format!(", {s}"))
-                .unwrap_or_default();
-            if ops.is_empty() {
-                if let Some(interp) = interpolation {
-                    format!("{name} {interp}{sv}")
-                } else {
-                    format!("{name}{sv}")
+            w.write_str(name)?;
+            if let Some(interp) = interpolation {
+                write!(w, " {interp}")?;
+                if !operands.is_empty() {
+                    w.write_str(", ")?;
                 }
-            } else if let Some(interp) = interpolation {
-                format!("{name} {interp}, {}{sv}", ops.join(", "))
-            } else {
-                format!("{name} {}{sv}", ops.join(", "))
+            } else if !operands.is_empty() {
+                w.write_char(' ')?;
             }
+            write_operand_list(w, operands)?;
+            if let Some(sv) = system_value.filter(|s| *s != "undefined") {
+                write!(w, ", {sv}")?;
+            }
+            Ok(())
         }
         InstructionKind::DclOutput {
             system_value,
             operands,
         } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let sv = system_value
-                .filter(|s| *s != "undefined")
-                .map(|s| format!(", {s}"))
-                .unwrap_or_default();
-            if ops.is_empty() {
-                format!("{name}{sv}")
-            } else {
-                format!("{name} {}{sv}", ops.join(", "))
+            w.write_str(name)?;
+            if !operands.is_empty() {
+                w.write_char(' ')?;
+                write_operand_list(w, operands)?;
             }
+            if let Some(sv) = system_value.filter(|s| *s != "undefined") {
+                write!(w, ", {sv}")?;
+            }
+            Ok(())
         }
         InstructionKind::DclResource {
             dimension,
@@ -262,181 +288,201 @@ fn format_declaration(instr: &Instruction) -> String {
             operands,
             ..
         } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
-            format!(
-                "dcl_resource_{dimension} ({}) {}",
-                rt.join(","),
-                ops.join(", ")
-            )
+            write!(w, "dcl_resource_{dimension} (")?;
+            for (i, rt) in return_type.iter().enumerate() {
+                if i > 0 {
+                    w.write_char(',')?;
+                }
+                w.write_str(rt.name())?;
+            }
+            w.write_str(") ")?;
+            write_operand_list(w, operands)
         }
         InstructionKind::DclSampler { mode, operands } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            format!("dcl_sampler {}, mode_{mode}", ops.join(", "))
+            w.write_str("dcl_sampler ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", mode_{mode}")
         }
         InstructionKind::DclConstantBuffer { access, operands } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            format!("dcl_constantbuffer {}, {access}", ops.join(", "))
+            w.write_str("dcl_constantbuffer ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {access}")
         }
-        InstructionKind::DclTemps { count } => format!("dcl_temps {count}"),
+        InstructionKind::DclTemps { count } => write!(w, "dcl_temps {count}"),
         InstructionKind::DclIndexableTemp {
             reg,
             size,
             components,
         } => {
-            format!("dcl_indexableTemp x{reg}[{size}], {components}")
+            write!(w, "dcl_indexableTemp x{reg}[{size}], {components}")
         }
         InstructionKind::DclGsInputPrimitive { primitive } => {
             if let GsPrimitive::ControlPointPatch(n) = primitive {
-                format!("dcl_inputPrimitive patchlist_{n}")
+                write!(w, "dcl_inputPrimitive patchlist_{n}")
             } else {
-                format!("dcl_inputPrimitive {}", primitive.name())
+                write!(w, "dcl_inputPrimitive {}", primitive.name())
             }
         }
         InstructionKind::DclGsOutputTopology { topology } => {
-            format!("dcl_outputTopology {}", topology.name())
+            write!(w, "dcl_outputTopology {}", topology.name())
         }
         InstructionKind::DclMaxOutputVertexCount { count } => {
-            format!("dcl_maxOutputVertexCount {count}")
+            write!(w, "dcl_maxOutputVertexCount {count}")
         }
-        InstructionKind::DclGsInstanceCount { count } => {
-            format!("dcl_gsInstanceCount {count}")
-        }
+        InstructionKind::DclGsInstanceCount { count } => write!(w, "dcl_gsInstanceCount {count}"),
         InstructionKind::DclOutputControlPointCount { count } => {
-            format!("dcl_outputControlPointCount {count}")
+            write!(w, "dcl_outputControlPointCount {count}")
         }
         InstructionKind::DclInputControlPointCount { count } => {
-            format!("dcl_inputControlPointCount {count}")
+            write!(w, "dcl_inputControlPointCount {count}")
         }
-        InstructionKind::DclTessDomain { domain } => format!("dcl_tessDomain {domain}"),
+        InstructionKind::DclTessDomain { domain } => write!(w, "dcl_tessDomain {domain}"),
         InstructionKind::DclTessPartitioning { partitioning } => {
-            format!("dcl_tessPartitioning {partitioning}")
+            write!(w, "dcl_tessPartitioning {partitioning}")
         }
         InstructionKind::DclTessOutputPrimitive { primitive } => {
-            format!("dcl_tessOutputPrimitive {primitive}")
+            write!(w, "dcl_tessOutputPrimitive {primitive}")
         }
-        InstructionKind::DclHsMaxTessFactor { value } => {
-            format!("dcl_hsMaxTessFactor {value}")
-        }
+        InstructionKind::DclHsMaxTessFactor { value } => write!(w, "dcl_hsMaxTessFactor {value}"),
         InstructionKind::DclHsForkPhaseInstanceCount { count } => {
-            format!("dcl_hsForkPhaseInstanceCount {count}")
+            write!(w, "dcl_hsForkPhaseInstanceCount {count}")
         }
-        InstructionKind::DclThreadGroup { x, y, z } => {
-            format!("dcl_thread_group {x}, {y}, {z}")
-        }
+        InstructionKind::DclThreadGroup { x, y, z } => write!(w, "dcl_thread_group {x}, {y}, {z}"),
         InstructionKind::DclUavTyped {
             dimension,
             return_type,
             operands,
             ..
         } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let rt: Vec<&str> = return_type.iter().map(|r| r.name()).collect();
-            format!(
-                "dcl_uav_typed_{dimension} ({}) {}",
-                rt.join(","),
-                ops.join(", ")
-            )
+            write!(w, "dcl_uav_typed_{dimension} (")?;
+            for (i, rt) in return_type.iter().enumerate() {
+                if i > 0 {
+                    w.write_char(',')?;
+                }
+                w.write_str(rt.name())?;
+            }
+            w.write_str(") ")?;
+            write_operand_list(w, operands)
         }
         InstructionKind::DclUavRaw { flags, operands } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let flag_str = format_uav_flags(*flags);
-            format!("dcl_uav_raw{flag_str} {}", ops.join(", "))
+            w.write_str("dcl_uav_raw")?;
+            write_uav_flags(w, *flags)?;
+            w.write_char(' ')?;
+            write_operand_list(w, operands)
         }
         InstructionKind::DclUavStructured {
             flags,
             stride,
             operands,
         } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            let flag_str = format_uav_flags(*flags);
-            format!("dcl_uav_structured{flag_str} {}, {stride}", ops.join(", "))
+            w.write_str("dcl_uav_structured")?;
+            write_uav_flags(w, *flags)?;
+            w.write_char(' ')?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {stride}")
         }
         InstructionKind::DclResourceRaw { operands } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            format!("dcl_resource_raw {}", ops.join(", "))
+            w.write_str("dcl_resource_raw ")?;
+            write_operand_list(w, operands)
         }
         InstructionKind::DclResourceStructured { stride, operands } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            format!("dcl_resource_structured {}, {stride}", ops.join(", "))
+            w.write_str("dcl_resource_structured ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {stride}")
         }
-
         InstructionKind::DclIndexRange { operands, count } => {
-            let ops: Vec<String> = operands.iter().map(format_operand).collect();
-            format!("dcl_indexRange {}, {count}", ops.join(", "))
+            w.write_str("dcl_indexRange ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {count}")
         }
-        InstructionKind::DclFunctionBody { index } => {
-            format!("dcl_function_body fb{index}")
-        }
+        InstructionKind::DclFunctionBody { index } => write!(w, "dcl_function_body fb{index}"),
         InstructionKind::DclFunctionTable {
             table_index,
             body_indices,
         } => {
-            let bodies: Vec<String> = body_indices.iter().map(|b| format!("fb{b}")).collect();
-            format!(
-                "dcl_function_table ft{table_index} = {{{}}}",
-                bodies.join(", ")
-            )
+            write!(w, "dcl_function_table ft{table_index} = {{")?;
+            for (i, b) in body_indices.iter().enumerate() {
+                if i > 0 {
+                    w.write_str(", ")?;
+                }
+                write!(w, "fb{b}")?;
+            }
+            w.write_char('}')
         }
         InstructionKind::DclInterface {
             interface_index,
             num_call_sites,
             table_indices,
         } => {
-            let tables: Vec<String> = table_indices.iter().map(|t| format!("ft{t}")).collect();
-            format!(
-                "dcl_interface fp{interface_index}[{num_call_sites}][{}] = {{{}}}",
-                table_indices.len(),
-                tables.join(", ")
-            )
+            write!(
+                w,
+                "dcl_interface fp{interface_index}[{num_call_sites}][{}] = {{",
+                table_indices.len()
+            )?;
+            for (i, t) in table_indices.iter().enumerate() {
+                if i > 0 {
+                    w.write_str(", ")?;
+                }
+                write!(w, "ft{t}")?;
+            }
+            w.write_char('}')
         }
-        // Generic, HsPhase, and CustomData are handled by format_instruction
-        // before calling this function.
-        _ => name.to_string(),
+        _ => w.write_str(name),
     }
 }
 
-fn format_uav_flags(flags: u32) -> String {
-    // Bit 0 = globally coherent, bit 1 = rasterizer ordered (ROV)
-    let mut parts = Vec::new();
+/// Write a comma-separated list of operands.
+fn write_operand_list(w: &mut dyn Write, operands: &[Operand]) -> core::fmt::Result {
+    for (i, op) in operands.iter().enumerate() {
+        if i > 0 {
+            w.write_str(", ")?;
+        }
+        write_operand(w, op)?;
+    }
+    Ok(())
+}
+
+fn write_uav_flags(w: &mut dyn Write, flags: u32) -> core::fmt::Result {
     if flags & 0x1 != 0 {
-        parts.push("_glc");
+        w.write_str("_glc")?;
     }
     if flags & 0x2 != 0 {
-        parts.push("_opc");
+        w.write_str("_opc")?;
     }
-    parts.join("")
+    Ok(())
 }
 
-fn format_custom_data(
+fn write_custom_data(
+    w: &mut dyn Write,
     subtype: &CustomDataType,
     values: &[[f32; 4]],
     raw_dword_count: usize,
-) -> String {
+) -> core::fmt::Result {
     let ty = match subtype {
         CustomDataType::Comment => "comment",
         CustomDataType::DebugInfo => "debuginfo",
         CustomDataType::Opaque => "opaque",
         CustomDataType::ImmediateConstantBuffer => "dcl_immediateConstantBuffer",
         CustomDataType::Other(v) => {
-            return format!("customdata // subtype={v}, {raw_dword_count} dwords");
+            return write!(w, "customdata // subtype={v}, {raw_dword_count} dwords");
         }
     };
     if *subtype == CustomDataType::ImmediateConstantBuffer && !values.is_empty() {
-        let mut s = format!("{ty} {{");
+        write!(w, "{ty} {{")?;
         for v in values {
-            s.push_str(&format!(
-                "\n  {{ {}, {}, {}, {} }}",
-                format_immediate(v[0].to_bits(), ImmediateType::Float),
-                format_immediate(v[1].to_bits(), ImmediateType::Float),
-                format_immediate(v[2].to_bits(), ImmediateType::Float),
-                format_immediate(v[3].to_bits(), ImmediateType::Float),
-            ));
+            w.write_str("\n  { ")?;
+            write_immediate(w, v[0].to_bits(), ImmediateType::Float)?;
+            w.write_str(", ")?;
+            write_immediate(w, v[1].to_bits(), ImmediateType::Float)?;
+            w.write_str(", ")?;
+            write_immediate(w, v[2].to_bits(), ImmediateType::Float)?;
+            w.write_str(", ")?;
+            write_immediate(w, v[3].to_bits(), ImmediateType::Float)?;
+            w.write_str(" }")?;
         }
-        s.push_str("\n}");
-        s
+        w.write_str("\n}")
     } else {
-        format!("{ty} // {raw_dword_count} dwords")
+        write!(w, "{ty} // {raw_dword_count} dwords")
     }
 }
 
@@ -521,193 +567,213 @@ fn source_width_override(opcode: Opcode, dest_width: Option<u8>) -> Option<u8> {
     }
 }
 
-/// Format a source operand, truncating its swizzle to `width` components.
-///
-/// Truncation is applied at the component level (before modifiers like abs/negate)
-/// to avoid breaking closing delimiters like `|`.
-fn format_operand_core(
+/// Write a source operand, truncating its swizzle to `width` components.
+fn write_operand_core(
+    w: &mut dyn Write,
     op: &Operand,
     swizzle_width: Option<usize>,
     imm_type: ImmediateType,
-) -> String {
-    let prefix = op.reg_type.prefix();
-
+) -> core::fmt::Result {
     // Immediates
     if op.reg_type == RegisterType::Immediate32 {
-        let vals: Vec<String> = op
-            .immediate_values
-            .iter()
-            .map(|&v| format_immediate(v, imm_type))
-            .collect();
-        return format!("l({})", vals.join(", "));
+        w.write_str("l(")?;
+        for (i, &v) in op.immediate_values.iter().enumerate() {
+            if i > 0 {
+                w.write_str(", ")?;
+            }
+            write_immediate(w, v, imm_type)?;
+        }
+        return w.write_char(')');
     }
     if op.reg_type == RegisterType::Immediate64 {
-        // Each 64-bit value is stored as two consecutive u32s (lo, hi)
-        let mut vals = Vec::new();
+        w.write_str("d(")?;
         let mut i = 0;
+        let mut first = true;
         while i + 1 < op.immediate_values.len() {
+            if !first {
+                w.write_str(", ")?;
+            }
+            first = false;
             let lo = op.immediate_values[i] as u64;
             let hi = op.immediate_values[i + 1] as u64;
-            let bits = lo | (hi << 32);
-            let f = f64::from_bits(bits);
-            vals.push(format!("{f:?}"));
+            let f = f64::from_bits(lo | (hi << 32));
+            write!(w, "{f:?}")?;
             i += 2;
         }
-        return format!("d({})", vals.join(", "));
+        return w.write_char(')');
     }
 
-    // Build register name with indices
-    let mut name = String::from(prefix);
+    // Modifiers wrap the entire operand
+    if op.negate {
+        w.write_char('-')?;
+    }
+    if op.abs {
+        w.write_char('|')?;
+    }
+
+    // Register prefix
+    w.write_str(op.reg_type.prefix())?;
+
+    // Indices
     match op.indices.len() {
         0 => {}
         1 => {
-            // 1D: simple registers like r0, v1 use bare number; others use brackets
-            let idx_str = format_index(&op.indices[0]);
             if matches!(
                 &op.indices[0],
                 OperandIndex::Relative(_) | OperandIndex::RelativePlusImm(_, _)
             ) {
-                name.push_str(&format!("[{idx_str}]"));
+                w.write_char('[')?;
+                write_index(w, &op.indices[0])?;
+                w.write_char(']')?;
             } else {
-                name.push_str(&idx_str);
+                write_index(w, &op.indices[0])?;
             }
-        }
-        2 => {
-            name.push_str(&format_index(&op.indices[0]));
-            name.push_str(&format!("[{}]", format_index(&op.indices[1])));
         }
         _ => {
-            name.push_str(&format_index(&op.indices[0]));
+            write_index(w, &op.indices[0])?;
             for idx in &op.indices[1..] {
-                name.push_str(&format!("[{}]", format_index(idx)));
+                w.write_char('[')?;
+                write_index(w, idx)?;
+                w.write_char(']')?;
             }
         }
     }
 
-    // Append swizzle/mask — truncate swizzle to width if specified
-    let swizzle = format_components_with_width(&op.components, swizzle_width);
-    if !swizzle.is_empty() {
-        name.push('.');
-        name.push_str(&swizzle);
-    }
+    // Swizzle/mask
+    write_components(w, &op.components, swizzle_width)?;
 
-    // Apply modifiers (AFTER building name, so delimiters like | are not affected by truncation)
-    if op.negate && op.abs {
-        format!("-|{name}|")
-    } else if op.negate {
-        format!("-{name}")
-    } else if op.abs {
-        format!("|{name}|")
-    } else {
-        name
+    if op.abs {
+        w.write_char('|')?;
     }
+    Ok(())
 }
 
-fn format_index(idx: &OperandIndex) -> String {
+fn write_index(w: &mut dyn Write, idx: &OperandIndex) -> core::fmt::Result {
     match idx {
-        OperandIndex::Imm32(v) => format!("{v}"),
-        OperandIndex::Imm64(v) => format!("{v}"),
-        OperandIndex::Relative(sub) => format_operand(sub),
-        OperandIndex::RelativePlusImm(imm, sub) => format!("{} + {imm}", format_operand(sub)),
-    }
-}
-
-fn format_components_with_width(comp: &ComponentSelect, width: Option<usize>) -> String {
-    match comp {
-        ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => String::new(),
-        ComponentSelect::Mask(mask) => format_mask(*mask),
-        ComponentSelect::Swizzle(s) => {
-            let comps = ['x', 'y', 'z', 'w'];
-            let count = width.unwrap_or(4).min(4);
-            let full: String = s[..count].iter().map(|&c| comps[c as usize]).collect();
-            trim_swizzle(&full)
+        OperandIndex::Imm32(v) => write!(w, "{v}"),
+        OperandIndex::Imm64(v) => write!(w, "{v}"),
+        OperandIndex::Relative(sub) => write_operand(w, sub),
+        OperandIndex::RelativePlusImm(imm, sub) => {
+            write_operand(w, sub)?;
+            write!(w, " + {imm}")
         }
-        ComponentSelect::Scalar(c) => ['x', 'y', 'z', 'w'][*c as usize].to_string(),
     }
 }
 
-fn format_mask(mask: u8) -> String {
-    let mut s = String::with_capacity(4);
-    if mask & 1 != 0 {
-        s.push('x');
+fn write_components(
+    w: &mut dyn Write,
+    comp: &ComponentSelect,
+    width: Option<usize>,
+) -> core::fmt::Result {
+    const COMPS: [char; 4] = ['x', 'y', 'z', 'w'];
+    match comp {
+        ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => Ok(()),
+        ComponentSelect::Mask(mask) => {
+            if *mask == 0 {
+                return Ok(());
+            }
+            w.write_char('.')?;
+            if mask & 1 != 0 {
+                w.write_char('x')?;
+            }
+            if mask & 2 != 0 {
+                w.write_char('y')?;
+            }
+            if mask & 4 != 0 {
+                w.write_char('z')?;
+            }
+            if mask & 8 != 0 {
+                w.write_char('w')?;
+            }
+            Ok(())
+        }
+        ComponentSelect::Swizzle(s) => {
+            let count = width.unwrap_or(4).min(4);
+            // Build the (potentially truncated) swizzle into a small buffer
+            let mut buf = [0u8; 4];
+            for i in 0..count {
+                buf[i] = COMPS[s[i] as usize] as u8;
+            }
+            // Trim trailing repeated components
+            let chars = &buf[..count];
+            let trimmed = trim_swizzle_buf(chars);
+            if !trimmed.is_empty() {
+                w.write_char('.')?;
+                for &c in trimmed {
+                    w.write_char(c as char)?;
+                }
+            }
+            Ok(())
+        }
+        ComponentSelect::Scalar(c) => {
+            w.write_char('.')?;
+            w.write_char(COMPS[*c as usize])
+        }
     }
-    if mask & 2 != 0 {
-        s.push('y');
-    }
-    if mask & 4 != 0 {
-        s.push('z');
-    }
-    if mask & 8 != 0 {
-        s.push('w');
-    }
-    s
 }
 
-fn trim_swizzle(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
+/// Trim trailing repeated swizzle components from a byte buffer.
+fn trim_swizzle_buf(chars: &[u8]) -> &[u8] {
     if chars.len() <= 1 {
-        return s.to_string();
+        return chars;
     }
+    // All same → single component
     if chars.iter().all(|&c| c == chars[0]) {
-        return chars[0].to_string();
+        return &chars[..1];
     }
     let mut end = chars.len();
     while end > 1 && chars[end - 1] == chars[end - 2] {
         end -= 1;
     }
-    chars[..end].iter().collect()
+    &chars[..end]
 }
 
-/// Format a single immediate value according to its type classification.
-fn format_immediate(val: u32, imm_type: ImmediateType) -> String {
+/// Write a single immediate value according to its type classification.
+fn write_immediate(w: &mut dyn Write, val: u32, imm_type: ImmediateType) -> core::fmt::Result {
     match imm_type {
         ImmediateType::Float => {
             let f = f32::from_bits(val);
             if f.is_finite() {
-                format!("{f:.6}")
+                write!(w, "{f:.6}")
             } else if f.is_nan() {
-                format!("0x{val:08X}")
+                write!(w, "0x{val:08X}")
             } else {
-                // ±Infinity
-                format!("{f:.6}")
+                write!(w, "{f:.6}")
             }
         }
-        ImmediateType::Int => {
-            let i = val as i32;
-            format!("{i}")
-        }
+        ImmediateType::Int => write!(w, "{}", val as i32),
         ImmediateType::Uint => {
             if val == 0 {
-                "0".to_string()
+                w.write_char('0')
             } else {
-                format!("0x{val:08x}")
+                write!(w, "0x{val:08x}")
             }
         }
     }
 }
 
-// Display impls — delegate to the public format_* functions.
+// Display impls.
 
 impl core::fmt::Display for Instruction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&format_instruction(self))
+        write_instruction(f, self)
     }
 }
 
 impl core::fmt::Display for Operand {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&format_operand(self))
+        write_operand(f, self)
     }
 }
 
 impl core::fmt::Display for Opcode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(format_opcode(self))
+        f.write_str(self.name())
     }
 }
 
 impl core::fmt::Display for Program {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&format_program(self))
+        write_program(f, self)
     }
 }

@@ -65,6 +65,9 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
     let mut warnings = Vec::new();
     let mut offset = 8;
     let end = (length_dwords * 4).min(data.len());
+    // Reuse a single token buffer across the decode loop to avoid
+    // allocating a fresh Vec<u32> for every instruction.
+    let mut tokens: Vec<u32> = Vec::new();
 
     if length_dwords * 4 > data.len() {
         warnings.push(format!(
@@ -98,7 +101,8 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
         }
 
         c.seek(SeekFrom::Start(offset as u64)).unwrap();
-        let mut tokens = Vec::with_capacity(instr_len);
+        tokens.clear();
+        tokens.reserve(instr_len);
         for _ in 0..instr_len {
             tokens.push(c.read_u32_le().unwrap());
         }
@@ -114,7 +118,6 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
         instructions,
         warnings,
         fourcc,
-        raw: Vec::from(data),
     })
 }
 

@@ -215,7 +215,7 @@ impl fmt::Display for Shader<'_> {
             writeln!(f, "//")?;
         }
         if let Some(program) = self.program() {
-            write!(f, "{}", dxbc::shex::format_program(program))?;
+            dxbc::shex::write_program(f, program)?;
         }
         if let Some(stats) = self.stats() {
             write!(f, "{stats}")?;

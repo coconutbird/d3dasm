@@ -73,11 +73,7 @@ pub fn scan_dxbc<'a>(data: &'a [u8]) -> Vec<DxbcContainer<'a>> {
 }
 
 fn find_magic(data: &[u8], start: usize) -> Option<usize> {
-    let needle = DXBC_MAGIC;
-    data[start..]
-        .windows(4)
-        .position(|w| w == needle)
-        .map(|p| start + p)
+    memchr::memmem::find(&data[start..], DXBC_MAGIC).map(|p| start + p)
 }
 
 fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {

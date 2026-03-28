@@ -21,8 +21,6 @@ pub struct Program {
     pub warnings: Vec<String>,
     /// Original FourCC (`SHEX` or `SHDR`) for round-trip serialization.
     pub fourcc: [u8; 4],
-    /// Raw chunk payload for round-trip serialization.
-    pub raw: Vec<u8>,
 }
 
 /// A single decoded shader instruction.
