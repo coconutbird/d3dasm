@@ -1,7 +1,8 @@
 //! ILDB chunk parser — embedded debug data blob.
 //!
 //! The ILDB chunk contains an embedded PDB or debug info blob.
-//! We don't parse the PDB contents — just expose the raw bytes and size.
+//! We don't parse the PDB contents — just expose the raw bytes via
+//! `Cow<'a, [u8]>` (zero-copy borrow on read, owned on mutation).
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;

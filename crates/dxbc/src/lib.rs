@@ -5,6 +5,9 @@
 //! resource definitions, statistics, root signatures, shader bytecode, etc.),
 //! and round-trip shader bytecode through an intermediate representation.
 //!
+//! Metadata strings and raw blobs borrow from the input buffer via
+//! `Cow<'a, T>` — zero allocation on read, transparent ownership on mutation.
+//!
 //! # Quick start
 //!
 //! ```rust,ignore
@@ -14,7 +17,8 @@
 //! for chunk in &container.chunks {
 //!     match chunk.parse() {
 //!         ChunkData::Shader(program) => {
-//!             println!("{}", dxbc::shex::format_program(&program));
+//!             // Program implements Display for fxc-compatible disassembly.
+//!             println!("{program}");
 //!         }
 //!         _ => {}
 //!     }
@@ -23,11 +27,12 @@
 //!
 //! # Crate features
 //!
-//! * **`no_std`** — the crate depends only on `alloc`; no filesystem or I/O.
-//! * **Decode** — `shex::decode` turns raw SHEX/SHDR bytes into
-//!   a [`Program`].
-//! * **Format** — `shex::format_program` renders a `Program` as
-//!   human-readable disassembly text.
+//! * **`no_std`** — the crate depends only on `core` and `alloc`; no filesystem or I/O.
+//! * **Zero-copy metadata** — chunk strings and blobs borrow from the input
+//!   via `Cow<'a, T>`, supporting read-then-patch workflows.
+//! * **Decode** — `shex::decode` turns raw SHEX/SHDR bytes into a [`Program`].
+//! * **Display** — `Program` and all chunk types implement `Display` for
+//!   `fxc.exe`-compatible disassembly output.
 //! * **Encode** — `shex::encode` serialises a `Program` back to
 //!   bytes, enabling shader modification and round-trip workflows.
 

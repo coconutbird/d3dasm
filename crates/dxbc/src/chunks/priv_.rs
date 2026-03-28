@@ -2,7 +2,8 @@
 //!
 //! The PRIV chunk carries tool-specific private data. It may contain a
 //! GUID identifying the tool, followed by opaque payload bytes.
-//! We expose the raw size and, when present, the leading GUID bytes.
+//! We expose the raw bytes via `Cow<'a, [u8]>` and, when present, the
+//! leading GUID bytes.
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
