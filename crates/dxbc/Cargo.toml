@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "DXBC (DirectX Bytecode) container parser and SM4/SM5 shader disassembler"
 
+[features]
+default = []
+std = ["nostdio/std"]
+
 [dependencies]
 nostdio = "0.1.0"

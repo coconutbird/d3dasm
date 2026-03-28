@@ -10,5 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
-d3dasm = { path = "../d3dasm" }
-dxbc = { path = "../dxbc" }
+d3dasm = { path = "../d3dasm", features = ["std"] }
+dxbc = { path = "../dxbc", features = ["std"] }

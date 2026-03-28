@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Generic Direct3D shader disassembly interface"
 
+[features]
+default = []
+std = ["dxbc/std"]
+
 [dependencies]
 dxbc = { path = "../dxbc" }
