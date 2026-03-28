@@ -23,7 +23,11 @@
 //! }
 //! ```
 
-use std::fmt;
+#![no_std]
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::fmt;
 
 use dxbc::chunks::ChunkData;
 use dxbc::container::DxbcContainer;
