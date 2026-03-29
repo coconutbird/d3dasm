@@ -2,7 +2,15 @@
 name = "dxbc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "DXBC (DirectX Bytecode) container parser and SM4/SM5 shader disassembler"
+license = "MIT"
+repository = "https://github.com/coconutbird/d3dasm"
+homepage = "https://github.com/coconutbird/d3dasm"
+authors = ["Jon-Luke Biddle"]
+keywords = ["dxbc", "directx", "shader", "disassembler", "hlsl"]
+categories = ["parser-implementations", "no-std", "game-development"]
+readme = "../../README.md"
 
 [features]
 default = []

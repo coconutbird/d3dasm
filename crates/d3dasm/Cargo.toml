@@ -2,11 +2,19 @@
 name = "d3dasm"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Generic Direct3D shader disassembly interface"
+license = "MIT"
+repository = "https://github.com/coconutbird/d3dasm"
+homepage = "https://github.com/coconutbird/d3dasm"
+authors = ["Jon-Luke Biddle"]
+keywords = ["dxbc", "directx", "shader", "disassembler", "hlsl"]
+categories = ["parser-implementations", "game-development"]
+readme = "../../README.md"
 
 [features]
 default = []
 std = ["dxbc/std"]
 
 [dependencies]
-dxbc = { path = "../dxbc" }
+dxbc = { version = "0.1.0", path = "../dxbc" }
