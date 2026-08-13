@@ -106,24 +106,41 @@ ret
 
 ```
 d3dasm/
-├── Cargo.toml                        # Workspace root (resolver = "3")
+├── Cargo.toml                        # Virtual workspace and shared policy
+├── Cargo.lock                        # Workspace-wide dependency lockfile
 ├── crates/
-│   ├── dxbc/                         # no_std DXBC library
-│   │   └── src/
-│   │       ├── container.rs          # DXBC container parser, writer, scanner
-│   │       ├── chunks/               # Per-chunk parsers (rdef, signature, stat, …)
-│   │       ├── shex/                 # SM4/SM5 bytecode
-│   │       │   ├── ir.rs             # Typed intermediate representation
-│   │       │   ├── decode.rs         # Bytes → IR
-│   │       │   ├── encode.rs         # IR → bytes
-│   │       │   ├── fmt.rs            # IR → disassembly text
-│   │       │   └── opcodes.rs        # Opcode enum (217+ opcodes)
-│   │       └── util.rs              # Shared helpers
+│   ├── dxbc/                         # no_std DXBC library package
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs                # Library target
+│   │   │   ├── container.rs          # Container parser, writer, scanner
+│   │   │   ├── chunks/               # Per-chunk parsers and writers
+│   │   │   └── shex/                 # SM4/SM5 IR, codec, and formatter
+│   │   └── fuzz/                     # cargo-fuzz workspace package
+│   │       ├── Cargo.toml
+│   │       └── fuzz_targets/
 │   ├── d3dasm/                       # High-level disassembly API
-│   │   └── src/lib.rs
+│   │   ├── Cargo.toml
+│   │   ├── src/lib.rs                # Library target
+│   │   └── tests/                    # Integration tests
 │   └── d3dasm-cli/                   # CLI binary
-│       └── src/main.rs
+│       ├── Cargo.toml
+│       ├── src/main.rs               # Binary target
+│       └── examples/                 # Example targets
+├── .github/workflows/ci.yml          # Workspace quality gates
+└── .pre-commit-config.yaml           # Matching local quality gates
 ```
+
+The root is a virtual workspace; every package uses Cargo's conventional
+`src/lib.rs`, `src/main.rs`, `tests/`, `examples/`, or `fuzz_targets/` target
+locations. The workspace topology is listed explicitly in `Cargo.toml`, with
+the fuzz package included in workspace checks but excluded from default builds.
+
+Shared package metadata and every dependency declaration live in the root
+`[workspace.package]` and `[workspace.dependencies]` tables. Member manifests
+inherit them with `workspace = true`. The same pattern applies to
+`[workspace.lints]`: every member enables `workspace = true`, and Clippy's
+`pedantic` group is denied without per-crate Clippy exceptions.
 
 ## Building
 
@@ -136,8 +153,13 @@ Requires Rust 1.85+ (edition 2024, `core::cell::OnceCell` stable since 1.70).
 ## Testing
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-targets --all-features --exclude dxbc-fuzz
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
+
+The fuzz harness is checked and linted with the workspace, but is excluded from
+`cargo test --all-targets` because libFuzzer supplies its entry point only when
+run through `cargo fuzz`.
 
 Round-trip verification across all test shaders:
 

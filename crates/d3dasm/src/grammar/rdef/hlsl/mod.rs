@@ -8,7 +8,7 @@
 //!
 //! The container layer prefers this form but verifies it round-trips; if a
 //! particular RDEF can't be reproduced exactly here it falls back to the
-//! explicit `key=value` form in [`super::rdef`].
+//! explicit `key=value` form produced by [`super::rdef_to_text`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -65,8 +65,8 @@ fn element_size(td: &TypeDesc<'_>) -> Option<u32> {
     let b = base_size(td.var_type);
     Some(match td.class {
         0 => b,
-        1 => b * td.columns as u32,
-        2 | 3 => b * td.rows as u32 * td.columns as u32,
+        1 => b * u32::from(td.columns),
+        2 | 3 => b * u32::from(td.rows) * u32::from(td.columns),
         _ => return None,
     })
 }
@@ -79,7 +79,7 @@ fn derived_var_size(td: &TypeDesc<'_>) -> Option<u32> {
     Some(if td.elements == 0 {
         elem
     } else {
-        (td.elements as u32 - 1) * elem.div_ceil(16) * 16 + elem
+        (u32::from(td.elements) - 1) * elem.div_ceil(16) * 16 + elem
     })
 }
 
@@ -107,7 +107,7 @@ fn scalar_value_str(var_type: u16, w: u32) -> Option<String> {
             }
             s
         }
-        2 => alloc::format!("{}", w as i32),
+        2 => alloc::format!("{}", i32::from_ne_bytes(w.to_ne_bytes())),
         19 => alloc::format!("{w}"),
         1 if w == 0 => String::from("false"),
         _ => return None,
@@ -117,7 +117,7 @@ fn scalar_value_str(var_type: u16, w: u32) -> Option<String> {
 fn scalar_value_parse(var_type: u16, p: &str) -> Option<u32> {
     Some(match var_type {
         3 => p.parse::<f32>().ok()?.to_bits(),
-        2 => p.parse::<i32>().ok()? as u32,
+        2 => u32::from_ne_bytes(p.parse::<i32>().ok()?.to_ne_bytes()),
         19 => p.parse::<u32>().ok()?,
         1 if p == "false" => 0,
         1 if p == "true" => 1,
@@ -237,7 +237,6 @@ fn packoffset_parse(s: &str) -> Option<u32> {
     };
     Some(reg * 16 + comp * 4)
 }
-
 
 /// Binding flags → `userPacked|comparisonSampler|...` (or hex for unknown bits).
 /// `0` for an explicit no-flags override (when the derivation would set bits).
@@ -407,12 +406,11 @@ fn binding_typespec(b: &ResourceBinding<'_>, rd: &ResourceDef<'_>) -> Option<(St
         3 => (String::from("SamplerState"), 's'),
         4 => (texture("RW")?, 'u'),
         5 => (wrap("StructuredBuffer"), 't'),
-        6 => (wrap("RWStructuredBuffer"), 'u'),
+        6 | 11 => (wrap("RWStructuredBuffer"), 'u'),
         7 => (String::from("ByteAddressBuffer"), 't'),
         8 => (String::from("RWByteAddressBuffer"), 'u'),
         9 => (wrap("AppendStructuredBuffer"), 'u'),
         10 => (wrap("ConsumeStructuredBuffer"), 'u'),
-        11 => (wrap("RWStructuredBuffer"), 'u'),
         _ => return None,
     })
 }
@@ -420,7 +418,6 @@ fn binding_typespec(b: &ResourceBinding<'_>, rd: &ResourceDef<'_>) -> Option<(St
 fn is_texture(input_type: u32) -> bool {
     input_type == 2 || input_type == 4
 }
-
 
 mod decode;
 mod encode;

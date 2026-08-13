@@ -17,6 +17,8 @@ use dxbc::chunks::signature::{
 };
 use dxbc::shex::{system_value_name, system_value_to_u32};
 
+const SIGNATURE_FIELDS: &[&str] = &["idx", "reg", "type", "mask", "rw", "sv", "stream", "prec"];
+
 /// Component type `D3D_REGISTER_COMPONENT_TYPE` → editable name (or number).
 fn comp_type_to_str(v: u32) -> String {
     match ComponentType::from_u32(v) {
@@ -139,7 +141,8 @@ fn minprec_from(s: &str) -> Option<u32> {
 /// `<name|-> idx=N reg=N type=<t> mask=<m> rw=<m> [sv=<name>] [stream=N] [prec=<name>]`.
 /// Enum fields use names (component type, masks, system value, precision);
 /// `sv`/`stream`/`prec` appear only when non-default.
-pub fn signature_to_text(sig: &Signature) -> String {
+#[must_use]
+pub fn signature_to_text(sig: &Signature<'_>) -> String {
     let fourcc_str = core::str::from_utf8(&sig.fourcc).unwrap_or("ISGN");
     let ver = SignatureVersion::from_fourcc(fourcc_str);
     let mut out = String::new();
@@ -161,16 +164,13 @@ pub fn signature_to_text(sig: &Signature) -> String {
         if e.system_value != 0 {
             let _ = write!(out, " sv={}", sysval_to_str(e.system_value));
         }
-        if ver.has_stream()
-            && let Some(s) = e.stream
-            && s != 0
-        {
+        if let (true, Some(s)) = (ver.has_stream(), e.stream.filter(|stream| *stream != 0)) {
             let _ = write!(out, " stream={s}");
         }
-        if ver.has_min_precision()
-            && let Some(mp) = e.min_precision
-            && mp.to_u32() != 0
-        {
+        if let (true, Some(mp)) = (
+            ver.has_min_precision(),
+            e.min_precision.filter(|precision| precision.to_u32() != 0),
+        ) {
             let _ = write!(out, " prec={}", minprec_to_str(mp.to_u32()));
         }
         out.push('\n');
@@ -180,6 +180,7 @@ pub fn signature_to_text(sig: &Signature) -> String {
 
 /// Parse the editable text form produced by [`signature_to_text`]. Accepts both
 /// enum names and raw numbers; unrecognised names are an error (returns `None`).
+#[must_use]
 pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'static>> {
     let fourcc_str = core::str::from_utf8(&fourcc).unwrap_or("ISGN");
     let ver = SignatureVersion::from_fourcc(fourcc_str);
@@ -196,12 +197,11 @@ pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'sta
         } else {
             Cow::Owned(String::from(name))
         };
-        const KNOWN: &[&str] = &["idx", "reg", "type", "mask", "rw", "sv", "stream", "prec"];
         let mut m: BTreeMap<&str, &str> = BTreeMap::new();
         for tok in f {
             // Every token after the name must be a known `key=value` tag.
             let (k, v) = tok.split_once('=')?;
-            if !KNOWN.contains(&k) {
+            if !SIGNATURE_FIELDS.contains(&k) {
                 return None;
             }
             m.insert(k, v);

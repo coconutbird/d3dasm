@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 /// Returns an empty string if `offset` is out of bounds or the bytes
 /// are not valid UTF-8. In practice, all strings emitted by the HLSL
 /// compiler are pure ASCII.
+#[must_use]
 pub fn read_cstring(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
         return "";
@@ -49,6 +50,7 @@ pub struct StringTableWriter {
 impl StringTableWriter {
     /// Create a new writer. `base_offset` is the absolute position in the
     /// chunk payload where the string table blob will be written.
+    #[must_use]
     pub fn new(base_offset: usize) -> Self {
         Self {
             base: base_offset,
@@ -61,28 +63,35 @@ impl StringTableWriter {
     /// (i.e. `base_offset + relative_position`).
     ///
     /// If the string was already added, the previous offset is returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the absolute offset does not fit in the format's 32-bit field.
     pub fn add(&mut self, s: &str) -> u32 {
         if let Some(&rel) = self.map.get(s) {
-            return (self.base + rel) as u32;
+            return u32::try_from(self.base + rel).expect("string-table offset exceeds u32");
         }
         let rel = self.buf.len();
         self.buf.extend_from_slice(s.as_bytes());
         self.buf.push(0); // null terminator
         self.map.insert(String::from(s), rel);
-        (self.base + rel) as u32
+        u32::try_from(self.base + rel).expect("string-table offset exceeds u32")
     }
 
     /// Consume the writer and return the serialized string table bytes.
+    #[must_use]
     pub fn finish(self) -> Vec<u8> {
         self.buf
     }
 
     /// Current size of the string table in bytes.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Whether the string table is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }

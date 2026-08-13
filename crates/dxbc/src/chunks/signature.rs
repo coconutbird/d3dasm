@@ -6,18 +6,18 @@ use core::fmt;
 
 use super::{ChunkWriter, WritableChunk};
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
 use crate::util::{StringTableWriter, read_cstring};
 
-/// A parsed signature chunk, preserving its original FourCC for round-tripping.
+/// A parsed signature chunk, preserving its original `FourCC` for round-tripping.
 ///
-/// Different FourCCs use different binary layouts (element strides, optional
-/// fields). Storing the FourCC ensures `ISG1` stays `ISG1` instead of
+/// Different `FourCCs` use different binary layouts (element strides, optional
+/// fields). Storing the `FourCC` ensures `ISG1` stays `ISG1` instead of
 /// collapsing to `ISGN` on write.
 #[derive(Debug)]
 pub struct Signature<'a> {
-    /// Original FourCC (e.g. `ISGN`, `ISG1`, `OSG5`, `OSGN`, `PCSG`, `PSG1`).
+    /// Original `FourCC` (e.g. `ISGN`, `ISG1`, `OSG5`, `OSGN`, `PCSG`, `PSG1`).
     pub fourcc: [u8; 4],
     /// Parsed signature elements.
     pub elements: Vec<SignatureElement<'a>>,
@@ -55,7 +55,8 @@ pub enum SignatureVersion {
 }
 
 impl SignatureVersion {
-    /// Derive the version from a FourCC string.
+    /// Derive the version from a `FourCC` string.
+    #[must_use]
     pub fn from_fourcc(fourcc: &str) -> Self {
         match fourcc {
             "OSG5" => Self::V5,
@@ -73,11 +74,13 @@ impl SignatureVersion {
     }
 
     /// Whether this layout carries a per-element GS output `stream`.
+    #[must_use]
     pub fn has_stream(self) -> bool {
         matches!(self, Self::V5 | Self::V1)
     }
 
     /// Whether this layout carries a per-element `min_precision` field.
+    #[must_use]
     pub fn has_min_precision(self) -> bool {
         matches!(self, Self::V1)
     }
@@ -108,6 +111,7 @@ pub enum MinPrecision {
 
 impl MinPrecision {
     /// Converts a raw `D3D_MIN_PRECISION` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Default,
@@ -123,6 +127,7 @@ impl MinPrecision {
     }
 
     /// The raw `D3D_MIN_PRECISION` value for this variant.
+    #[must_use]
     pub fn to_u32(self) -> u32 {
         match self {
             Self::Default => 0,
@@ -149,12 +154,12 @@ impl fmt::Display for MinPrecision {
             Self::UInt16 => write!(f, " [min16u]"),
             Self::Any16 => write!(f, " [any16]"),
             Self::Any10 => write!(f, " [any10]"),
-            Self::Unknown(v) => write!(f, " [minprec={}]", v),
+            Self::Unknown(v) => write!(f, " [minprec={v}]"),
         }
     }
 }
 
-/// Component data type for signature elements (D3D_REGISTER_COMPONENT_TYPE).
+/// Component data type for signature elements (`D3D_REGISTER_COMPONENT_TYPE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ComponentType {
@@ -182,6 +187,7 @@ pub enum ComponentType {
 
 impl ComponentType {
     /// Converts a raw `D3D_REGISTER_COMPONENT_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Unknown,
@@ -199,6 +205,7 @@ impl ComponentType {
     }
 
     /// Returns the lowercase type name used in disassembly output.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
@@ -240,6 +247,7 @@ pub struct SignatureElement<'a> {
 
 impl SignatureElement<'_> {
     /// The component type name.
+    #[must_use]
     pub fn component_type_name(&self) -> &'static str {
         match ComponentType::from_u32(self.component_type) {
             Some(ct) => ct.name(),
@@ -248,6 +256,7 @@ impl SignatureElement<'_> {
     }
 
     /// Length in characters of the "name with index" string.
+    #[must_use]
     pub fn name_with_index_len(&self) -> usize {
         let base = self.semantic_name.len();
         if self.semantic_index > 0 {
@@ -258,6 +267,10 @@ impl SignatureElement<'_> {
     }
 
     /// Write the semantic name with index suffix directly to a formatter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if any write fails.
     pub fn fmt_name_with_index(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.semantic_name)?;
         if self.semantic_index > 0 {
@@ -267,6 +280,10 @@ impl SignatureElement<'_> {
     }
 
     /// Write the columns after the name: type and register.mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if any write fails.
     pub fn fmt_columns(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:>7} v{}.", self.component_type_name(), self.register)?;
         write_mask(f, self.mask)
@@ -278,14 +295,12 @@ impl fmt::Display for SignatureElement<'_> {
         // Use padding via a Display wrapper to avoid allocating a String.
         write!(f, "{:<24} ", DisplayNameWithIndex(self))?;
         self.fmt_columns(f)?;
-        if let Some(s) = self.stream
-            && s != 0
-        {
-            write!(f, " stream={}", s)?;
+        if let Some(s) = self.stream.filter(|stream| *stream != 0) {
+            write!(f, " stream={s}")?;
         }
 
         if let Some(mp) = self.min_precision {
-            write!(f, "{}", mp)?;
+            write!(f, "{mp}")?;
         }
 
         Ok(())
@@ -331,6 +346,7 @@ fn digit_count(mut n: u32) -> usize {
 /// - `"ISGN"` / `"OSGN"` / `"PCSG"` → 24 bytes (base)
 /// - `"OSG5"` → 28 bytes (adds `stream`)
 /// - `"ISG1"` / `"OSG1"` / `"PSG1"` → 32 bytes (adds `stream` + `min_precision`)
+#[must_use]
 pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement<'a>> {
     if data.len() < 8 {
         return Vec::new();
@@ -338,7 +354,7 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
 
     let ver = SignatureVersion::from_fourcc(fourcc);
     let stride = ver.stride();
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let count = match c.read_u32_le() {
         Ok(v) => v as usize,
         Err(_) => return Vec::new(),
@@ -395,6 +411,12 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement
 ///
 /// `fourcc` is the 4-byte chunk tag (e.g. `*b"ISGN"`, `*b"OSG1"`).
 /// Returns a `WritableChunk` ready for `build_dxbc`.
+///
+/// # Panics
+///
+/// Panics if the element count or resulting string-table offset exceeds a
+/// 32-bit signature field.
+#[must_use]
 pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> WritableChunk {
     let fourcc_str = core::str::from_utf8(&fourcc).unwrap_or("ISGN");
     let ver = SignatureVersion::from_fourcc(fourcc_str);
@@ -415,7 +437,10 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
     let mut buf = Vec::with_capacity(total);
 
     // Header: count + 8 bytes (the second u32 is always 8 in real DXBC files)
-    w(&mut buf, elements.len() as u32);
+    w(
+        &mut buf,
+        u32::try_from(elements.len()).expect("signature element count exceeds u32"),
+    );
     w(&mut buf, 8);
 
     // Elements
@@ -433,7 +458,7 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
         buf.push(elem.rw_mask);
         if ver.has_min_precision() {
             buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding
-            w(&mut buf, elem.min_precision.map_or(0, |mp| mp.to_u32()));
+            w(&mut buf, elem.min_precision.map_or(0, MinPrecision::to_u32));
         } else {
             buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding to fill stride
         }

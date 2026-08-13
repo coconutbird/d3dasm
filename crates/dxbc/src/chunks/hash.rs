@@ -11,16 +11,17 @@ pub struct ShaderHash {
     pub bytes: [u8; 16],
     /// Number of valid bytes in `bytes` (8 for XHSH, 16 for HASH).
     pub len: usize,
-    /// FourCC that was used to parse this chunk (HASH or XHSH).
+    /// `FourCC` that was used to parse this chunk (HASH or XHSH).
     pub fourcc: [u8; 4],
 }
 
 /// Parse a HASH or XHSH chunk.
 ///
-/// `fourcc` should be the original FourCC from the container so it is
+/// `fourcc` should be the original `FourCC` from the container so it is
 /// preserved correctly for round-trip serialization. HASH chunks contain
 /// a 4-byte flags field followed by a 16-byte MD5 digest. XHSH chunks
 /// contain an 8-byte hash with no flags prefix.
+#[must_use]
 pub fn parse_hash(data: &[u8], fourcc: [u8; 4]) -> Option<ShaderHash> {
     let mut bytes = [0u8; 16];
     let is_xhsh = &fourcc == b"XHSH";

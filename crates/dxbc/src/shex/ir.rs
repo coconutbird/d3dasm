@@ -32,7 +32,7 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
     /// Warnings encountered during decoding (malformed tokens, truncated data, etc.).
     pub warnings: Vec<String>,
-    /// Original FourCC (`SHEX` or `SHDR`) for round-trip serialization.
+    /// Original `FourCC` (`SHEX` or `SHDR`) for round-trip serialization.
     pub fourcc: [u8; 4],
 }
 
@@ -302,6 +302,7 @@ impl Instruction {
     /// Most instruction kinds carry operands; declarations that encode
     /// everything in the token itself (e.g. `dcl_temps`) return an empty
     /// slice.
+    #[must_use]
     pub fn operands(&self) -> &[Operand] {
         self.kind.operands()
     }
@@ -310,6 +311,7 @@ impl Instruction {
 impl InstructionKind {
     /// Returns the operands embedded in this variant, or an empty slice
     /// if the variant has none.
+    #[must_use]
     pub fn operands(&self) -> &[Operand] {
         match self {
             Self::Generic { operands }
@@ -369,20 +371,21 @@ pub enum GsPrimitive {
 
 impl GsPrimitive {
     /// Decode from the raw 6-bit field stored in token0 bits 11–16.
+    #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {
-            0 => Self::Undefined,
             1 => Self::Point,
             2 => Self::Line,
             3 => Self::Triangle,
             6 => Self::LineAdj,
             7 => Self::TriangleAdj,
-            8..=39 => Self::ControlPointPatch((v - 7) as u8),
-            _ => Self::Undefined,
+            8..=39 => Self::ControlPointPatch((v - 7).to_le_bytes()[0]),
+            _ => Self::Undefined, // Zero and unrecognized values.
         }
     }
 
     /// Encode back to the raw 6-bit integer for token0.
+    #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::Undefined => 0,
@@ -391,11 +394,12 @@ impl GsPrimitive {
             Self::Triangle => 3,
             Self::LineAdj => 6,
             Self::TriangleAdj => 7,
-            Self::ControlPointPatch(n) => n as u32 + 7,
+            Self::ControlPointPatch(n) => u32::from(n) + 7,
         }
     }
 
     /// Returns the disassembly name for this primitive.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -440,6 +444,7 @@ pub enum GsOutputTopology {
 
 impl GsOutputTopology {
     /// Decode from the raw 3-bit field stored in token0 bits 11–13.
+    #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {
             1 => Self::PointList,
@@ -456,6 +461,7 @@ impl GsOutputTopology {
     }
 
     /// Encode back to the raw integer for token0.
+    #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::Undefined => 0,
@@ -472,6 +478,7 @@ impl GsOutputTopology {
     }
 
     /// Returns the disassembly name for this topology.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -516,16 +523,17 @@ pub enum ComponentSelect {
     ZeroComponent,
     /// One component / scalar (`num_components = 1`). No selection bits.
     OneComponent,
-    /// Four-component write mask (`num_components = 2`, sel_mode = 0).
+    /// Four-component write mask (`num_components = 2`, `sel_mode` = 0).
     Mask(u8),
-    /// Four-component swizzle (`num_components = 2`, sel_mode = 1).
+    /// Four-component swizzle (`num_components = 2`, `sel_mode` = 1).
     Swizzle([u8; 4]),
-    /// Four-component single select (`num_components = 2`, sel_mode = 2).
+    /// Four-component single select (`num_components = 2`, `sel_mode` = 2).
     Scalar(u8),
 }
 
 impl ComponentSelect {
     /// Returns the raw `num_components` value (bits 0–1 of operand token).
+    #[must_use]
     pub fn num_components(&self) -> u32 {
         match self {
             Self::ZeroComponent => 0,
@@ -664,6 +672,7 @@ pub enum ReturnType {
 
 impl RegisterType {
     /// Converts a raw `D3D10_SB_OPERAND_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Temp,
@@ -712,6 +721,7 @@ impl RegisterType {
     }
 
     /// Converts back to the raw `D3D10_SB_OPERAND_TYPE` value.
+    #[must_use]
     pub fn to_u32(&self) -> u32 {
         match self {
             Self::Temp => 0,
@@ -760,6 +770,7 @@ impl RegisterType {
     }
 
     /// Returns the disassembly prefix string for this register type (e.g. `"r"`, `"v"`, `"cb"`).
+    #[must_use]
     pub fn prefix(&self) -> &'static str {
         match self {
             Self::Temp => "r",
@@ -810,6 +821,7 @@ impl RegisterType {
 
 impl ReturnType {
     /// Converts a raw `D3D10_SB_RESOURCE_RETURN_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             1 => Self::Unorm,
@@ -826,6 +838,7 @@ impl ReturnType {
     }
 
     /// Converts back to the raw `D3D10_SB_RESOURCE_RETURN_TYPE` value.
+    #[must_use]
     pub fn to_u32(&self) -> u32 {
         match self {
             Self::Unorm => 1,
@@ -842,6 +855,7 @@ impl ReturnType {
     }
 
     /// Returns the lowercase name used in disassembly output.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unorm => "unorm",
@@ -860,6 +874,7 @@ impl ReturnType {
 
 impl CustomDataType {
     /// Converts a raw `D3D10_SB_CUSTOMDATA_CLASS` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Comment,
@@ -871,7 +886,8 @@ impl CustomDataType {
     }
 }
 
-/// Decode a system value name from its encoded D3D10_SB_NAME / D3D11_SB_NAME value.
+/// Decode a system value name from its encoded `D3D10_SB_NAME` / `D3D11_SB_NAME` value.
+#[must_use]
 pub fn system_value_name(val: u32) -> &'static str {
     match val {
         0 => "undefined",

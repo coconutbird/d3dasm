@@ -13,7 +13,7 @@
 //! ```
 //!
 //! See `docs/d3dasm-grammar.md` for the full text-format grammar.
-//! `.code <fourcc>` bodies are assembled via [`dxbc::shex::assemble`] and
+//! `.code <fourcc>` bodies are assembled via [`crate::assemble`] and
 //! re-encoded; `.chunk <fourcc>` bodies are raw hex. The container is rebuilt
 //! with [`dxbc::container::build_dxbc_with_header`], preserving the original
 //! version and 16-byte header hash.
@@ -31,7 +31,8 @@ use crate::{Shader, forensic};
 const HEX_PER_LINE: usize = 32;
 
 /// Serialize a whole DXBC container to a forensic `.d3dasm` document.
-pub fn serialize(shader: &Shader) -> String {
+#[must_use]
+pub fn serialize(shader: &Shader<'_>) -> String {
     let mut out = String::new();
     forensic::write_metadata_header(&mut out, shader);
 
@@ -62,10 +63,11 @@ pub fn serialize(shader: &Shader) -> String {
                 let _ = writeln!(out, ".code {}", chunk.fourcc_str());
             }
             // Annotate the shader program's resource operands with their names.
-            if matches!(chunk.fourcc_str(), "SHEX" | "SHDR")
-                && let Some(rd) = &rdef
-                && let Ok(program) = dxbc::shex::decode_with_fourcc(chunk.data, chunk.fourcc)
-            {
+            if let (true, Some(rd), Ok(program)) = (
+                matches!(chunk.fourcc_str(), "SHEX" | "SHDR"),
+                &rdef,
+                dxbc::shex::decode_with_fourcc(chunk.data, chunk.fourcc),
+            ) {
                 body = crate::symbolicate::annotate_shex(&body, &program, rd);
             }
             out.push_str(&body);
@@ -99,7 +101,7 @@ fn rdef_form(body: &str) -> &'static str {
     if hlsl { "hlsl" } else { "kv" }
 }
 
-/// Editable text for a chunk, if a codec exists for its FourCC.
+/// Editable text for a chunk, if a codec exists for its `FourCC`.
 fn encode_to_text(fourcc: [u8; 4], data: &[u8]) -> Option<String> {
     if &fourcc == b"SHEX" || &fourcc == b"SHDR" {
         let program = dxbc::shex::decode_with_fourcc(data, fourcc).ok()?;
@@ -121,9 +123,10 @@ fn encode_to_text(fourcc: [u8; 4], data: &[u8]) -> Option<String> {
         let rd = dxbc::chunks::rdef::parse_rdef(data)?;
         // Prefer the HLSL reconstruction when it round-trips byte-exactly;
         // otherwise the explicit key=value form (also lossless).
-        if let Some(hlsl) = crate::grammar::rdef::hlsl::rdef_to_hlsl(&rd)
-            && let Some(rd2) = crate::grammar::rdef::hlsl::rdef_from_hlsl(&hlsl)
-        {
+        let hlsl_roundtrip = crate::grammar::rdef::hlsl::rdef_to_hlsl(&rd).and_then(|hlsl| {
+            crate::grammar::rdef::hlsl::rdef_from_hlsl(&hlsl).map(|roundtrip| (hlsl, roundtrip))
+        });
+        if let Some((hlsl, rd2)) = hlsl_roundtrip {
             use dxbc::chunks::ChunkWriter;
             if rd2.to_writable().data == data {
                 return Some(hlsl);
@@ -191,6 +194,11 @@ fn write_hex_block(out: &mut String, data: &[u8]) {
 
 /// Assemble a forensic `.d3dasm` document back into byte-identical container
 /// bytes. Expects a `.dxbc` directive (produced by [`serialize`]).
+///
+/// # Errors
+///
+/// Returns an error when the document contains malformed directives, encoded
+/// chunk text, or hexadecimal data.
 pub fn assemble(text: &str) -> Result<Vec<u8>, AsmError> {
     // Strip `//` comments and blanks (mirrors shex::assemble).
     let lines: Vec<&str> = text
@@ -256,6 +264,11 @@ pub fn assemble(text: &str) -> Result<Vec<u8>, AsmError> {
 /// Assemble a document containing one *or more* `.dxbc` containers (e.g. an
 /// archive `.bin` with many shaders) back into the concatenated container
 /// bytes. Each `.dxbc` directive starts a new container.
+///
+/// # Errors
+///
+/// Returns an error when no container is present or any contained document is
+/// malformed.
 pub fn assemble_all(text: &str) -> Result<Vec<u8>, AsmError> {
     let mut out = Vec::new();
     let mut current: Option<String> = None;
@@ -285,6 +298,7 @@ pub fn assemble_all(text: &str) -> Result<Vec<u8>, AsmError> {
 /// DXBC containers with non-container bytes around/between them — preserving
 /// **every** byte. Container regions become forensic documents; the wrapper
 /// bytes are emitted verbatim as `.raw` hex segments.
+#[must_use]
 pub fn serialize_file(data: &[u8]) -> String {
     let shaders = crate::parse(data);
     let mut out = String::new();
@@ -307,6 +321,11 @@ pub fn serialize_file(data: &[u8]) -> String {
 
 /// Reassemble a whole-file document (see [`serialize_file`]) back into the
 /// byte-identical original file, wrapper bytes and all.
+///
+/// # Errors
+///
+/// Returns an error when a raw segment or embedded container document is
+/// malformed.
 pub fn assemble_file(text: &str) -> Result<Vec<u8>, AsmError> {
     let lines: Vec<&str> = text
         .lines()
@@ -350,12 +369,12 @@ pub fn assemble_file(text: &str) -> Result<Vec<u8>, AsmError> {
 }
 
 /// True if `text` is a container document (vs. a bare program disassembly).
+#[must_use]
 pub fn is_container(text: &str) -> bool {
     text.lines()
         .map(|l| l.split("//").next().unwrap_or(l).trim())
         .find(|l| !l.is_empty())
-        .map(|l| l.starts_with(".dxbc"))
-        .unwrap_or(false)
+        .is_some_and(|l| l.starts_with(".dxbc"))
 }
 
 fn parse_dxbc_directive(line: &str) -> Result<u32, AsmError> {

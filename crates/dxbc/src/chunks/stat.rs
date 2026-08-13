@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
 use super::{ChunkParser, ChunkWriter};
 
@@ -97,13 +97,14 @@ pub struct ShaderStats {
 /// Parse a STAT chunk into [`ShaderStats`].
 ///
 /// Returns `None` if the data is too short to contain a valid STAT chunk.
+#[must_use]
 pub fn parse_stat(data: &[u8]) -> Option<ShaderStats> {
     if data.len() < 116 {
         return None;
     }
 
     // Read every present dword; missing trailing fields default to 0.
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let n = data.len() / 4;
     let mut d = alloc::vec::Vec::with_capacity(n);
     for _ in 0..n {
@@ -200,7 +201,7 @@ impl ChunkWriter for ShaderStats {
             self.gs_max_output_vertex_count,
             self.reserved[2],
             self.reserved[3],
-            self.is_sample_frequency as u32,
+            u32::from(self.is_sample_frequency),
             self.gs_instance_count,
             self.hs_control_points,
             self.hs_output_primitive,

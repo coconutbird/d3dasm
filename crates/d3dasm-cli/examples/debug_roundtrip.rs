@@ -1,6 +1,6 @@
 //! Debug a single shader's round-trip diff at the dword level.
 //!
-//! Usage: cargo run --release --example debug_roundtrip -- <file> [container_index]
+//! Usage: cargo run --release --example `debug_roundtrip` -- <file> [`container_index`]
 fn main() {
     let path = std::env::args().nth(1).expect("path");
     let ci: usize = std::env::args()
@@ -49,13 +49,14 @@ fn main() {
             "chunk {chi}: orig={} dwords, enc={} dwords (diff={})",
             orig_dwords.len(),
             enc_dwords.len(),
-            orig_dwords.len() as isize - enc_dwords.len() as isize
+            isize::try_from(orig_dwords.len()).expect("dword count exceeds isize")
+                - isize::try_from(enc_dwords.len()).expect("dword count exceeds isize")
         );
         let max = std::cmp::max(orig_dwords.len(), enc_dwords.len());
         for i in 0..std::cmp::min(max, 80) {
-            let o = orig_dwords.get(i).copied().unwrap_or(0xDEADDEAD);
-            let e = enc_dwords.get(i).copied().unwrap_or(0xDEADDEAD);
-            let mark = if o != e { " <-- DIFF" } else { "" };
+            let o = orig_dwords.get(i).copied().unwrap_or(0xDEAD_DEAD);
+            let e = enc_dwords.get(i).copied().unwrap_or(0xDEAD_DEAD);
+            let mark = if o == e { "" } else { " <-- DIFF" };
             println!("  [{i:4}] orig={o:08X}  enc={e:08X}{mark}");
         }
         if max > 80 {

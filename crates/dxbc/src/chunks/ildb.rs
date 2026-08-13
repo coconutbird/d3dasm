@@ -18,7 +18,8 @@ pub struct DebugData<'a> {
 }
 
 /// Parse an ILDB chunk.
-pub fn parse_ildb<'a>(data: &'a [u8]) -> Option<DebugData<'a>> {
+#[must_use]
+pub fn parse_ildb(data: &[u8]) -> Option<DebugData<'_>> {
     Some(DebugData {
         raw: Cow::Borrowed(data),
     })

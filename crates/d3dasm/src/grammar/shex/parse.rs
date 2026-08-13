@@ -15,7 +15,11 @@ use super::{
     CB_ACCESS, DIMENSIONS, GLOBAL_FLAGS, INTERPOLATIONS, SAMPLER_MODES, SHADER_TYPES, TESS_DOMAINS,
     TESS_OUTPUT_PRIMS, TESS_PARTITIONINGS, axis_index, intern, value_of,
 };
-use dxbc::shex::*;
+use dxbc::shex::{
+    ComponentSelect, CustomDataType, FlagNames, GsOutputTopology, GsPrimitive, Immediates, Indices,
+    Instruction, InstructionKind, Opcode, Operand, OperandIndex, Operands, Program, RegisterType,
+    ReturnType, SmallU32Vec,
+};
 
 /// Error produced while parsing `.d3dasm` text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +41,11 @@ fn err<T>(msg: impl Into<String>) -> Result<T, AsmError> {
 }
 
 /// Parse lossless `.d3dasm` text into a [`Program`].
+///
+/// # Errors
+///
+/// Returns an error when the text contains an invalid profile, instruction,
+/// operand, modifier, or declaration.
 pub fn parse(text: &str) -> Result<Program, AsmError> {
     // Strip `//` comments (full-line or trailing) and blank lines.
     let mut lines = text
@@ -66,16 +75,17 @@ pub fn parse(text: &str) -> Result<Program, AsmError> {
 
 fn parse_profile(line: &str) -> Result<(&'static str, u32, u32, [u8; 4]), AsmError> {
     // profile=<st>_<major>_<minor> [fourcc=XXXX], e.g. `profile=ps_5_0`.
-    let line = line
-        .strip_prefix("profile=")
-        .ok_or_else(|| AsmError {
-            message: format!("expected `profile=` line: {line:?}"),
-        })?;
+    let line = line.strip_prefix("profile=").ok_or_else(|| AsmError {
+        message: format!("expected `profile=` line: {line:?}"),
+    })?;
     let (profile, fourcc) = match line.split_once(' ') {
         Some((p, rest)) => {
-            let f = rest.trim().strip_prefix("fourcc=").ok_or_else(|| AsmError {
-                message: format!("expected `fourcc=` tag: {rest:?}"),
-            })?;
+            let f = rest
+                .trim()
+                .strip_prefix("fourcc=")
+                .ok_or_else(|| AsmError {
+                    message: format!("expected `fourcc=` tag: {rest:?}"),
+                })?;
             let bytes = f.as_bytes();
             if bytes.len() != 4 {
                 return err(format!("fourcc must be 4 bytes: {f:?}"));
@@ -140,29 +150,26 @@ fn opcode_from_mnemonic(mnemonic: &str) -> Result<(Opcode, &str), AsmError> {
     for v in 0..=217u32 {
         let op = Opcode::from_u32(v);
         let name = op.name();
-        if mnemonic.starts_with(name) && best.map(|(_, len)| name.len() > len).unwrap_or(true) {
+        if mnemonic.starts_with(name) && best.is_none_or(|(_, len)| name.len() > len) {
             best = Some((op, name.len()));
         }
     }
-    match best {
-        Some((op, len)) => {
-            let rest = &mnemonic[len..];
-            if !rest.is_empty() && !rest.starts_with('_') {
-                return err(format!("unrecognized mnemonic: {mnemonic:?}"));
-            }
-            Ok((op, rest))
+    if let Some((op, len)) = best {
+        let rest = &mnemonic[len..];
+        if !rest.is_empty() && !rest.starts_with('_') {
+            return err(format!("unrecognized mnemonic: {mnemonic:?}"));
         }
+        Ok((op, rest))
+    } else {
         // Unknown opcode form `op<value>` (no known name is a prefix of it).
-        None => {
-            if let Some(after) = mnemonic.strip_prefix("op") {
-                let digits: usize = after.bytes().take_while(u8::is_ascii_digit).count();
-                if digits > 0 {
-                    let v = parse_dec(&after[..digits])?;
-                    return Ok((Opcode::Unknown(v), &after[digits..]));
-                }
+        if let Some(after) = mnemonic.strip_prefix("op") {
+            let digits: usize = after.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                let value = parse_dec(&after[..digits])?;
+                return Ok((Opcode::Unknown(value), &after[digits..]));
             }
-            err(format!("unknown opcode in mnemonic: {mnemonic:?}"))
         }
+        err(format!("unknown opcode in mnemonic: {mnemonic:?}"))
     }
 }
 
@@ -201,9 +208,13 @@ fn apply_modifiers(instr: &mut Instruction, modifiers: &str) -> Result<(), AsmEr
         } else if let Some(n) = seg.strip_prefix("ri") {
             instr.resinfo_return_type = Some(parse_dec(n)?);
         } else if let Some(h) = seg.strip_prefix("pm") {
-            instr.precise_mask = parse_hex(h)? as u8;
+            instr.precise_mask = u8::try_from(parse_hex(h)?).map_err(|_| AsmError {
+                message: format!("precise mask exceeds u8: {h:?}"),
+            })?;
         } else if let Some(h) = seg.strip_prefix("sf") {
-            instr.sync_flags = parse_hex(h)? as u8;
+            instr.sync_flags = u8::try_from(parse_hex(h)?).map_err(|_| AsmError {
+                message: format!("sync flags exceed u8: {h:?}"),
+            })?;
         } else if let Some(body) = seg.strip_prefix("off(").and_then(|s| s.strip_suffix(')')) {
             let mut it = body.split(',');
             let u = next_i8(&mut it)?;
@@ -229,8 +240,13 @@ fn apply_modifiers(instr: &mut Instruction, modifiers: &str) -> Result<(), AsmEr
 // Per-opcode kind dispatch (mirrors decode::decode_instruction).
 // ---------------------------------------------------------------------------
 
-fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
-    use Opcode::*;
+fn parse_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
+    use Opcode::{
+        CustomData, DclConstantBuffer, DclGlobalFlags, DclIndexRange, DclInput, DclInputPs,
+        DclInputPsSgv, DclInputPsSiv, DclInputSgv, DclInputSiv, DclOutput, DclOutputSgv,
+        DclOutputSiv, DclResource, DclResourceRaw, DclResourceStructured, DclSampler,
+        DclUnorderedAccessViewRaw, DclUnorderedAccessViewStructured, DclUnorderedAccessViewTyped,
+    };
     match op {
         CustomData => parse_custom_data(c),
         DclGlobalFlags => parse_global_flags(c),
@@ -285,6 +301,19 @@ fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
                 operands: one(op0),
             })
         }
+        _ => parse_scalar_kind(op, c),
+    }
+}
+
+fn parse_scalar_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
+    use Opcode::{
+        DclGsInputPrimitive, DclGsInstanceCount, DclGsOutputPrimitiveTopology,
+        DclHsForkPhaseInstanceCount, DclHsJoinPhaseInstanceCount, DclHsMaxTessFactor,
+        DclIndexableTemp, DclInputControlPointCount, DclMaxOutputVertexCount,
+        DclOutputControlPointCount, DclTemps, DclTessDomain, DclTessOutputPrimitive,
+        DclTessPartitioning, DclThreadGroup,
+    };
+    match op {
         DclTemps => Ok(InstructionKind::DclTemps {
             count: parse_trailing_dec(c)?,
         }),
@@ -339,9 +368,8 @@ fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
         }
         DclHsMaxTessFactor => {
             c.skip_spaces();
-            let bits = parse_hex0x(c.take_rest())?;
             Ok(InstructionKind::DclHsMaxTessFactor {
-                value: f32::from_bits(bits),
+                value: f32::from_bits(parse_hex0x(c.take_rest())?),
             })
         }
         DclHsForkPhaseInstanceCount | DclHsJoinPhaseInstanceCount => {
@@ -358,6 +386,16 @@ fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
             let z = parse_dec(c.take_token())?;
             Ok(InstructionKind::DclThreadGroup { x, y, z })
         }
+        _ => parse_function_kind(op, c),
+    }
+}
+
+fn parse_function_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
+    use Opcode::{
+        DclFunctionBody, DclFunctionTable, DclInterface, HsControlPointPhase, HsDecls, HsForkPhase,
+        HsJoinPhase,
+    };
+    match op {
         DclFunctionBody => Ok(InstructionKind::DclFunctionBody {
             index: parse_trailing_dec(c)?,
         }),
@@ -385,7 +423,6 @@ fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
             })
         }
         HsDecls | HsControlPointPhase | HsForkPhase | HsJoinPhase => Ok(InstructionKind::HsPhase),
-        // Everything else (incl. DclStream) decodes as a generic operand list.
         _ => Ok(InstructionKind::Generic {
             operands: parse_operand_list(c)?,
         }),
@@ -396,7 +433,7 @@ fn parse_kind(op: Opcode, c: &mut Cursor) -> Result<InstructionKind, AsmError> {
 // Declaration payload helpers
 // ---------------------------------------------------------------------------
 
-fn parse_global_flags(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_global_flags(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     c.skip_spaces();
     let mut flags: FlagNames = SmallVec::new();
     let rest = c.take_rest();
@@ -414,7 +451,7 @@ fn parse_global_flags(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
     Ok(InstructionKind::DclGlobalFlags { flags })
 }
 
-fn parse_dcl_input(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_dcl_input(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     let mut interpolation = None;
     let mut system_value = None;
     let mut operands: Operands = SmallVec::new();
@@ -423,9 +460,9 @@ fn parse_dcl_input(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
         if c.eof() {
             break;
         }
-        if let Some(inner) = c.try_tag("interp")? {
+        if let Some(inner) = c.try_tag("interp") {
             interpolation = Some(intern_enum(inner, INTERPOLATIONS)?);
-        } else if let Some(inner) = c.try_tag("sv")? {
+        } else if let Some(inner) = c.try_tag("sv") {
             system_value = Some(intern_system_value(inner)?);
         } else {
             operands.push(parse_operand(c)?);
@@ -438,7 +475,7 @@ fn parse_dcl_input(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
     })
 }
 
-fn parse_dcl_output(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_dcl_output(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     let mut system_value = None;
     let mut operands: Operands = SmallVec::new();
     loop {
@@ -446,7 +483,7 @@ fn parse_dcl_output(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
         if c.eof() {
             break;
         }
-        if let Some(inner) = c.try_tag("sv")? {
+        if let Some(inner) = c.try_tag("sv") {
             system_value = Some(intern_system_value(inner)?);
         } else {
             operands.push(parse_operand(c)?);
@@ -458,7 +495,7 @@ fn parse_dcl_output(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
     })
 }
 
-fn parse_dcl_resource(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_dcl_resource(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     let op0 = parse_leading_operand(c)?;
     let dimension = parse_tag_enum(c, "dim", DIMENSIONS)?;
     let return_type = parse_rt_tag(c)?;
@@ -471,7 +508,7 @@ fn parse_dcl_resource(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
     })
 }
 
-fn parse_dcl_uav_typed(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_dcl_uav_typed(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     let op0 = parse_leading_operand(c)?;
     let dimension = parse_tag_enum(c, "dim", DIMENSIONS)?;
     let return_type = parse_rt_tag(c)?;
@@ -484,7 +521,7 @@ fn parse_dcl_uav_typed(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
     })
 }
 
-fn parse_dcl_uav_structured(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_dcl_uav_structured(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     let op0 = parse_leading_operand(c)?;
     let stride = parse_tag_dec(c, "stride")?;
     let flags = parse_tag_hex(c, "flags")?;
@@ -495,7 +532,7 @@ fn parse_dcl_uav_structured(c: &mut Cursor) -> Result<InstructionKind, AsmError>
     })
 }
 
-fn parse_gs_input(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_gs_input(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     c.skip_spaces();
     let tok = c.take_rest();
     let primitive = if let Some(inner) = tok
@@ -518,7 +555,10 @@ fn parse_gs_input(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
 }
 
 fn parse_gs_topology(tok: &str) -> Result<GsOutputTopology, AsmError> {
-    use GsOutputTopology::*;
+    use GsOutputTopology::{
+        LineList, LineListAdj, LineStrip, LineStripAdj, PointList, TriangleList, TriangleListAdj,
+        TriangleStrip, TriangleStripAdj, Undefined,
+    };
     Ok(match tok {
         "undefined" => Undefined,
         "pointlist" => PointList,
@@ -535,11 +575,11 @@ fn parse_gs_topology(tok: &str) -> Result<GsOutputTopology, AsmError> {
 }
 
 /// Parse an `rt=float,float,float,float` tag into the four resource return types.
-fn parse_rt_tag(c: &mut Cursor) -> Result<[ReturnType; 4], AsmError> {
+fn parse_rt_tag(c: &mut Cursor<'_>) -> Result<[ReturnType; 4], AsmError> {
     let inner = expect_tag(c, "rt")?;
     let mut rts = [ReturnType::Unknown(0); 4];
     let mut it = inner.split(',');
-    for slot in rts.iter_mut() {
+    for slot in &mut rts {
         let name = it.next().ok_or_else(|| AsmError {
             message: format!("rt= needs four types: {inner:?}"),
         })?;
@@ -549,7 +589,7 @@ fn parse_rt_tag(c: &mut Cursor) -> Result<[ReturnType; 4], AsmError> {
 }
 
 fn parse_return_type(name: &str) -> Result<ReturnType, AsmError> {
-    use ReturnType::*;
+    use ReturnType::{Continued, Double, Float, Mixed, Sint, Snorm, Uint, Unknown, Unorm, Unused};
     Ok(match name {
         "unorm" => Unorm,
         "snorm" => Snorm,
@@ -598,7 +638,7 @@ fn parse_resource_rt(inner: &str) -> Result<u32, AsmError> {
     Ok(3 | (vals[0] << 6) | (vals[1] << 10) | (vals[2] << 14) | (vals[3] << 18))
 }
 
-fn parse_custom_data(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
+fn parse_custom_data(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     c.skip_spaces();
     let tag = c.take_token();
     match tag {
@@ -620,7 +660,7 @@ fn parse_custom_data(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
                     c.skip_spaces();
                 }
                 let mut row = [0.0f32; 4];
-                for slot in row.iter_mut() {
+                for slot in &mut row {
                     c.skip_spaces();
                     let tok = c.take_while(|b| b != b' ' && b != b',' && b != b'}');
                     *slot = f32::from_bits(parse_hex0x(tok)?);
@@ -658,7 +698,7 @@ fn parse_custom_data(c: &mut Cursor) -> Result<InstructionKind, AsmError> {
 }
 
 /// Parse a ` { 0x.. 0x.. ... }` raw-dword block (non-ICB customdata payload).
-fn parse_raw_block(c: &mut Cursor) -> Result<Vec<u32>, AsmError> {
+fn parse_raw_block(c: &mut Cursor<'_>) -> Result<Vec<u32>, AsmError> {
     c.skip_spaces();
     if !c.eat_byte(b'{') {
         return err("expected '{' for raw payload block");
@@ -679,7 +719,7 @@ fn parse_raw_block(c: &mut Cursor) -> Result<Vec<u32>, AsmError> {
 // Operands
 // ---------------------------------------------------------------------------
 
-fn parse_operand_list(c: &mut Cursor) -> Result<Operands, AsmError> {
+fn parse_operand_list(c: &mut Cursor<'_>) -> Result<Operands, AsmError> {
     // Operands are whitespace-separated and each is a single whitespace-free
     // token (immediates use `,` internally, relative indices use `+`).
     let mut operands: Operands = SmallVec::new();
@@ -694,12 +734,12 @@ fn parse_operand_list(c: &mut Cursor) -> Result<Operands, AsmError> {
 }
 
 /// Parse a single space-prefixed leading operand (declaration operand).
-fn parse_leading_operand(c: &mut Cursor) -> Result<Operand, AsmError> {
+fn parse_leading_operand(c: &mut Cursor<'_>) -> Result<Operand, AsmError> {
     c.skip_spaces();
     parse_operand(c)
 }
 
-fn parse_operand(c: &mut Cursor) -> Result<Operand, AsmError> {
+fn parse_operand(c: &mut Cursor<'_>) -> Result<Operand, AsmError> {
     let negate = c.eat_byte(b'-');
     let abs = c.eat_byte(b'|');
 
@@ -742,7 +782,7 @@ fn parse_operand(c: &mut Cursor) -> Result<Operand, AsmError> {
     })
 }
 
-fn parse_imm_list(c: &mut Cursor) -> Result<Immediates, AsmError> {
+fn parse_imm_list(c: &mut Cursor<'_>) -> Result<Immediates, AsmError> {
     let mut imms: Immediates = SmallVec::new();
     if c.eat_byte(b')') {
         return Ok(imms);
@@ -777,12 +817,14 @@ fn parse_immediate_token(tok: &str) -> Result<u32, AsmError> {
             message: format!("bad float immediate: {tok:?}"),
         });
     }
-    tok.parse::<i32>().map(|i| i as u32).map_err(|_| AsmError {
-        message: format!("bad immediate: {tok:?}"),
-    })
+    tok.parse::<i32>()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .map_err(|_| AsmError {
+            message: format!("bad immediate: {tok:?}"),
+        })
 }
 
-fn parse_register_prefix(c: &mut Cursor) -> Result<RegisterType, AsmError> {
+fn parse_register_prefix(c: &mut Cursor<'_>) -> Result<RegisterType, AsmError> {
     // Unknown register form `?reg(<value>)` (preserves the raw operand type).
     if c.eat_str("?reg(") {
         let digits = c.take_while(|b| b != b')');
@@ -799,7 +841,7 @@ fn parse_register_prefix(c: &mut Cursor) -> Result<RegisterType, AsmError> {
     for v in 0..=40u32 {
         let rt = RegisterType::from_u32(v);
         let p = rt.prefix();
-        if rest.starts_with(p) && best.map(|(_, l)| p.len() > l).unwrap_or(true) {
+        if rest.starts_with(p) && best.is_none_or(|(_, l)| p.len() > l) {
             best = Some((rt, p.len()));
         }
     }
@@ -812,10 +854,10 @@ fn parse_register_prefix(c: &mut Cursor) -> Result<RegisterType, AsmError> {
     }
 }
 
-fn parse_indices(c: &mut Cursor) -> Result<Indices, AsmError> {
+fn parse_indices(c: &mut Cursor<'_>) -> Result<Indices, AsmError> {
     let mut indices: Indices = SmallVec::new();
     // Optional unbracketed first immediate index (digits).
-    if c.peek().map(|b| b.is_ascii_digit()).unwrap_or(false) {
+    if c.peek().is_some_and(|b| b.is_ascii_digit()) {
         indices.push(parse_number_index(c)?);
     }
     while c.eat_byte(b'[') {
@@ -828,7 +870,7 @@ fn parse_indices(c: &mut Cursor) -> Result<Indices, AsmError> {
 }
 
 /// Parse a bare numeric index (digits, optional trailing 'L' for Imm64).
-fn parse_number_index(c: &mut Cursor) -> Result<OperandIndex, AsmError> {
+fn parse_number_index(c: &mut Cursor<'_>) -> Result<OperandIndex, AsmError> {
     let digits = c.take_while(|b| b.is_ascii_digit());
     if c.eat_byte(b'L') {
         Ok(OperandIndex::Imm64(parse_dec(digits)?))
@@ -837,8 +879,8 @@ fn parse_number_index(c: &mut Cursor) -> Result<OperandIndex, AsmError> {
     }
 }
 
-fn parse_bracket_index(c: &mut Cursor) -> Result<OperandIndex, AsmError> {
-    if c.peek().map(|b| b.is_ascii_digit()).unwrap_or(false) {
+fn parse_bracket_index(c: &mut Cursor<'_>) -> Result<OperandIndex, AsmError> {
+    if c.peek().is_some_and(|b| b.is_ascii_digit()) {
         return parse_number_index(c);
     }
     // Relative: a nested operand, optionally followed by "+imm".
@@ -851,7 +893,7 @@ fn parse_bracket_index(c: &mut Cursor) -> Result<OperandIndex, AsmError> {
     }
 }
 
-fn parse_components(c: &mut Cursor) -> Result<ComponentSelect, AsmError> {
+fn parse_components(c: &mut Cursor<'_>) -> Result<ComponentSelect, AsmError> {
     // Write-mask: `:<letters>` (e.g. `:xyzw`, `:xy`, or `:` for an empty mask).
     if c.eat_byte(b':') {
         let letters = c.take_while(|b| matches!(b, b'x' | b'y' | b'z' | b'w'));
@@ -912,7 +954,7 @@ fn intern_enum(s: &str, table: &[(&'static str, u32)]) -> Result<&'static str, A
 }
 
 fn parse_tag_enum(
-    c: &mut Cursor,
+    c: &mut Cursor<'_>,
     tag: &str,
     table: &[(&'static str, u32)],
 ) -> Result<&'static str, AsmError> {
@@ -920,12 +962,12 @@ fn parse_tag_enum(
     intern_enum(inner, table)
 }
 
-fn parse_tag_dec<T: core::str::FromStr>(c: &mut Cursor, tag: &str) -> Result<T, AsmError> {
+fn parse_tag_dec<T: core::str::FromStr>(c: &mut Cursor<'_>, tag: &str) -> Result<T, AsmError> {
     let inner = expect_tag(c, tag)?;
     parse_dec(inner)
 }
 
-fn parse_tag_hex(c: &mut Cursor, tag: &str) -> Result<u32, AsmError> {
+fn parse_tag_hex(c: &mut Cursor<'_>, tag: &str) -> Result<u32, AsmError> {
     let inner = expect_tag(c, tag)?;
     parse_hex0x(inner)
 }
@@ -933,13 +975,13 @@ fn parse_tag_hex(c: &mut Cursor, tag: &str) -> Result<u32, AsmError> {
 /// Skip a leading space then require `tag=value`, returning the value text.
 fn expect_tag<'a>(c: &mut Cursor<'a>, tag: &str) -> Result<&'a str, AsmError> {
     c.skip_spaces();
-    match c.try_tag(tag)? {
+    match c.try_tag(tag) {
         Some(inner) => Ok(inner),
         None => err(format!("expected {tag}=… at {:?}", c.rest())),
     }
 }
 
-fn parse_u32_list(c: &mut Cursor) -> Result<SmallU32Vec, AsmError> {
+fn parse_u32_list(c: &mut Cursor<'_>) -> Result<SmallU32Vec, AsmError> {
     let mut list: SmallU32Vec = SmallVec::new();
     if !c.eat_byte(b'{') {
         return err("expected '{' for list");
@@ -960,7 +1002,7 @@ fn parse_u32_list(c: &mut Cursor) -> Result<SmallU32Vec, AsmError> {
     Ok(list)
 }
 
-fn parse_trailing_dec<T: core::str::FromStr>(c: &mut Cursor) -> Result<T, AsmError> {
+fn parse_trailing_dec<T: core::str::FromStr>(c: &mut Cursor<'_>) -> Result<T, AsmError> {
     c.skip_spaces();
     parse_dec(c.take_rest())
 }
@@ -1054,7 +1096,7 @@ impl<'a> Cursor<'a> {
 
     fn take_while(&mut self, pred: impl Fn(u8) -> bool) -> &'a str {
         let start = self.pos;
-        while self.peek().map(&pred).unwrap_or(false) {
+        while self.peek().is_some_and(&pred) {
             self.pos += 1;
         }
         &self.src[start..self.pos]
@@ -1076,14 +1118,14 @@ impl<'a> Cursor<'a> {
     /// (everything up to the next whitespace). The value itself is never empty
     /// of meaning here — list values like `float,float,float,float` contain no
     /// spaces by construction.
-    fn try_tag(&mut self, tag: &str) -> Result<Option<&'a str>, AsmError> {
+    fn try_tag(&mut self, tag: &str) -> Option<&'a str> {
         let mut probe = String::from(tag);
         probe.push('=');
         if !self.looking_at(&probe) {
-            return Ok(None);
+            return None;
         }
         self.advance(probe.len());
         let inner = self.take_while(|b| b != b' ' && b != b'\t');
-        Ok(Some(inner))
+        Some(inner)
     }
 }

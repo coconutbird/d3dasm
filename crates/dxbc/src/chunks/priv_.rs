@@ -21,7 +21,8 @@ pub struct PrivateData<'a> {
 }
 
 /// Parse a PRIV chunk.
-pub fn parse_priv<'a>(data: &'a [u8]) -> Option<PrivateData<'a>> {
+#[must_use]
+pub fn parse_priv(data: &[u8]) -> Option<PrivateData<'_>> {
     let guid = if data.len() >= 16 {
         let mut g = [0u8; 16];
         g.copy_from_slice(&data[..16]);

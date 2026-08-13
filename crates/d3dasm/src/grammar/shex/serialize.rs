@@ -9,10 +9,15 @@ use alloc::string::String;
 use core::fmt::Write;
 
 use super::{AXES, DIMENSIONS, name_of};
+use dxbc::shex::{
+    ComponentSelect, CustomDataType, GsPrimitive, Immediates, Indices, Instruction,
+    InstructionKind, Opcode, Operand, OperandIndex, Operands, Program, RegisterType, ReturnType,
+    SmallU32Vec,
+};
 use dxbc::shex::{ImmediateType, opcode_imm_type};
-use dxbc::shex::*;
 
 /// Serialize a [`Program`] into lossless `.d3dasm` text.
+#[must_use]
 pub fn serialize(program: &Program) -> String {
     let mut s = String::new();
     let _ = write_program(&mut s, program);
@@ -21,6 +26,7 @@ pub fn serialize(program: &Program) -> String {
 
 /// Render a single operand in `.d3dasm` form (e.g. `cb0[21].w`, `cb0[r0.y+11].x`,
 /// `t0.yzxw`). Used to label resource operands in symbolication comments.
+#[must_use]
 pub fn operand_string(op: &Operand) -> String {
     let mut s = String::new();
     write_operand(&mut s, op, ImmediateType::Float);
@@ -52,7 +58,7 @@ fn write_instruction(w: &mut String, instr: &Instruction) -> core::fmt::Result {
             write_mnemonic(w, instr.opcode);
             write_modifiers(w, instr);
             let imm_type = opcode_imm_type(instr.opcode);
-            for op in operands.iter() {
+            for op in operands {
                 w.push(' ');
                 write_operand(w, op, imm_type);
             }
@@ -68,7 +74,10 @@ fn write_instruction(w: &mut String, instr: &Instruction) -> core::fmt::Result {
             values,
             raw,
             ..
-        } => write_custom_data(w, instr.opcode.name(), subtype, values, raw),
+        } => {
+            write_custom_data(w, instr.opcode.name(), *subtype, values, raw);
+            Ok(())
+        }
         _ => write_declaration(w, instr),
     }
 }
@@ -175,16 +184,17 @@ fn write_operand(w: &mut String, op: &Operand, imm_type: ImmediateType) {
     // Inline immediates `l(...)` / `d(...)` only when un-indexed. An immediate
     // that carries indices (a degenerate but decodable state) is emitted
     // register-style (prefix + indices) by the `_` arm below.
-    let inline_imm =
-        matches!(op.reg_type, RegisterType::Immediate32 | RegisterType::Immediate64)
-            && op.indices.is_empty();
+    let inline_imm = matches!(
+        op.reg_type,
+        RegisterType::Immediate32 | RegisterType::Immediate64
+    ) && op.indices.is_empty();
     match op.reg_type {
         RegisterType::Immediate32 if op.indices.is_empty() => {
-            write_immediates(w, 'l', &op.immediate_values, imm_type)
+            write_immediates(w, 'l', &op.immediate_values, imm_type);
         }
         // 64-bit immediates stay as raw dword hex (no f64 prettifying).
         RegisterType::Immediate64 if op.indices.is_empty() => {
-            write_immediates(w, 'd', &op.immediate_values, ImmediateType::Uint)
+            write_immediates(w, 'd', &op.immediate_values, ImmediateType::Uint);
         }
         RegisterType::Unknown(v) => {
             // `prefix()` returns "?reg" and drops the value; preserve it.
@@ -243,7 +253,7 @@ fn write_immediate_value(w: &mut String, v: u32, imm_type: ImmediateType) {
             let _ = write!(w, "0x{v:08x}");
         }
         ImmediateType::Int => {
-            let _ = write!(w, "{}", v as i32);
+            let _ = write!(w, "{}", i32::from_ne_bytes(v.to_ne_bytes()));
         }
         ImmediateType::Uint => {
             let _ = write!(w, "0x{v:08x}");
@@ -374,7 +384,19 @@ fn write_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
             write_op0(w, operands);
             write!(w, " access={access}")?;
         }
-        InstructionKind::DclTemps { count } => {
+        _ => write_special_declaration(w, instr)?,
+    }
+    Ok(())
+}
+
+fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
+    match &instr.kind {
+        InstructionKind::DclTemps { count }
+        | InstructionKind::DclMaxOutputVertexCount { count }
+        | InstructionKind::DclGsInstanceCount { count }
+        | InstructionKind::DclOutputControlPointCount { count }
+        | InstructionKind::DclInputControlPointCount { count }
+        | InstructionKind::DclHsForkPhaseInstanceCount { count } => {
             write!(w, " {count}")?;
         }
         InstructionKind::DclIndexableTemp {
@@ -387,19 +409,12 @@ fn write_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
         InstructionKind::DclGsInputPrimitive { primitive } => {
             w.push(' ');
             match primitive {
-                GsPrimitive::ControlPointPatch(n) => write!(w, "patchlist({n})")?,
+                GsPrimitive::ControlPointPatch(count) => write!(w, "patchlist({count})")?,
                 other => w.push_str(other.name()),
             }
         }
         InstructionKind::DclGsOutputTopology { topology } => {
             write!(w, " {}", topology.name())?;
-        }
-        InstructionKind::DclMaxOutputVertexCount { count }
-        | InstructionKind::DclGsInstanceCount { count }
-        | InstructionKind::DclOutputControlPointCount { count }
-        | InstructionKind::DclInputControlPointCount { count }
-        | InstructionKind::DclHsForkPhaseInstanceCount { count } => {
-            write!(w, " {count}")?;
         }
         InstructionKind::DclTessDomain { domain } => write!(w, " {domain}")?,
         InstructionKind::DclTessPartitioning { partitioning } => write!(w, " {partitioning}")?,
@@ -462,7 +477,6 @@ fn write_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
             write_op0(w, operands);
             write!(w, " {count}")?;
         }
-        // Generic / HsPhase / CustomData handled in write_instruction.
         _ => {}
     }
     Ok(())
@@ -506,10 +520,10 @@ fn write_u32_list(w: &mut String, list: &SmallU32Vec) {
 fn write_custom_data(
     w: &mut String,
     keyword: &str,
-    subtype: &CustomDataType,
+    subtype: CustomDataType,
     values: &[[f32; 4]],
     raw: &[u32],
-) -> core::fmt::Result {
+) {
     w.push_str(keyword);
     match subtype {
         CustomDataType::ImmediateConstantBuffer => {
@@ -538,7 +552,6 @@ fn write_custom_data(
             write_raw_block(w, &tag, raw);
         }
     }
-    Ok(())
 }
 
 /// Write a non-ICB customdata block: ` <tag> { 0x.. 0x.. ... }`.

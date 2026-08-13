@@ -2,25 +2,36 @@
 
 use alloc::vec::Vec;
 
-use super::ir::*;
+use super::ir::{
+    ComponentSelect, CustomDataType, Instruction, InstructionKind, Operand, OperandIndex, Program,
+    RegisterType, ReturnType,
+};
 use super::opcodes::Opcode;
+
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("SHEX dword count exceeds u32")
+}
 
 /// Encode a [`Program`] into raw SHEX/SHDR chunk bytes.
 ///
 /// This is the inverse of [`super::decode::decode`]. The returned byte
 /// slice is suitable for embedding directly as a DXBC chunk payload.
+///
+/// # Panics
+///
+/// Panics if the encoded program exceeds a size representable by SHEX fields.
+#[must_use]
 pub fn encode(program: &Program) -> Vec<u8> {
     let mut dwords: Vec<u32> = Vec::new();
 
     // Version token: shader_type << 16 | major << 4 | minor
     let shader_type_val = match program.shader_type {
-        "ps" => 0u32,
         "vs" => 1,
         "gs" => 2,
         "hs" => 3,
         "ds" => 4,
         "cs" => 5,
-        _ => 0,
+        _ => 0u32, // Pixel shaders and unknown stage names.
     };
     dwords.push((shader_type_val << 16) | (program.major_version << 4) | program.minor_version);
 
@@ -32,7 +43,7 @@ pub fn encode(program: &Program) -> Vec<u8> {
     }
 
     // Fix up total length.
-    dwords[1] = dwords.len() as u32;
+    dwords[1] = wire_u32(dwords.len());
 
     // Convert to little-endian bytes.
     dwords.iter().flat_map(|d| d.to_le_bytes()).collect()
@@ -49,7 +60,7 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
         raw_dword_count,
     } = &instr.kind
     {
-        encode_custom_data(opcode_val, subtype, values, raw, *raw_dword_count, out);
+        encode_custom_data(opcode_val, *subtype, values, raw, *raw_dword_count, out);
         return;
     }
 
@@ -71,7 +82,9 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
 
     // Compute instruction length and build token0.
     // Reconstruct bits 11-23 from typed IR fields (no raw bit bucket).
-    let instr_len = (out.len() - token0_idx) as u32;
+    let instr_len = u32::from(
+        u8::try_from(out.len() - token0_idx).expect("SHEX instruction exceeds 255 dwords"),
+    );
     let mut token0 = (opcode_val & 0x7FF) | build_token0_opdata(instr);
     if has_extended {
         token0 |= 1 << 31;
@@ -87,8 +100,31 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
 /// interpolation mode, flags, etc.), while non-declaration opcodes use them
 /// for saturate, resinfo return type, test condition, precise mask, and sync.
 fn build_token0_opdata(instr: &Instruction) -> u32 {
-    // Declaration opcodes — payload is fully described by InstructionKind fields.
-    match &instr.kind {
+    if let Some(bits) = declaration_token0(&instr.kind) {
+        return bits;
+    }
+
+    // Non-declaration opcodes: reconstruct from instruction-level typed fields.
+    let mut bits = 0u32;
+    if instr.opcode == Opcode::Sync {
+        bits |= (u32::from(instr.sync_flags) & 0xF) << 11;
+    } else {
+        if instr.saturate {
+            bits |= 1 << 13;
+        }
+        if let Some(rt) = instr.resinfo_return_type {
+            bits |= (rt & 0x3) << 11;
+        }
+    }
+    if instr.test_nonzero {
+        bits |= 1 << 18;
+    }
+    bits | ((u32::from(instr.precise_mask) & 0xF) << 19)
+}
+
+/// Build token0 payload bits for declaration instructions.
+fn declaration_token0(kind: &InstructionKind) -> Option<u32> {
+    Some(match kind {
         InstructionKind::DclGlobalFlags { flags } => {
             let names: &[&str] = &[
                 "refactoringAllowed",
@@ -106,117 +142,77 @@ fn build_token0_opdata(instr: &Instruction) -> u32 {
                     bits |= 1 << i;
                 }
             }
-            return bits << 11;
+            bits << 11
         }
-        InstructionKind::DclInput { interpolation, .. } => {
-            if let Some(interp) = interpolation {
-                let v = match *interp {
-                    "constant" => 1u32,
-                    "linear" => 2,
-                    "linearCentroid" => 3,
-                    "linearNoperspective" => 4,
-                    "linearNoperspectiveCentroid" => 5,
-                    "linearSample" => 6,
-                    "linearNoperspectiveSample" => 7,
-                    _ => 0,
-                };
-                return v << 11;
-            }
-            return 0;
-        }
+        InstructionKind::DclInput { interpolation, .. } => interpolation.map_or(0, |interp| {
+            let value = match interp {
+                "constant" => 1u32,
+                "linear" => 2,
+                "linearCentroid" => 3,
+                "linearNoperspective" => 4,
+                "linearNoperspectiveCentroid" => 5,
+                "linearSample" => 6,
+                "linearNoperspectiveSample" => 7,
+                _ => 0,
+            };
+            value << 11
+        }),
         InstructionKind::DclResource {
             dimension,
             sample_count,
             ..
-        } => {
-            return (dimension_to_u32(dimension) << 11) | ((sample_count & 0x7F) << 16);
-        }
+        } => (dimension_to_u32(dimension) << 11) | ((sample_count & 0x7F) << 16),
         InstructionKind::DclSampler { mode, .. } => {
-            let v = match *mode {
-                "default" => 0u32,
+            let value = match *mode {
                 "comparison" => 1,
                 "mono" => 2,
-                _ => 0,
+                _ => 0u32, // Default and unknown sampler modes.
             };
-            return v << 11;
+            value << 11
         }
         InstructionKind::DclConstantBuffer { access, .. } => {
-            let v = if *access == "dynamicIndexed" { 1u32 } else { 0 };
-            return v << 11;
+            u32::from(*access == "dynamicIndexed") << 11
         }
-        InstructionKind::DclGsInputPrimitive { primitive } => {
-            return (primitive.to_raw() & 0x3F) << 11;
-        }
-        InstructionKind::DclGsOutputTopology { topology } => {
-            return (topology.to_raw() & 0xF) << 11;
-        }
+        InstructionKind::DclGsInputPrimitive { primitive } => (primitive.to_raw() & 0x3F) << 11,
+        InstructionKind::DclGsOutputTopology { topology } => (topology.to_raw() & 0xF) << 11,
         InstructionKind::DclOutputControlPointCount { count }
-        | InstructionKind::DclInputControlPointCount { count } => {
-            return (count & 0x3F) << 11;
-        }
+        | InstructionKind::DclInputControlPointCount { count } => (count & 0x3F) << 11,
         InstructionKind::DclTessDomain { domain } => {
-            let v = match *domain {
+            let value = match *domain {
                 "isoline" => 1u32,
                 "tri" => 2,
                 "quad" => 3,
                 _ => 0,
             };
-            return v << 11;
+            value << 11
         }
         InstructionKind::DclTessPartitioning { partitioning } => {
-            let v = match *partitioning {
+            let value = match *partitioning {
                 "integer" => 1u32,
                 "pow2" => 2,
                 "fractional_odd" => 3,
                 "fractional_even" => 4,
                 _ => 0,
             };
-            return v << 11;
+            value << 11
         }
         InstructionKind::DclTessOutputPrimitive { primitive } => {
-            let v = match *primitive {
+            let value = match *primitive {
                 "point" => 1u32,
                 "line" => 2,
                 "triangle_cw" => 3,
                 "triangle_ccw" => 4,
                 _ => 0,
             };
-            return v << 11;
+            value << 11
         }
         InstructionKind::DclUavTyped {
             dimension, flags, ..
-        } => {
-            return (dimension_to_u32(dimension) << 11) | ((flags & 0xFF) << 16);
-        }
-        InstructionKind::DclUavRaw { flags, .. } => {
-            return (flags & 0xFF) << 16;
-        }
-        InstructionKind::DclUavStructured { flags, .. } => {
-            return (flags & 0xFF) << 16;
-        }
-        _ => {}
-    }
-
-    // Non-declaration opcodes: reconstruct from instruction-level typed fields.
-    let mut bits = 0u32;
-
-    // Sync uses bits 11-14 for its own flags (overlaps with saturate/resinfo).
-    if instr.opcode == Opcode::Sync {
-        bits |= (instr.sync_flags as u32 & 0xF) << 11;
-    } else {
-        if instr.saturate {
-            bits |= 1 << 13;
-        }
-        if let Some(rt) = instr.resinfo_return_type {
-            bits |= (rt & 0x3) << 11;
-        }
-    }
-    if instr.test_nonzero {
-        bits |= 1 << 18;
-    }
-    bits |= (instr.precise_mask as u32 & 0xF) << 19;
-
-    bits
+        } => (dimension_to_u32(dimension) << 11) | ((flags & 0xFF) << 16),
+        InstructionKind::DclUavRaw { flags, .. }
+        | InstructionKind::DclUavStructured { flags, .. } => (flags & 0xFF) << 16,
+        _ => return None,
+    })
 }
 
 /// Map a resource dimension string back to its token0 integer value.
@@ -236,11 +232,11 @@ pub(crate) fn dimension_to_u32(dim: &str) -> u32 {
     }
 }
 
-/// Encode a `customdata` block. CustomData has a special two-dword header
+/// Encode a `customdata` block. `CustomData` has a special two-dword header
 /// format where the second dword is the total dword count (not in bits 24-30).
 fn encode_custom_data(
     opcode_val: u32,
-    subtype: &CustomDataType,
+    subtype: CustomDataType,
     values: &[[f32; 4]],
     raw: &[u32],
     raw_dword_count: usize,
@@ -251,13 +247,13 @@ fn encode_custom_data(
         CustomDataType::DebugInfo => 1,
         CustomDataType::Opaque => 2,
         CustomDataType::ImmediateConstantBuffer => 3,
-        CustomDataType::Other(v) => *v,
+        CustomDataType::Other(v) => v,
     };
     // Token0: opcode in bits [0:10], subtype in bits [11:15]
     out.push((opcode_val & 0x7FF) | (subtype_val << 11));
-    if *subtype == CustomDataType::ImmediateConstantBuffer {
+    if subtype == CustomDataType::ImmediateConstantBuffer {
         // Token1: total = 2 (header) + values.len() * 4, then ICB float rows.
-        out.push((2 + values.len() * 4) as u32);
+        out.push(wire_u32(2 + values.len() * 4));
         for row in values {
             for val in row {
                 out.push(val.to_bits());
@@ -266,7 +262,7 @@ fn encode_custom_data(
     } else {
         // Token1: total dword count, then the preserved raw payload.
         let total = raw_dword_count.max(2 + raw.len());
-        out.push(total as u32);
+        out.push(wire_u32(total));
         out.extend_from_slice(raw);
     }
 }
@@ -274,23 +270,26 @@ fn encode_custom_data(
 /// Encode the instruction-kind-specific payload (operands and trailing data).
 fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
     match &instr.kind {
-        InstructionKind::Generic { operands } => {
-            encode_operands(operands, out);
-        }
-        InstructionKind::DclGlobalFlags { .. } => {
-            // All bits are in token0 (handled by apply_token0_dcl_bits).
-        }
+        InstructionKind::Generic { operands }
+        | InstructionKind::DclSampler { operands, .. }
+        | InstructionKind::DclConstantBuffer { operands, .. }
+        | InstructionKind::DclUavRaw { operands, .. }
+        | InstructionKind::DclResourceRaw { operands } => encode_operands(operands, out),
+        InstructionKind::DclGlobalFlags { .. }
+        | InstructionKind::DclGsInputPrimitive { .. }
+        | InstructionKind::DclGsOutputTopology { .. }
+        | InstructionKind::DclOutputControlPointCount { .. }
+        | InstructionKind::DclInputControlPointCount { .. }
+        | InstructionKind::DclTessDomain { .. }
+        | InstructionKind::DclTessPartitioning { .. }
+        | InstructionKind::DclTessOutputPrimitive { .. }
+        | InstructionKind::HsPhase => {}
         InstructionKind::DclInput {
             system_value,
             operands,
             ..
-        } => {
-            encode_operands(operands, out);
-            if let Some(sv) = system_value {
-                out.push(system_value_to_u32(sv));
-            }
         }
-        InstructionKind::DclOutput {
+        | InstructionKind::DclOutput {
             system_value,
             operands,
         } => {
@@ -303,19 +302,19 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
             return_type,
             operands,
             ..
+        }
+        | InstructionKind::DclUavTyped {
+            return_type,
+            operands,
+            ..
         } => {
             encode_operands(operands, out);
             out.push(encode_return_type_token(return_type));
         }
-        InstructionKind::DclSampler { operands, .. } => {
-            encode_operands(operands, out);
-        }
-        InstructionKind::DclConstantBuffer { operands, .. } => {
-            encode_operands(operands, out);
-        }
-        InstructionKind::DclTemps { count } => {
-            out.push(*count);
-        }
+        InstructionKind::DclTemps { count }
+        | InstructionKind::DclMaxOutputVertexCount { count }
+        | InstructionKind::DclGsInstanceCount { count }
+        | InstructionKind::DclHsForkPhaseInstanceCount { count } => out.push(*count),
         InstructionKind::DclIndexableTemp {
             reg,
             size,
@@ -325,20 +324,6 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
             out.push(*size);
             out.push(*components);
         }
-        InstructionKind::DclGsInputPrimitive { .. }
-        | InstructionKind::DclGsOutputTopology { .. }
-        | InstructionKind::DclOutputControlPointCount { .. }
-        | InstructionKind::DclInputControlPointCount { .. }
-        | InstructionKind::DclTessDomain { .. }
-        | InstructionKind::DclTessPartitioning { .. }
-        | InstructionKind::DclTessOutputPrimitive { .. } => {
-            // All bits live in token0.
-        }
-        InstructionKind::DclMaxOutputVertexCount { count }
-        | InstructionKind::DclGsInstanceCount { count }
-        | InstructionKind::DclHsForkPhaseInstanceCount { count } => {
-            out.push(*count);
-        }
         InstructionKind::DclHsMaxTessFactor { value } => {
             out.push(value.to_bits());
         }
@@ -347,27 +332,10 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
             out.push(*y);
             out.push(*z);
         }
-        InstructionKind::DclUavTyped {
-            return_type,
-            operands,
-            ..
-        } => {
-            encode_operands(operands, out);
-            out.push(encode_return_type_token(return_type));
-        }
-        InstructionKind::DclUavRaw { operands, .. } => {
-            encode_operands(operands, out);
-        }
         InstructionKind::DclUavStructured {
             operands, stride, ..
-        } => {
-            encode_operands(operands, out);
-            out.push(*stride);
         }
-        InstructionKind::DclResourceRaw { operands } => {
-            encode_operands(operands, out);
-        }
-        InstructionKind::DclResourceStructured { stride, operands } => {
+        | InstructionKind::DclResourceStructured { stride, operands } => {
             encode_operands(operands, out);
             out.push(*stride);
         }
@@ -379,7 +347,7 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
             body_indices,
         } => {
             out.push(*table_index);
-            out.push(body_indices.len() as u32);
+            out.push(wire_u32(body_indices.len()));
             out.extend_from_slice(body_indices);
         }
         InstructionKind::DclInterface {
@@ -389,15 +357,12 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
         } => {
             out.push(*interface_index);
             out.push(*num_call_sites);
-            out.push(table_indices.len() as u32);
+            out.push(wire_u32(table_indices.len()));
             out.extend_from_slice(table_indices);
         }
         InstructionKind::DclIndexRange { operands, count } => {
             encode_operands(operands, out);
             out.push(*count);
-        }
-        InstructionKind::HsPhase => {
-            // No payload — opcode-only instruction.
         }
         InstructionKind::CustomData { .. } => {
             // Already handled in encode_instruction.
@@ -418,18 +383,20 @@ fn encode_operands(operands: &[Operand], out: &mut Vec<u32>) {
 /// Encode a single operand token and its index/immediate data.
 fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
     let op_type_val = op.reg_type.to_u32();
-    let index_dim = op.indices.len() as u32;
+    let index_dim = wire_u32(op.indices.len());
 
     let num_components = op.components.num_components();
     let sel_bits = match &op.components {
         ComponentSelect::ZeroComponent | ComponentSelect::OneComponent => 0u32,
-        ComponentSelect::Mask(m) => (*m as u32) << 4,
+        ComponentSelect::Mask(m) => u32::from(*m) << 4,
         ComponentSelect::Swizzle(s) => {
-            let swiz =
-                (s[0] as u32) | ((s[1] as u32) << 2) | ((s[2] as u32) << 4) | ((s[3] as u32) << 6);
+            let swiz = u32::from(s[0])
+                | (u32::from(s[1]) << 2)
+                | (u32::from(s[2]) << 4)
+                | (u32::from(s[3]) << 6);
             (1u32 << 2) | (swiz << 4)
         }
-        ComponentSelect::Scalar(c) => (2u32 << 2) | ((*c as u32) << 4),
+        ComponentSelect::Scalar(c) => (2u32 << 2) | (u32::from(*c) << 4),
     };
 
     let has_extended = op.negate || op.abs;
@@ -488,8 +455,8 @@ fn encode_index(idx: &OperandIndex, out: &mut Vec<u32>) {
     match idx {
         OperandIndex::Imm32(v) => out.push(*v),
         OperandIndex::Imm64(v) => {
-            out.push(*v as u32);
-            out.push((*v >> 32) as u32);
+            out.push(u32::try_from(*v & u64::from(u32::MAX)).expect("masked value fits in u32"));
+            out.push(u32::try_from(*v >> 32).expect("shifted value fits in u32"));
         }
         OperandIndex::Relative(sub) => encode_one_operand(sub, out),
         OperandIndex::RelativePlusImm(imm, sub) => {
@@ -505,9 +472,9 @@ fn encode_return_type_token(rt: &[ReturnType; 4]) -> u32 {
 }
 
 /// Convert a system value name string back to its `D3D10_SB_NAME` / `D3D11_SB_NAME` value.
+#[must_use]
 pub fn system_value_to_u32(name: &str) -> u32 {
     match name {
-        "undefined" => 0,
         "position" => 1,
         "clip_distance" => 2,
         "cull_distance" => 3,
@@ -537,7 +504,7 @@ pub fn system_value_to_u32(name: &str) -> u32 {
         "depth_less_equal" => 27,
         "stencil_ref" => 64,
         "inner_coverage" => 65,
-        _ => 0,
+        _ => 0, // Undefined and unrecognized system values.
     }
 }
 
@@ -549,9 +516,9 @@ fn build_extended_tokens(instr: &Instruction) -> Vec<u32> {
     let mut tokens: Vec<u32> = Vec::new();
 
     if let Some(offsets) = &instr.tex_offsets {
-        let u = (offsets[0] as u32) & 0xF;
-        let v = (offsets[1] as u32) & 0xF;
-        let w = (offsets[2] as u32) & 0xF;
+        let u = u32::from(offsets[0].to_ne_bytes()[0]) & 0xF;
+        let v = u32::from(offsets[1].to_ne_bytes()[0]) & 0xF;
+        let w = u32::from(offsets[2].to_ne_bytes()[0]) & 0xF;
         // Type 1 = D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS
         tokens.push(1 | (u << 9) | (v << 13) | (w << 17));
     }

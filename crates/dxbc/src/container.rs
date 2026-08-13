@@ -1,11 +1,15 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
 use crate::chunks::WritableChunk;
 
 const DXBC_MAGIC: &[u8; 4] = b"DXBC";
+
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("DXBC size or offset exceeds u32")
+}
 
 /// A parsed DXBC container with its chunk table.
 #[derive(Debug)]
@@ -35,13 +39,15 @@ pub struct DxbcChunk<'a> {
 }
 
 impl<'a> DxbcChunk<'a> {
-    /// Returns the FourCC as a UTF-8 string, or `"????"` if it contains
+    /// Returns the `FourCC` as a UTF-8 string, or `"????"` if it contains
     /// invalid bytes.
+    #[must_use]
     pub fn fourcc_str(&self) -> &str {
         core::str::from_utf8(&self.fourcc).unwrap_or("????")
     }
 
     /// Parse the raw chunk payload into a typed [`ChunkData`](crate::chunks::ChunkData).
+    #[must_use]
     pub fn parse(&self) -> crate::chunks::ChunkData<'a> {
         crate::chunks::parse_chunk(self)
     }
@@ -60,19 +66,20 @@ impl fmt::Display for DxbcContainer<'_> {
 }
 
 /// Scan a byte slice for all DXBC containers and parse them.
-pub fn scan_dxbc<'a>(data: &'a [u8]) -> Vec<DxbcContainer<'a>> {
+#[must_use]
+pub fn scan_dxbc(data: &[u8]) -> Vec<DxbcContainer<'_>> {
     let mut results = Vec::new();
     let mut pos = 0;
     while pos + 4 <= data.len() {
-        if let Some(offset) = find_magic(data, pos)
-            && let Some(container) = parse_dxbc(data, offset)
-        {
-            let end = offset + container.total_size as usize;
-            results.push(container);
-            pos = end;
-            continue;
-        }
-        break;
+        let Some(offset) = find_magic(data, pos) else {
+            break;
+        };
+        let Some(container) = parse_dxbc(data, offset) else {
+            break;
+        };
+        let end = offset + container.total_size as usize;
+        results.push(container);
+        pos = end;
     }
     results
 }
@@ -81,12 +88,12 @@ fn find_magic(data: &[u8], start: usize) -> Option<usize> {
     memchr::memmem::find(&data[start..], DXBC_MAGIC).map(|p| start + p)
 }
 
-fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
+fn parse_dxbc(data: &[u8], offset: usize) -> Option<DxbcContainer<'_>> {
     if offset + 0x20 > data.len() {
         return None;
     }
 
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     // Header: magic(4) hash(16) version(4) total_size(4) chunk_count(4).
     let mut header_hash = [0u8; 16];
     header_hash.copy_from_slice(&data[offset + 4..offset + 20]);
@@ -112,13 +119,16 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&data[chunk_abs..chunk_abs + 4]);
         c.seek(SeekFrom::Start((chunk_abs + 4) as u64)).ok()?;
-        let chunk_size = c.read_u32_le().ok()? as usize;
+        let chunk_size = c.read_u32_le().ok()?;
+        let chunk_size_usize = usize::try_from(chunk_size).ok()?;
         let chunk_data_start = chunk_abs + 8;
-        let chunk_data_end = (chunk_data_start + chunk_size).min(data.len());
+        let chunk_data_end = chunk_data_start
+            .checked_add(chunk_size_usize)?
+            .min(data.len());
 
         chunks.push(DxbcChunk {
             fourcc,
-            size: chunk_size as u32,
+            size: chunk_size,
             data: &data[chunk_data_start..chunk_data_end],
         });
     }
@@ -135,13 +145,14 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
 /// Build a DXBC container from a set of writable chunks.
 ///
 /// Produces a valid DXBC byte stream with the standard header layout:
-/// magic(4) + hash(16 zeros) + version(4) + total_size(4) + chunk_count(4)
+/// magic(4) + hash(16 zeros) + version(4) + `total_size(4)` + `chunk_count(4)`
 /// followed by the chunk offset table and chunk entries.
 ///
 /// The 16-byte hash field is left zeroed — computing the DXBC hash is a
 /// separate concern (typically only the GPU runtime validates it). Use
 /// [`build_dxbc_with_header`] to preserve an existing hash/version for
 /// byte-identical reconstruction.
+#[must_use]
 pub fn build_dxbc(chunks: &[WritableChunk]) -> Vec<u8> {
     build_dxbc_with_header(chunks, 1, &[0u8; 16])
 }
@@ -150,6 +161,7 @@ pub fn build_dxbc(chunks: &[WritableChunk]) -> Vec<u8> {
 /// header `hash`. The inverse of [`scan_dxbc`] for a single container: feeding
 /// a parsed container's chunks plus its `version`/`header_hash` reproduces the
 /// original bytes (for the standard contiguous chunk layout).
+#[must_use]
 pub fn build_dxbc_with_header(chunks: &[WritableChunk], version: u32, hash: &[u8; 16]) -> Vec<u8> {
     let header_size = 0x20 + chunks.len() * 4;
     let chunks_total: usize = chunks.iter().map(|c| 8 + c.data.len()).sum();
@@ -159,20 +171,20 @@ pub fn build_dxbc_with_header(chunks: &[WritableChunk], version: u32, hash: &[u8
     buf.extend_from_slice(b"DXBC");
     buf.extend_from_slice(hash);
     buf.extend_from_slice(&version.to_le_bytes());
-    buf.extend_from_slice(&(total_size as u32).to_le_bytes());
-    buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&wire_u32(total_size).to_le_bytes());
+    buf.extend_from_slice(&wire_u32(chunks.len()).to_le_bytes());
 
     // Chunk offset table
     let mut offset = header_size;
     for c in chunks {
-        buf.extend_from_slice(&(offset as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(offset).to_le_bytes());
         offset += 8 + c.data.len();
     }
 
     // Chunk entries: fourcc(4) + size(4) + payload
     for c in chunks {
         buf.extend_from_slice(&c.fourcc);
-        buf.extend_from_slice(&(c.data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(c.data.len()).to_le_bytes());
         buf.extend_from_slice(&c.data);
     }
 
@@ -216,21 +228,21 @@ mod tests {
         // Version = 1
         buf.extend_from_slice(&1u32.to_le_bytes());
         // Total size
-        buf.extend_from_slice(&(total_size as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(total_size).to_le_bytes());
         // Chunk count
-        buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(chunks.len()).to_le_bytes());
 
         // Chunk offset table
         let mut offset = header_size;
         for &(_, data) in chunks {
-            buf.extend_from_slice(&(offset as u32).to_le_bytes());
+            buf.extend_from_slice(&wire_u32(offset).to_le_bytes());
             offset += 8 + data.len();
         }
 
         // Chunk data
         for (i, &(fourcc, data)) in chunks.iter().enumerate() {
             buf.extend_from_slice(fourcc);
-            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&wire_u32(data.len()).to_le_bytes());
             buf.extend_from_slice(data);
             let _ = i;
         }

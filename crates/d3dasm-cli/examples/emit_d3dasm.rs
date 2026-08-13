@@ -5,7 +5,7 @@
 //! written per container, named `<stem>.<NN>.<profile>.d3dasm`. Every file is
 //! verified on the way out (assemble must reproduce the original container bytes).
 //!
-//! Usage: cargo run --release --example emit_d3dasm -- <out_dir> <files...>
+//! Usage: cargo run --release --example `emit_d3dasm` -- <`out_dir`> <files...>
 
 use std::path::Path;
 
@@ -29,8 +29,7 @@ fn main() {
         };
         let stem = Path::new(&arg)
             .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "shader".into());
+            .map_or_else(|| "shader".into(), |s| s.to_string_lossy().into_owned());
 
         for (idx, shader) in d3dasm::parse(&data).iter().enumerate() {
             let text = d3dasm::container_doc::serialize(shader);
@@ -38,14 +37,12 @@ fn main() {
             // Verify the document reassembles to the original container bytes.
             let start = shader.offset();
             let original = &data[start..start + shader.size() as usize];
-            let verified = d3dasm::container_doc::assemble(&text)
-                .map(|b| b == original)
-                .unwrap_or(false);
+            let verified = d3dasm::container_doc::assemble(&text).is_ok_and(|b| b == original);
 
-            let profile = shader
-                .program()
-                .map(|p| format!("{}_{}_{}", p.shader_type, p.major_version, p.minor_version))
-                .unwrap_or_else(|| "nocode".into());
+            let profile = shader.program().map_or_else(
+                || "nocode".into(),
+                |p| format!("{}_{}_{}", p.shader_type, p.major_version, p.minor_version),
+            );
             let name = format!("{stem}.{idx:02}.{profile}.d3dasm");
             let path = Path::new(&out_dir).join(&name);
 

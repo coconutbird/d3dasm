@@ -21,6 +21,7 @@ pub struct LibraryHeader {
 }
 
 /// Parse a LIBH chunk.
+#[must_use]
 pub fn parse_libh(data: &[u8]) -> Option<LibraryHeader> {
     Some(LibraryHeader {
         size: data.len(),

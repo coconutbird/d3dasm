@@ -46,11 +46,11 @@ pub mod grammar;
 /// Resolve cbuffer/resource register operands to source names (analysis layer).
 pub mod symbolicate;
 
+pub use grammar::shex::parse as assemble;
 /// Serialize a shader [`dxbc::Program`] to lossless `.d3dasm` text, and parse it
 /// back. These mirror the old `dxbc::{serialize,assemble}` entry points, which
 /// now live here alongside the rest of the `.d3dasm` grammar.
 pub use grammar::shex::{AsmError, serialize};
-pub use grammar::shex::parse as assemble;
 
 /// A parsed DXBC shader container with typed chunk access and formatting.
 ///
@@ -79,6 +79,7 @@ impl fmt::Debug for Shader<'_> {
 
 impl<'a> Shader<'a> {
     /// Wrap a [`DxbcContainer`]. No chunks are parsed until accessed.
+    #[must_use]
     pub fn from_container(container: DxbcContainer<'a>) -> Self {
         let parsed = (0..container.chunks.len())
             .map(|_| OnceCell::new())
@@ -102,16 +103,19 @@ impl<'a> Shader<'a> {
     }
 
     /// Byte offset of this container in the source file.
+    #[must_use]
     pub fn offset(&self) -> usize {
         self.container.offset_in_file
     }
 
     /// Total size of the DXBC container in bytes.
+    #[must_use]
     pub fn size(&self) -> u32 {
         self.container.total_size
     }
 
     /// The decoded shader program (SM4/SM5 instructions), if present.
+    #[must_use]
     pub fn program(&self) -> Option<&dxbc::shex::Program> {
         match self.find_by_fourcc(&[b"SHEX", b"SHDR"])? {
             ChunkData::Shader(p) => Some(p),
@@ -120,6 +124,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Resource definitions (constant buffers, bindings, creator string).
+    #[must_use]
     pub fn resource_def(&self) -> Option<&dxbc::chunks::ResourceDef<'a>> {
         match self.find_by_fourcc(&[b"RDEF"])? {
             ChunkData::Rdef(rd) => Some(rd),
@@ -128,6 +133,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Input signature elements.
+    #[must_use]
     pub fn input_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
         match self.find_by_fourcc(&[b"ISGN", b"ISG1"])? {
             ChunkData::InputSignature(s) => Some(s),
@@ -136,6 +142,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Output signature elements.
+    #[must_use]
     pub fn output_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
         match self.find_by_fourcc(&[b"OSGN", b"OSG1", b"OSG5"])? {
             ChunkData::OutputSignature(s) => Some(s),
@@ -144,6 +151,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Patch constant signature elements (hull/domain shaders).
+    #[must_use]
     pub fn patch_constant_signature(&self) -> Option<&dxbc::chunks::Signature<'a>> {
         match self.find_by_fourcc(&[b"PCSG", b"PSG1"])? {
             ChunkData::PatchConstantSignature(s) => Some(s),
@@ -152,6 +160,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Shader statistics (instruction counts, register usage, etc.).
+    #[must_use]
     pub fn stats(&self) -> Option<&dxbc::chunks::ShaderStats> {
         match self.find_by_fourcc(&[b"STAT"])? {
             ChunkData::Stats(s) => Some(s),
@@ -160,6 +169,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Shader hash (HASH or XHSH chunk).
+    #[must_use]
     pub fn hash(&self) -> Option<&dxbc::chunks::ShaderHash> {
         match self.find_by_fourcc(&[b"HASH", b"XHSH"])? {
             ChunkData::Hash(h) => Some(h),
@@ -168,6 +178,7 @@ impl<'a> Shader<'a> {
     }
 
     /// D3D12 root signature (RTS0 chunk).
+    #[must_use]
     pub fn root_signature(&self) -> Option<&dxbc::chunks::RootSignature> {
         match self.find_by_fourcc(&[b"RTS0"])? {
             ChunkData::RootSignature(rs) => Some(rs),
@@ -176,6 +187,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Shader feature info flags (SFI0 chunk).
+    #[must_use]
     pub fn feature_info(&self) -> Option<&dxbc::chunks::ShaderFeatureInfo> {
         match self.find_by_fourcc(&[b"SFI0"])? {
             ChunkData::FeatureInfo(fi) => Some(fi),
@@ -184,6 +196,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Debug name (ILDN chunk).
+    #[must_use]
     pub fn debug_name(&self) -> Option<&dxbc::chunks::DebugName<'_>> {
         match self.find_by_fourcc(&[b"ILDN"])? {
             ChunkData::DebugName(dn) => Some(dn),
@@ -192,6 +205,7 @@ impl<'a> Shader<'a> {
     }
 
     /// DXIL bytecode (SM6.0+, DXIL chunk).
+    #[must_use]
     pub fn dxil(&self) -> Option<&dxbc::chunks::DxilData<'_>> {
         match self.find_by_fourcc(&[b"DXIL"])? {
             ChunkData::Dxil(d) => Some(d),
@@ -200,6 +214,7 @@ impl<'a> Shader<'a> {
     }
 
     /// Access to the underlying [`DxbcContainer`] for advanced use.
+    #[must_use]
     pub fn container(&self) -> &DxbcContainer<'a> {
         &self.container
     }
@@ -351,7 +366,7 @@ fn fmt_signature(
     }
     let nw = elements
         .iter()
-        .map(|e| e.name_with_index_len())
+        .map(dxbc::chunks::SignatureElement::name_with_index_len)
         .max()
         .unwrap_or(4)
         .max(4);

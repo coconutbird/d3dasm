@@ -44,6 +44,7 @@ pub enum PSVShaderKind {
 
 impl PSVShaderKind {
     /// Converts a raw `u8` shader stage value to the corresponding variant.
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Pixel,
@@ -67,6 +68,7 @@ impl PSVShaderKind {
     }
 
     /// Returns the short display name (e.g. `"PS"`, `"VS"`, `"CS"`).
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Pixel => "PS",
@@ -90,7 +92,7 @@ impl PSVShaderKind {
     }
 }
 
-/// Shader-kind-specific data from the PSVRuntimeInfo union.
+/// Shader-kind-specific data from the `PSVRuntimeInfo` union.
 #[derive(Debug, Clone)]
 pub enum ShaderStageInfo {
     /// Vertex shader stage info.
@@ -180,7 +182,7 @@ pub struct PSVResourceBindInfo {
     pub res_flags: Option<u32>,
 }
 
-/// PSV signature element (12 bytes, PSVSignatureElement0).
+/// PSV signature element (12 bytes, `PSVSignatureElement0`).
 #[derive(Debug, Clone)]
 pub struct PSVSignatureElement {
     /// Offset into the string table for the semantic name.
@@ -205,7 +207,7 @@ pub struct PSVSignatureElement {
     pub reserved: u8,
 }
 
-/// v1+ fields from PSVRuntimeInfo1.
+/// v1+ fields from `PSVRuntimeInfo1`.
 #[derive(Debug, Clone, Default)]
 pub struct PSVRuntimeInfo1 {
     /// Shader stage (`PSVShaderKind` as `u8`).
@@ -226,7 +228,7 @@ pub struct PSVRuntimeInfo1 {
     pub sig_output_vectors: [u8; 4],
 }
 
-/// v2+ fields from PSVRuntimeInfo2.
+/// v2+ fields from `PSVRuntimeInfo2`.
 #[derive(Debug, Clone, Default)]
 pub struct PSVRuntimeInfo2 {
     /// Compute/mesh/amplification thread group X dimension.
@@ -272,9 +274,9 @@ pub struct PipelineStateValidation {
     pub sig_output_elements: Vec<PSVSignatureElement>,
     /// Patch constant or primitive signature elements.
     pub sig_patch_const_or_prim_elements: Vec<PSVSignatureElement>,
-    /// ViewID output masks per stream (up to 4, each a `Vec<u32>`).
+    /// `ViewID` output masks per stream (up to 4, each a `Vec<u32>`).
     pub view_id_output_masks: Vec<Vec<u32>>,
-    /// ViewID patch constant / primitive output mask (HS/MS only).
+    /// `ViewID` patch constant / primitive output mask (HS/MS only).
     pub view_id_pc_or_prim_output_mask: Vec<u32>,
     /// Input-to-output dependency tables per stream.
     pub input_to_output_tables: Vec<Vec<u32>>,

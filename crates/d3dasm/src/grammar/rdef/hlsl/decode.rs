@@ -5,7 +5,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::*;
+use super::{
+    bind_flags_from, derived_binding_flags, derived_var_size, dim_from_hlsl, hlsl_type_name,
+    is_sm5, is_texture, natural_size, packoffset_parse, parse_default, parse_hlsl_type,
+    ret_from_hlsl, split_name, type_size,
+};
 use dxbc::chunks::rdef::{
     CBufferDef, CBufferVariable, MemberDesc, ResourceBinding, ResourceDef, SLOT_UNUSED, SVF_USED,
     TypeDesc,
@@ -46,10 +50,18 @@ fn hex_bytes(h: &str) -> Option<Vec<u8>> {
     while i < b.len() {
         let hi = (b[i] as char).to_digit(16)?;
         let lo = (b[i + 1] as char).to_digit(16)?;
-        out.push((hi * 16 + lo) as u8);
+        out.push(u8::try_from(hi * 16 + lo).ok()?);
         i += 2;
     }
     Some(out)
+}
+
+fn parse_signed_u32(value: &str) -> Option<u32> {
+    if let Ok(unsigned) = value.parse::<u32>() {
+        return Some(unsigned);
+    }
+    let signed = value.parse::<i32>().ok()?;
+    Some(u32::from_ne_bytes(signed.to_ne_bytes()))
 }
 
 /// Resolve a type reference token (possibly `row_major`-qualified, with `[N]`)
@@ -141,7 +153,7 @@ fn parse_binding(line: &str) -> Option<ResourceBinding<'static>> {
         }
     } else {
         match m.get("samples") {
-            Some(s) => s.parse::<i64>().ok()? as u32,
+            Some(s) => parse_signed_u32(s)?,
             None => 0,
         }
     };
@@ -228,8 +240,8 @@ fn parse_var_tail<'a>(toks: impl Iterator<Item = &'a str> + Clone) -> Option<Var
         .and_then(|i| toks.get(i + 1))
         .map(|s| String::from(*s));
     let pair = |s: &str| -> Option<(u32, u32)> {
-        let (a, b) = s.split_once(',')?;
-        Some((a.parse::<i32>().ok()? as u32, b.parse().ok()?))
+        let (start, count) = s.split_once(',')?;
+        Some((parse_signed_u32(start)?, count.parse().ok()?))
     };
     Some(VarTail {
         size: match m.get("size") {
@@ -257,369 +269,421 @@ fn parse_var_tail<'a>(toks: impl Iterator<Item = &'a str> + Clone) -> Option<Var
     })
 }
 
-/// Parse HLSL text produced by [`rdef_to_hlsl`] back into an owned RDEF.
-pub fn rdef_from_hlsl(text: &str) -> Option<ResourceDef<'static>> {
-    let mut rd = ResourceDef {
-        constant_buffers: Vec::new(),
-        bindings: Vec::new(),
-        creator: Cow::Owned(String::new()),
-        target_version: 0,
-        compile_flags: 0,
-        rd11_extra: None,
+struct StructHeader {
+    name: String,
+    class: u16,
+    var_type: u16,
+    rows: Option<u16>,
+    columns: Option<u16>,
+    sm5: Option<[u32; 4]>,
+}
+
+enum Block {
+    Struct(StructHeader, Vec<MemberDesc<'static>>),
+    Cbuffer,
+}
+
+struct HlslParser {
+    resource_def: ResourceDef<'static>,
+    structs: BTreeMap<String, TypeDesc<'static>>,
+    block: Option<Block>,
+    sm5: bool,
+    pending_buffers: Vec<CBufferDef<'static>>,
+    buffer_order: Option<Vec<String>>,
+    merged_mode: bool,
+}
+
+fn parse_struct_member(
+    line: &str,
+    members: &mut Vec<MemberDesc<'static>>,
+    structs: &BTreeMap<String, TypeDesc<'static>>,
+    sm5: bool,
+) -> Option<()> {
+    let body = line.strip_suffix(';').unwrap_or(line);
+    let mut tokens = body.split_whitespace();
+    let mut type_token = tokens.next()?;
+    let row_major = type_token == "row_major";
+    if row_major {
+        type_token = tokens.next()?;
+    }
+    let member_token = tokens.next()?;
+    let (member_name, array_count) = split_name(member_token)?;
+    let rest: Vec<&str> = tokens.collect();
+    let offset = match rest.iter().find_map(|token| token.strip_prefix('+')) {
+        Some(value) => value.parse().ok()?,
+        None => members.last().map_or(0, |member| {
+            member.offset + natural_size(&member.member_type).unwrap_or(0)
+        }),
     };
-    let mut structs: BTreeMap<String, TypeDesc<'static>> = BTreeMap::new();
-
-    // State while inside a `struct { ... }` or `cbuffer { ... }` block.
-    struct StructHdr {
-        name: String,
-        class: u16,
-        var_type: u16,
-        rows: Option<u16>,
-        cols: Option<u16>,
-        sm5: Option<[u32; 4]>,
+    let fields = kv(rest.iter().copied());
+    let mut member_type = resolve_type(type_token, row_major, structs, sm5)?;
+    if array_count > 0 {
+        member_type.elements = array_count;
     }
-    enum Block {
-        Struct(StructHdr, Vec<MemberDesc<'static>>),
-        Cbuffer,
+    if let Some(value) = fields.get("sm5") {
+        member_type.sm5_extra = Some(parse_sm5(value)?);
     }
-    let mut block: Option<Block> = None;
-    let mut sm5 = false;
-    // Resource (kind != 0) defs reconstructed in merged mode, appended after all
-    // regular cbuffer defs to reproduce fxc's def-array order.
-    let mut resource_defs: Vec<CBufferDef<'static>> = Vec::new();
-    // Explicit cbuffer-def order (merged mode, when it differs from the natural
-    // reconstructed order).
-    let mut cb_order: Option<Vec<String>> = None;
-
-    // Merged mode: every cbuffer layout block carries a register, so resource
-    // (structured-buffer) defs aren't written out and must be reconstructed
-    // from their `StructuredBuffer<T>` declarations. (Two-section mode has
-    // register-less `cbuffer N {..}` blocks for them instead.)
-    let merged_mode = !text.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with("cbuffer ") && l.ends_with('{') && !l.contains(": register(")
+    members.push(MemberDesc {
+        name: Cow::Owned(String::from(member_name)),
+        member_type,
+        offset,
     });
+    Some(())
+}
 
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
+fn parse_cbuffer_variable(
+    line: &str,
+    resource_def: &mut ResourceDef<'static>,
+    structs: &BTreeMap<String, TypeDesc<'static>>,
+    sm5: bool,
+) -> Option<()> {
+    let body = line.strip_suffix(';').unwrap_or(line);
+    let mut tokens = body.split_whitespace();
+    let mut type_token = tokens.next()?;
+    let row_major = type_token == "row_major";
+    if row_major {
+        type_token = tokens.next()?;
+    }
+    let variable_token = tokens.next()?;
+    let (variable_name, array_count) = split_name(variable_token)?;
+    tokens.next()?;
+    let packoffset_token = tokens.next()?;
+    let packoffset = packoffset_token
+        .strip_prefix("packoffset(")
+        .and_then(|value| value.split(')').next())?;
+    let offset = packoffset_parse(packoffset)?;
+    let tail = parse_var_tail(tokens)?;
+    let mut variable_type = resolve_type(type_token, row_major, structs, sm5)?;
+    if array_count > 0 {
+        variable_type.elements = array_count;
+    }
+    if let Some(extra) = tail.sm5 {
+        variable_type.sm5_extra = Some(extra);
+    }
+    let size = match tail.size {
+        Some(size) => size,
+        None => derived_var_size(&variable_type)?,
+    };
+    let default_value = match &tail.default_init {
+        Some(initializer) => parse_default(&variable_type, initializer)?,
+        None => tail.default,
+    };
+    let buffer = resource_def.constant_buffers.last_mut()?;
+    buffer.variables.push(CBufferVariable {
+        name: Cow::Owned(String::from(variable_name)),
+        offset,
+        size,
+        flags: tail.flags.unwrap_or(0),
+        var_type: variable_type,
+        default_value: Cow::Owned(default_value),
+        texture_start: tail
+            .tex
+            .map(|value| value.0)
+            .or(if sm5 { Some(SLOT_UNUSED) } else { None }),
+        texture_size: tail
+            .tex
+            .map(|value| value.1)
+            .or(if sm5 { Some(0) } else { None }),
+        sampler_start: tail.samp.map(|value| value.0).or(if sm5 {
+            Some(SLOT_UNUSED)
+        } else {
+            None
+        }),
+        sampler_size: tail
+            .samp
+            .map(|value| value.1)
+            .or(if sm5 { Some(0) } else { None }),
+    });
+    Some(())
+}
+
+impl HlslParser {
+    fn new(text: &str) -> Self {
+        let merged_mode = !text.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("cbuffer ") && line.ends_with('{') && !line.contains(": register(")
+        });
+        Self {
+            resource_def: ResourceDef {
+                constant_buffers: Vec::new(),
+                bindings: Vec::new(),
+                creator: Cow::Owned(String::new()),
+                target_version: 0,
+                compile_flags: 0,
+                rd11_extra: None,
+            },
+            structs: BTreeMap::new(),
+            block: None,
+            sm5: false,
+            pending_buffers: Vec::new(),
+            buffer_order: None,
+            merged_mode,
         }
-        // End of a block.
+    }
+
+    fn parse_line(&mut self, line: &str) -> Option<()> {
         if line == "}" || line == "};" {
-            match block.take()? {
-                Block::Struct(hdr, members) => {
-                    // Derive rows=1 and cols=size/4 unless overridden.
-                    let struct_size: u32 = members
-                        .iter()
-                        .filter_map(|m| natural_size(&m.member_type).map(|s| m.offset + s))
-                        .max()
-                        .unwrap_or(0);
-                    let td = TypeDesc {
-                        class: hdr.class,
-                        var_type: hdr.var_type,
-                        rows: hdr.rows.unwrap_or(1),
-                        columns: hdr.cols.unwrap_or((struct_size / 4) as u16),
-                        elements: 0,
-                        members,
-                        sm5_extra: hdr.sm5.or(if sm5 { Some([0; 4]) } else { None }),
-                        name: Cow::Owned(hdr.name.clone()),
-                    };
-                    structs.insert(hdr.name, td);
-                }
-                Block::Cbuffer => {}
-            }
-            continue;
+            return self.close_block();
         }
+        if self.block.is_some() {
+            return self.parse_block_line(line);
+        }
+        if self.parse_metadata(line)? {
+            return Some(());
+        }
+        self.parse_top_level(line)
+    }
 
-        // Inside a block: member or variable line (ends with `;`).
-        if let Some(b) = &mut block {
-            match b {
-                Block::Struct(_, members) => {
-                    // `<type> <name> [+<offset>] [sm5=..];` — offset defaults to
-                    // the running tight-packed position.
-                    let body = line.strip_suffix(';').unwrap_or(line);
-                    let mut toks = body.split_whitespace();
-                    let mut t0 = toks.next()?;
-                    let row_major = t0 == "row_major";
-                    if row_major {
-                        t0 = toks.next()?;
-                    }
-                    let mname_tok = toks.next()?;
-                    let (mname, arr) = split_name(mname_tok)?;
-                    let rest: Vec<&str> = toks.collect();
-                    let offset: u32 = match rest.iter().find_map(|t| t.strip_prefix('+')) {
-                        Some(s) => s.parse().ok()?,
-                        None => members
-                            .last()
-                            .map(|m| m.offset + natural_size(&m.member_type).unwrap_or(0))
-                            .unwrap_or(0),
-                    };
-                    let m = kv(rest.iter().copied());
-                    let mut mt = resolve_type(t0, row_major, &structs, sm5)?;
-                    if arr > 0 {
-                        mt.elements = arr;
-                    }
-                    if let Some(s) = m.get("sm5") {
-                        mt.sm5_extra = Some(parse_sm5(s)?);
-                    }
-                    members.push(MemberDesc {
-                        name: Cow::Owned(String::from(mname)),
-                        member_type: mt,
-                        offset,
-                    });
-                }
-                Block::Cbuffer => {
-                    let body = line.strip_suffix(';').unwrap_or(line);
-                    let mut toks = body.split_whitespace();
-                    let mut t0 = toks.next()?;
-                    let row_major = t0 == "row_major";
-                    if row_major {
-                        t0 = toks.next()?;
-                    }
-                    let vname_tok = toks.next()?;
-                    let (vname, arr) = split_name(vname_tok)?;
-                    // Expect `: packoffset(...)`.
-                    let _colon = toks.next()?; // ":"
-                    let po_tok = toks.next()?; // "packoffset(cN...)"
-                    let po = po_tok
-                        .strip_prefix("packoffset(")
-                        .and_then(|s| s.split(')').next())?;
-                    let offset = packoffset_parse(po)?;
-                    let tail = parse_var_tail(toks)?;
-                    let mut vt = resolve_type(t0, row_major, &structs, sm5)?;
-                    if arr > 0 {
-                        vt.elements = arr;
-                    }
-                    if let Some(e) = tail.sm5 {
-                        vt.sm5_extra = Some(e);
-                    }
-                    let size = match tail.size {
-                        Some(s) => s,
-                        None => derived_var_size(&vt)?,
-                    };
-                    let default = match &tail.default_init {
-                        Some(init) => parse_default(&vt, init)?,
-                        None => tail.default,
-                    };
-                    let cb = rd.constant_buffers.last_mut()?;
-                    cb.variables.push(CBufferVariable {
-                        name: Cow::Owned(String::from(vname)),
-                        offset,
-                        size,
-                        flags: tail.flags.unwrap_or(0),
-                        var_type: vt,
-                        default_value: Cow::Owned(default),
-                        texture_start: tail.tex.map(|t| t.0).or(if sm5 {
-                            Some(SLOT_UNUSED)
-                        } else {
-                            None
-                        }),
-                        texture_size: tail.tex.map(|t| t.1).or(if sm5 { Some(0) } else { None }),
-                        sampler_start: tail.samp.map(|t| t.0).or(if sm5 {
-                            Some(SLOT_UNUSED)
-                        } else {
-                            None
-                        }),
-                        sampler_size: tail.samp.map(|t| t.1).or(if sm5 { Some(0) } else { None }),
-                    });
-                }
+    fn close_block(&mut self) -> Option<()> {
+        match self.block.take()? {
+            Block::Struct(header, members) => {
+                let struct_size = members
+                    .iter()
+                    .filter_map(|member| {
+                        natural_size(&member.member_type).map(|size| member.offset + size)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let columns = match header.columns {
+                    Some(columns) => columns,
+                    None => u16::try_from(struct_size / 4).ok()?,
+                };
+                let descriptor = TypeDesc {
+                    class: header.class,
+                    var_type: header.var_type,
+                    rows: header.rows.unwrap_or(1),
+                    columns,
+                    elements: 0,
+                    members,
+                    sm5_extra: header.sm5.or(if self.sm5 { Some([0; 4]) } else { None }),
+                    name: Cow::Owned(header.name.clone()),
+                };
+                self.structs.insert(header.name, descriptor);
             }
-            continue;
+            Block::Cbuffer => {}
         }
+        Some(())
+    }
 
-        // Header tags (`key=value`).
-        if let Some(v) = line.strip_prefix("target=") {
-            rd.target_version = parse_hex0x(v.trim())?;
-            sm5 = is_sm5(rd.target_version);
-            continue;
+    fn parse_block_line(&mut self, line: &str) -> Option<()> {
+        if let Some(Block::Struct(_, members)) = &mut self.block {
+            return parse_struct_member(line, members, &self.structs, self.sm5);
         }
-        if let Some(v) = line.strip_prefix("flags=") {
-            rd.compile_flags = parse_hex0x(v.trim())?;
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("creator=") {
-            rd.creator = Cow::Owned(String::from(v));
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("rd11=") {
-            let mut a = [0u32; 8];
-            let mut it = v.split(',');
-            for slot in &mut a {
-                *slot = u32::from_str_radix(it.next()?.trim(), 16).ok()?;
+        parse_cbuffer_variable(line, &mut self.resource_def, &self.structs, self.sm5)
+    }
+
+    fn parse_metadata(&mut self, line: &str) -> Option<bool> {
+        if let Some(value) = line.strip_prefix("target=") {
+            self.resource_def.target_version = parse_hex0x(value.trim())?;
+            self.sm5 = is_sm5(self.resource_def.target_version);
+        } else if let Some(value) = line.strip_prefix("flags=") {
+            self.resource_def.compile_flags = parse_hex0x(value.trim())?;
+        } else if let Some(value) = line.strip_prefix("creator=") {
+            self.resource_def.creator = Cow::Owned(String::from(value));
+        } else if let Some(value) = line.strip_prefix("rd11=") {
+            let mut extra = [0u32; 8];
+            let mut values = value.split(',');
+            for slot in &mut extra {
+                *slot = u32::from_str_radix(values.next()?.trim(), 16).ok()?;
             }
-            rd.rd11_extra = Some(a);
-            continue;
+            self.resource_def.rd11_extra = Some(extra);
+        } else {
+            return Some(false);
         }
+        Some(true)
+    }
 
-        // Other top-level directives.
+    fn parse_top_level(&mut self, line: &str) -> Option<()> {
         let (head, rest) = line.split_once(' ').unwrap_or((line, ""));
         match head {
             "cborder" => {
-                cb_order = Some(rest.split_whitespace().map(String::from).collect());
+                self.buffer_order = Some(rest.split_whitespace().map(String::from).collect());
+                Some(())
             }
-            "struct" => {
-                // `struct Name [class=..] [vtype=..] [rows=..] [cols=..] [sm5=..] {`
-                let inner = rest.trim_end_matches('{').trim();
-                let mut it = inner.split_whitespace();
-                let name = it.next()?;
-                let m = kv(it);
-                let hdr = StructHdr {
-                    name: String::from(name),
-                    class: match m.get("class") {
-                        Some(s) => s.parse().ok()?,
-                        None => 5,
-                    },
-                    var_type: match m.get("vtype") {
-                        Some(s) => s.parse().ok()?,
-                        None => 0,
-                    },
-                    rows: match m.get("rows") {
-                        Some(s) => Some(s.parse().ok()?),
-                        None => None,
-                    },
-                    cols: match m.get("cols") {
-                        Some(s) => Some(s.parse().ok()?),
-                        None => None,
-                    },
-                    sm5: match m.get("sm5") {
-                        Some(s) => Some(parse_sm5(s)?),
-                        None => None,
-                    },
-                };
-                block = Some(Block::Struct(hdr, Vec::new()));
-            }
-            "cbuffer" => {
-                // Three shapes: a merged block `cbuffer N : register(bN) {` (a
-                // binding *and* its layout), a two-section layout block
-                // `cbuffer N [kind=..] [cbflags=..] {`, or a two-section binding
-                // line `cbuffer N : register(bN);`.
-                if line.ends_with('{') {
-                    let inner = rest.trim_end_matches('{').trim();
-                    let mut it = inner.split_whitespace();
-                    let name = it.next()?;
-                    let toks: Vec<&str> = it.collect();
-                    let m = kv(toks.iter().copied());
-                    if let Some(reg) = toks.iter().find_map(|t| {
-                        t.strip_prefix("register(")
-                            .and_then(|s| s.strip_suffix(')'))
-                    }) {
-                        // Merged: emit both the binding and the layout def.
-                        let slot: u32 = reg.get(1..)?.parse().ok()?;
-                        rd.bindings.push(ResourceBinding {
-                            name: Cow::Owned(String::from(name)),
-                            input_type: 0,
-                            return_type: 0,
-                            dimension: 0,
-                            num_samples: 0,
-                            bind_point: slot,
-                            bind_count: 1,
-                            flags: match m.get("flags") {
-                                Some(s) => bind_flags_from(s)?,
-                                None => 0,
-                            },
-                        });
-                    }
-                    rd.constant_buffers.push(CBufferDef {
-                        name: Cow::Owned(String::from(name)),
-                        variables: Vec::new(),
-                        size: 0, // patched below
-                        flags: match m.get("cbflags") {
-                            Some(s) => u32::from_str_radix(s, 16).ok()?,
-                            None => 0,
-                        },
-                        cb_type: match m.get("kind") {
-                            Some(s) => s.parse().ok()?,
-                            None => 0,
-                        },
-                    });
-                    block = Some(Block::Cbuffer);
-                } else {
-                    rd.bindings.push(parse_binding(line)?);
-                }
-            }
-            // Any other head is a resource-binding declaration.
-            _ => {
-                rd.bindings.push(parse_binding(line)?);
-                // In merged mode, a structured-buffer binding implies a resource
-                // def; reconstruct it from the declared element type `<T>`.
-                let (input_type, bname) = {
-                    let b = rd.bindings.last()?;
-                    (b.input_type, b.name.clone())
-                };
-                if merged_mode && matches!(input_type, 5 | 6 | 9 | 10 | 11) {
-                    let spec = line.split_whitespace().next()?;
-                    let elem = spec
-                        .split_once('<')
-                        .and_then(|(_, r)| r.strip_suffix('>'))?;
-                    let et = resolve_type(elem, false, &structs, sm5)?;
-                    let size = type_size(&et);
-                    resource_defs.push(CBufferDef {
-                        name: bname,
-                        variables: alloc::vec![CBufferVariable {
-                            name: Cow::Owned(String::from("$Element")),
-                            offset: 0,
-                            size,
-                            flags: SVF_USED,
-                            var_type: et,
-                            default_value: Cow::Owned(Vec::new()),
-                            texture_start: if sm5 { Some(SLOT_UNUSED) } else { None },
-                            texture_size: if sm5 { Some(0) } else { None },
-                            sampler_start: if sm5 { Some(SLOT_UNUSED) } else { None },
-                            sampler_size: if sm5 { Some(0) } else { None },
-                        }],
-                        size,
-                        flags: 0,
-                        cb_type: 3,
-                    });
-                }
-            }
+            "struct" => self.open_struct(rest),
+            "cbuffer" => self.parse_cbuffer(line, rest),
+            _ => self.parse_resource(line),
         }
     }
 
-    // Reconstructed resource defs follow all regular cbuffer defs.
-    rd.constant_buffers.append(&mut resource_defs);
-    // Apply an explicit def order when fxc's differed from the natural one.
-    if let Some(order) = &cb_order {
-        rd.constant_buffers.sort_by_key(|cb| {
-            order
-                .iter()
-                .position(|n| n.as_str() == cb.name.as_ref())
-                .unwrap_or(usize::MAX)
+    fn open_struct(&mut self, rest: &str) -> Option<()> {
+        let inner = rest.trim_end_matches('{').trim();
+        let mut tokens = inner.split_whitespace();
+        let name = tokens.next()?;
+        let fields = kv(tokens);
+        let rows = match fields.get("rows") {
+            Some(value) => Some(value.parse().ok()?),
+            None => None,
+        };
+        let columns = match fields.get("cols") {
+            Some(value) => Some(value.parse().ok()?),
+            None => None,
+        };
+        let sm5 = match fields.get("sm5") {
+            Some(value) => Some(parse_sm5(value)?),
+            None => None,
+        };
+        self.block = Some(Block::Struct(
+            StructHeader {
+                name: String::from(name),
+                class: fields
+                    .get("class")
+                    .map_or(Some(5), |value| value.parse().ok())?,
+                var_type: fields
+                    .get("vtype")
+                    .map_or(Some(0), |value| value.parse().ok())?,
+                rows,
+                columns,
+                sm5,
+            },
+            Vec::new(),
+        ));
+        Some(())
+    }
+
+    fn parse_cbuffer(&mut self, line: &str, rest: &str) -> Option<()> {
+        if !line.ends_with('{') {
+            self.resource_def.bindings.push(parse_binding(line)?);
+            return Some(());
+        }
+        let inner = rest.trim_end_matches('{').trim();
+        let mut tokens = inner.split_whitespace();
+        let name = tokens.next()?;
+        let tokens: Vec<&str> = tokens.collect();
+        let fields = kv(tokens.iter().copied());
+        if let Some(register) = tokens.iter().find_map(|token| {
+            token
+                .strip_prefix("register(")
+                .and_then(|value| value.strip_suffix(')'))
+        }) {
+            let slot = register.get(1..)?.parse().ok()?;
+            self.resource_def.bindings.push(ResourceBinding {
+                name: Cow::Owned(String::from(name)),
+                input_type: 0,
+                return_type: 0,
+                dimension: 0,
+                num_samples: 0,
+                bind_point: slot,
+                bind_count: 1,
+                flags: fields
+                    .get("flags")
+                    .map_or(Some(0), |value| bind_flags_from(value))?,
+            });
+        }
+        self.resource_def.constant_buffers.push(CBufferDef {
+            name: Cow::Owned(String::from(name)),
+            variables: Vec::new(),
+            size: 0,
+            flags: fields
+                .get("cbflags")
+                .map_or(Some(0), |value| u32::from_str_radix(value, 16).ok())?,
+            cb_type: fields
+                .get("kind")
+                .map_or(Some(0), |value| value.parse().ok())?,
         });
+        self.block = Some(Block::Cbuffer);
+        Some(())
     }
 
-    // Constant-buffer `size` is the byte span of its variables. Regular
-    // cbuffers (kind 0) round up to a 16-byte register; resource cbuffers
-    // (structured-buffer `$Element`, kind != 0) use the exact struct size.
-    for cb in &mut rd.constant_buffers {
-        let mut end = 0u32;
-        for v in &cb.variables {
-            end = end.max(v.offset + v.size);
+    fn parse_resource(&mut self, line: &str) -> Option<()> {
+        self.resource_def.bindings.push(parse_binding(line)?);
+        let binding = self.resource_def.bindings.last()?;
+        if !self.merged_mode || !matches!(binding.input_type, 5 | 6 | 9 | 10 | 11) {
+            return Some(());
         }
-        cb.size = if cb.cb_type == 0 {
+        let element = line
+            .split_whitespace()
+            .next()?
+            .split_once('<')
+            .and_then(|(_, rest)| rest.strip_suffix('>'))?;
+        let element_type = resolve_type(element, false, &self.structs, self.sm5)?;
+        let size = type_size(&element_type);
+        self.pending_buffers.push(CBufferDef {
+            name: binding.name.clone(),
+            variables: alloc::vec![CBufferVariable {
+                name: Cow::Owned(String::from("$Element")),
+                offset: 0,
+                size,
+                flags: SVF_USED,
+                var_type: element_type,
+                default_value: Cow::Owned(Vec::new()),
+                texture_start: if self.sm5 { Some(SLOT_UNUSED) } else { None },
+                texture_size: if self.sm5 { Some(0) } else { None },
+                sampler_start: if self.sm5 { Some(SLOT_UNUSED) } else { None },
+                sampler_size: if self.sm5 { Some(0) } else { None },
+            }],
+            size,
+            flags: 0,
+            cb_type: 3,
+        });
+        Some(())
+    }
+
+    fn finish(mut self) -> ResourceDef<'static> {
+        self.resource_def
+            .constant_buffers
+            .append(&mut self.pending_buffers);
+        if let Some(order) = &self.buffer_order {
+            self.resource_def.constant_buffers.sort_by_key(|buffer| {
+                order
+                    .iter()
+                    .position(|name| name.as_str() == buffer.name.as_ref())
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        update_buffer_sizes(&mut self.resource_def.constant_buffers);
+        update_binding_strides(&mut self.resource_def);
+        self.resource_def
+    }
+}
+
+fn update_buffer_sizes(buffers: &mut [CBufferDef<'_>]) {
+    for buffer in buffers {
+        let end = buffer
+            .variables
+            .iter()
+            .map(|variable| variable.offset + variable.size)
+            .max()
+            .unwrap_or(0);
+        buffer.size = if buffer.cb_type == 0 {
             end.div_ceil(16) * 16
         } else {
             end
         };
     }
+}
 
-    // A structured-buffer binding's stride (num_samples) is sizeof(element),
-    // derived from its matching resource def's `$Element` type.
-    let strides: Vec<(usize, u32)> = rd
+fn update_binding_strides(resource_def: &mut ResourceDef<'_>) {
+    let strides: Vec<(usize, u32)> = resource_def
         .bindings
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.input_type, 5 | 6 | 9 | 10 | 11) && b.num_samples == 0)
-        .filter_map(|(i, b)| {
-            let cb = rd.constant_buffers.iter().find(|c| c.name == b.name)?;
-            let v = cb.variables.first()?;
-            Some((i, type_size(&v.var_type)))
+        .filter(|(_, binding)| {
+            matches!(binding.input_type, 5 | 6 | 9 | 10 | 11) && binding.num_samples == 0
+        })
+        .filter_map(|(index, binding)| {
+            let buffer = resource_def
+                .constant_buffers
+                .iter()
+                .find(|buffer| buffer.name == binding.name)?;
+            let variable = buffer.variables.first()?;
+            Some((index, type_size(&variable.var_type)))
         })
         .collect();
-    for (i, s) in strides {
-        rd.bindings[i].num_samples = s;
+    for (index, stride) in strides {
+        resource_def.bindings[index].num_samples = stride;
     }
+}
 
-    Some(rd)
+/// Parse HLSL text produced by [`super::rdef_to_hlsl`] back into an owned RDEF.
+#[must_use]
+pub fn rdef_from_hlsl(text: &str) -> Option<ResourceDef<'static>> {
+    let mut parser = HlslParser::new(text);
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if !line.is_empty() {
+            parser.parse_line(line)?;
+        }
+    }
+    Some(parser.finish())
 }

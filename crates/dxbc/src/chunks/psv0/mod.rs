@@ -4,9 +4,9 @@
 //! state against the shader's requirements. The format is versioned:
 //!   - v0: 24-byte runtime info (no signature data)
 //!   - v1: 36-byte runtime info + string table + semantic index table + sig elements + masks
-//!   - v2: 48-byte runtime info (adds NumThreads) + v2 resource bind info (24 bytes)
-//!   - v3: 52-byte runtime info (adds EntryFunctionName)
-//!   - v4: 56-byte runtime info (adds NumBytesGroupSharedMemory)
+//!   - v2: 48-byte runtime info (adds `NumThreads`) + v2 resource bind info (24 bytes)
+//!   - v3: 52-byte runtime info (adds `EntryFunctionName`)
+//!   - v4: 56-byte runtime info (adds `NumBytesGroupSharedMemory`)
 
 pub mod parse;
 pub mod types;
@@ -67,8 +67,10 @@ impl fmt::Display for PipelineStateValidation {
             self.sig_output_elements.len(),
             self.sig_patch_const_or_prim_elements.len(),
         )?;
-        if let Some(ref ri1) = self.runtime_info_1
-            && ri1.uses_view_id != 0
+        if self
+            .runtime_info_1
+            .as_ref()
+            .is_some_and(|info| info.uses_view_id != 0)
         {
             writeln!(f, "//   uses ViewID")?;
         }

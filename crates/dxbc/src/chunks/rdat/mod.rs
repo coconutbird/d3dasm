@@ -63,8 +63,7 @@ impl fmt::Display for RuntimeData {
                     records,
                 } => {
                     let name = types::PartType::from_u32(*part_type)
-                        .map(|pt| pt.name())
-                        .unwrap_or("Unknown");
+                        .map_or("Unknown", types::PartType::name);
                     writeln!(
                         f,
                         "//   [{i}] {name} ({} records, stride {})",

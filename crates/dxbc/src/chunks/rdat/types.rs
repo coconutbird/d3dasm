@@ -37,6 +37,7 @@ pub enum PartType {
 
 impl PartType {
     /// Converts a raw `u32` part type value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Invalid,
@@ -56,7 +57,8 @@ impl PartType {
     }
 
     /// Whether this part type uses the record-table layout
-    /// (RuntimeDataTableHeader { count, stride } followed by records).
+    /// (`RuntimeDataTableHeader` { count, stride } followed by records).
+    #[must_use]
     pub fn is_record_table(self) -> bool {
         matches!(
             self,
@@ -72,6 +74,7 @@ impl PartType {
     }
 
     /// Returns the display name string for this part type.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Invalid => "Invalid",

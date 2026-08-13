@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
 /// Parsed LFS0 (library function signatures) chunk.
 #[derive(Debug, Clone)]
@@ -25,9 +25,10 @@ pub struct LibraryFunctionSignatures {
 }
 
 /// Parse an LFS0 chunk.
+#[must_use]
 pub fn parse_lfs0(data: &[u8]) -> Option<LibraryFunctionSignatures> {
     let signature_count = if data.len() >= 4 {
-        let mut c = SliceCursor::new(data);
+        let mut c = Cursor::new(data);
         Some(c.read_u32_le().ok()?)
     } else {
         None
@@ -59,7 +60,7 @@ impl fmt::Display for LibraryFunctionSignatures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "// Library Function Signatures: ")?;
         if let Some(count) = self.signature_count {
-            write!(f, "{} entries", count)?;
+            write!(f, "{count} entries")?;
         } else {
             write!(f, "empty")?;
         }

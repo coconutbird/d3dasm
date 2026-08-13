@@ -19,65 +19,75 @@ const S: [u32; 64] = [
 /// Per-round additive constants (standard MD5: floor(2^32 * abs(sin(i+1)))).
 #[rustfmt::skip]
 const K: [u32; 64] = [
-    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    0xd76a_a478, 0xe8c7_b756, 0x2420_70db, 0xc1bd_ceee,
+    0xf57c_0faf, 0x4787_c62a, 0xa830_4613, 0xfd46_9501,
+    0x6980_98d8, 0x8b44_f7af, 0xffff_5bb1, 0x895c_d7be,
+    0x6b90_1122, 0xfd98_7193, 0xa679_438e, 0x49b4_0821,
+    0xf61e_2562, 0xc040_b340, 0x265e_5a51, 0xe9b6_c7aa,
+    0xd62f_105d, 0x0244_1453, 0xd8a1_e681, 0xe7d3_fbc8,
+    0x21e1_cde6, 0xc337_07d6, 0xf4d5_0d87, 0x455a_14ed,
+    0xa9e3_e905, 0xfcef_a3f8, 0x676f_02d9, 0x8d2a_4c8a,
+    0xfffa_3942, 0x8771_f681, 0x6d9d_6122, 0xfde5_380c,
+    0xa4be_ea44, 0x4bde_cfa9, 0xf6bb_4b60, 0xbebf_bc70,
+    0x289b_7ec6, 0xeaa1_27fa, 0xd4ef_3085, 0x0488_1d05,
+    0xd9d4_d039, 0xe6db_99e5, 0x1fa2_7cf8, 0xc4ac_5665,
+    0xf429_2244, 0x432a_ff97, 0xab94_23a7, 0xfc93_a039,
+    0x655b_59c3, 0x8f0c_cc92, 0xffef_f47d, 0x8584_5dd1,
+    0x6fa8_7e4f, 0xfe2c_e6e0, 0xa301_4314, 0x4e08_11a1,
+    0xf753_7e82, 0xbd3a_f235, 0x2ad7_d2bb, 0xeb86_d391,
 ];
 
 fn transform(state: &mut [u32; 4], block: &[u8; 64]) {
-    let mut m = [0u32; 16];
-    for (i, word) in m.iter_mut().enumerate() {
+    let mut message_words = [0u32; 16];
+    for (word_index, word) in message_words.iter_mut().enumerate() {
         *word = u32::from_le_bytes([
-            block[i * 4],
-            block[i * 4 + 1],
-            block[i * 4 + 2],
-            block[i * 4 + 3],
+            block[word_index * 4],
+            block[word_index * 4 + 1],
+            block[word_index * 4 + 2],
+            block[word_index * 4 + 3],
         ]);
     }
 
-    let (mut a, mut b, mut c, mut d) = (state[0], state[1], state[2], state[3]);
-    for i in 0..64 {
-        let (f, g) = if i < 16 {
-            ((b & c) | (!b & d), i)
-        } else if i < 32 {
-            ((d & b) | (!d & c), (5 * i + 1) % 16)
-        } else if i < 48 {
-            (b ^ c ^ d, (3 * i + 5) % 16)
+    let (mut alpha, mut bravo, mut charlie, mut delta) = (state[0], state[1], state[2], state[3]);
+    for round in 0..64 {
+        let (mixed, word_index) = if round < 16 {
+            ((bravo & charlie) | (!bravo & delta), round)
+        } else if round < 32 {
+            ((delta & bravo) | (!delta & charlie), (5 * round + 1) % 16)
+        } else if round < 48 {
+            (bravo ^ charlie ^ delta, (3 * round + 5) % 16)
         } else {
-            (c ^ (b | !d), (7 * i) % 16)
+            (charlie ^ (bravo | !delta), (7 * round) % 16)
         };
-        let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g]);
-        a = d;
-        d = c;
-        c = b;
-        b = b.wrapping_add(f.rotate_left(S[i]));
+        let mixed = mixed
+            .wrapping_add(alpha)
+            .wrapping_add(K[round])
+            .wrapping_add(message_words[word_index]);
+        alpha = delta;
+        delta = charlie;
+        charlie = bravo;
+        bravo = bravo.wrapping_add(mixed.rotate_left(S[round]));
     }
 
-    state[0] = state[0].wrapping_add(a);
-    state[1] = state[1].wrapping_add(b);
-    state[2] = state[2].wrapping_add(c);
-    state[3] = state[3].wrapping_add(d);
+    state[0] = state[0].wrapping_add(alpha);
+    state[1] = state[1].wrapping_add(bravo);
+    state[2] = state[2].wrapping_add(charlie);
+    state[3] = state[3].wrapping_add(delta);
 }
 
 /// Compute the DXBC container checksum over `data` (the bytes after the header
 /// hash field, i.e. container offset 20 to end).
+///
+/// # Panics
+///
+/// Panics when `data` is larger than the DXBC format's 32-bit length field.
+#[must_use]
 pub fn dxbc_checksum(data: &[u8]) -> [u8; 16] {
     let mut state = [0x6745_2301u32, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
     let num_bytes = data.len();
-    let num_bits = (num_bytes as u32).wrapping_mul(8);
+    let num_bits = u32::try_from(num_bytes)
+        .expect("DXBC data length exceeds u32")
+        .wrapping_mul(8);
 
     let whole = num_bytes / 64;
     for i in 0..whole {
@@ -147,7 +157,9 @@ mod tests {
     fn handles_block_boundaries() {
         // Exercise the < 56, >= 56, and exact-multiple-of-64 tail paths.
         for len in [0usize, 55, 56, 63, 64, 119, 120, 128] {
-            let data: alloc::vec::Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let data: alloc::vec::Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i).expect("test input length fits in u8"))
+                .collect();
             let h = dxbc_checksum(&data);
             assert_eq!(h, dxbc_checksum(&data), "len {len} not deterministic");
         }

@@ -2,23 +2,24 @@
 name = "dxbc-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-arbitrary = "1"
-smallvec = { version = "1", features = ["union"] }
-
-[dependencies.dxbc]
-path = ".."
+libfuzzer-sys.workspace = true
+arbitrary.workspace = true
+smallvec.workspace = true
+dxbc.workspace = true
 
 # The `.d3dasm` text grammar (serialize/assemble) lives in d3dasm; the fuzzer
 # exercises it against dxbc's encode/decode.
-[dependencies.d3dasm]
-path = "../../d3dasm"
+d3dasm.workspace = true
 
 [[bin]]
 name = "roundtrip"
@@ -26,6 +27,3 @@ path = "fuzz_targets/roundtrip.rs"
 test = false
 doc = false
 bench = false
-
-# Keep the fuzz crate out of the parent workspace (cargo-fuzz convention).
-[workspace]

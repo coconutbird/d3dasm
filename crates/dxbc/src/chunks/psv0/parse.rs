@@ -1,9 +1,12 @@
 //! PSV0 chunk parser.
 
 use alloc::vec::Vec;
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
-use super::types::*;
+use super::types::{
+    PSVResourceBindInfo, PSVRuntimeInfo1, PSVRuntimeInfo2, PSVShaderKind, PSVSignatureElement,
+    PipelineStateValidation, ShaderStageInfo,
+};
 
 const PSV_GS_MAX_STREAMS: usize = 4;
 
@@ -15,8 +18,8 @@ fn io_table_dwords(input_vectors: u32, output_vectors: u32) -> usize {
     mask_dwords_from_vectors(output_vectors) * input_vectors as usize * 4
 }
 
-/// Parse the shader-kind-specific union from the first 16 bytes of RuntimeInfo.
-fn parse_stage_info(c: &mut SliceCursor<'_>, shader_kind: u32) -> Option<ShaderStageInfo> {
+/// Parse the shader-kind-specific union from the first 16 bytes of `RuntimeInfo`.
+fn parse_stage_info(c: &mut Cursor<&[u8]>, shader_kind: u32) -> Option<ShaderStageInfo> {
     // The union occupies bytes 0..16 of PSVRuntimeInfo0, but shader_kind
     // itself is NOT in the union — it's in RuntimeInfo1.ShaderStage (byte 24).
     // For v0, shader_kind is inferred from the DXBC shader type.
@@ -26,7 +29,7 @@ fn parse_stage_info(c: &mut SliceCursor<'_>, shader_kind: u32) -> Option<ShaderS
     let b8 = c.read_u32_le().ok()?;
     let b12 = c.read_u32_le().ok()?;
 
-    let kind = PSVShaderKind::from_u8(shader_kind as u8);
+    let kind = PSVShaderKind::from_u8(u8::try_from(shader_kind).ok()?);
     Some(match kind {
         PSVShaderKind::Vertex => ShaderStageInfo::Vertex {
             output_position_present: (b0 & 0xFF) != 0,
@@ -74,7 +77,7 @@ fn parse_stage_info(c: &mut SliceCursor<'_>, shader_kind: u32) -> Option<ShaderS
     })
 }
 
-fn read_u32s(c: &mut SliceCursor<'_>, count: usize) -> Option<Vec<u32>> {
+fn read_u32s(c: &mut Cursor<&[u8]>, count: usize) -> Option<Vec<u32>> {
     let mut v = Vec::with_capacity(count);
     for _ in 0..count {
         v.push(c.read_u32_le().ok()?);
@@ -83,7 +86,7 @@ fn read_u32s(c: &mut SliceCursor<'_>, count: usize) -> Option<Vec<u32>> {
     Some(v)
 }
 
-fn parse_sig_element(c: &mut SliceCursor<'_>, stride: u32) -> Option<PSVSignatureElement> {
+fn parse_sig_element(c: &mut Cursor<&[u8]>, stride: u32) -> Option<PSVSignatureElement> {
     let base_pos = c.position();
     let semantic_name = c.read_u32_le().ok()?;
     let semantic_indexes = c.read_u32_le().ok()?;
@@ -96,9 +99,10 @@ fn parse_sig_element(c: &mut SliceCursor<'_>, stride: u32) -> Option<PSVSignatur
     let dynamic_mask_and_stream = c.read_u8_le().ok()?;
     let reserved = c.read_u8_le().ok()?;
     // Skip any extra bytes in stride
-    let consumed = (c.position() - base_pos) as u32;
+    let consumed = u32::try_from(c.position().checked_sub(base_pos)?).ok()?;
     if stride > consumed {
-        c.seek(SeekFrom::Current((stride - consumed) as i64)).ok()?;
+        c.seek(SeekFrom::Current(i64::from(stride - consumed)))
+            .ok()?;
     }
     Some(PSVSignatureElement {
         semantic_name,
@@ -114,129 +118,153 @@ fn parse_sig_element(c: &mut SliceCursor<'_>, stride: u32) -> Option<PSVSignatur
     })
 }
 
-/// Parse a PSV0 chunk from raw bytes.
-pub fn parse_psv0(data: &[u8]) -> Option<PipelineStateValidation> {
-    if data.len() < 4 {
-        return None;
-    }
-    let mut c = SliceCursor::new(data);
+struct RuntimeInfo {
+    info_size: u32,
+    stage_info: ShaderStageInfo,
+    min_wave_lane_count: u32,
+    max_wave_lane_count: u32,
+    version_1: Option<PSVRuntimeInfo1>,
+    version_2: Option<PSVRuntimeInfo2>,
+    entry_function_name: Option<u32>,
+    num_bytes_group_shared_memory: Option<u32>,
+}
 
-    let info_size = c.read_u32_le().ok()?;
+struct ResourceInfo {
+    bind_info_size: u32,
+    resources: Vec<PSVResourceBindInfo>,
+}
+
+#[derive(Default)]
+struct VersionedSections {
+    string_table: Vec<u8>,
+    semantic_index_table: Vec<u32>,
+    sig_element_size: u32,
+    sig_input_elements: Vec<PSVSignatureElement>,
+    sig_output_elements: Vec<PSVSignatureElement>,
+    sig_patch_const_or_prim_elements: Vec<PSVSignatureElement>,
+    view_id_output_masks: Vec<Vec<u32>>,
+    view_id_pc_or_prim_output_mask: Vec<u32>,
+    input_to_output_tables: Vec<Vec<u32>>,
+    input_to_pc_output_table: Vec<u32>,
+    pc_input_to_output_table: Vec<u32>,
+}
+
+#[derive(Default)]
+struct DependencyTables {
+    view_id_output_masks: Vec<Vec<u32>>,
+    view_id_pc_or_prim_output_mask: Vec<u32>,
+    input_to_output_tables: Vec<Vec<u32>>,
+    input_to_pc_output_table: Vec<u32>,
+    pc_input_to_output_table: Vec<u32>,
+}
+
+fn parse_runtime_info_1(cursor: &mut Cursor<&[u8]>) -> Option<PSVRuntimeInfo1> {
+    let shader_stage = cursor.read_u8_le().ok()?;
+    let uses_view_id = cursor.read_u8_le().ok()?;
+    let max_vert_or_patch_prim = cursor.read_u16_le().ok()?;
+    let sig_input_elements = cursor.read_u8_le().ok()?;
+    let sig_output_elements = cursor.read_u8_le().ok()?;
+    let sig_patch_const_or_prim_elements = cursor.read_u8_le().ok()?;
+    let sig_input_vectors = cursor.read_u8_le().ok()?;
+    let mut sig_output_vectors = [0u8; 4];
+    for value in &mut sig_output_vectors {
+        *value = cursor.read_u8_le().ok()?;
+    }
+    Some(PSVRuntimeInfo1 {
+        shader_stage,
+        uses_view_id,
+        max_vert_or_patch_prim,
+        sig_input_elements,
+        sig_output_elements,
+        sig_patch_const_or_prim_elements,
+        sig_input_vectors,
+        sig_output_vectors,
+    })
+}
+
+fn parse_runtime_info(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Option<RuntimeInfo> {
+    let info_size = cursor.read_u32_le().ok()?;
     if data.len() < 4 + info_size as usize || info_size < 24 {
         return None;
     }
-
-    // The runtime info starts at offset 4.
-    let info_start = c.position();
-    // For v0, the shader kind comes from outside (container); inside RuntimeInfo0
-    // it's just the union. For v1+, ShaderStage is at offset 24 within the struct.
-    // We'll read the v1 shader_stage later, but we need a "hint" to parse the union.
-    // For now, read as unknown and re-parse if we get v1 info.
-
-    // Read the 16-byte union (advances cursor; values parsed via parse_stage_info)
-    let _union_b0 = c.read_u32_le().ok()?;
-    let _union_b4 = c.read_u32_le().ok()?;
-    let _union_b8 = c.read_u32_le().ok()?;
-    let _union_b12 = c.read_u32_le().ok()?;
-
-    // MinimumExpectedWaveLaneCount, MaximumExpectedWaveLaneCount
-    let min_wave_lane_count = c.read_u32_le().ok()?;
-    let max_wave_lane_count = c.read_u32_le().ok()?;
-    // We've now consumed 24 bytes of RuntimeInfo0.
-
-    // Parse v1+ fields
-    let runtime_info_1 = if info_size >= 36 {
-        let shader_stage = c.read_u8_le().ok()?;
-        let uses_view_id = c.read_u8_le().ok()?;
-        let max_vert_or_patch_prim = c.read_u16_le().ok()?;
-        let sig_input_elements = c.read_u8_le().ok()?;
-        let sig_output_elements = c.read_u8_le().ok()?;
-        let sig_patch_const_or_prim_elements = c.read_u8_le().ok()?;
-        let sig_input_vectors = c.read_u8_le().ok()?;
-        let mut sig_output_vectors = [0u8; 4];
-        for v in &mut sig_output_vectors {
-            *v = c.read_u8_le().ok()?;
-        }
-        Some(PSVRuntimeInfo1 {
-            shader_stage,
-            uses_view_id,
-            max_vert_or_patch_prim,
-            sig_input_elements,
-            sig_output_elements,
-            sig_patch_const_or_prim_elements,
-            sig_input_vectors,
-            sig_output_vectors,
-        })
+    let info_start = cursor.position();
+    for _ in 0..4 {
+        cursor.read_u32_le().ok()?;
+    }
+    let min_wave_lane_count = cursor.read_u32_le().ok()?;
+    let max_wave_lane_count = cursor.read_u32_le().ok()?;
+    let version_1 = if info_size >= 36 {
+        Some(parse_runtime_info_1(cursor)?)
     } else {
         None
     };
-
-    // Now parse the stage info union using the shader kind from v1 (or 0xFF for v0)
-    let shader_kind_hint = runtime_info_1
+    let shader_kind = version_1
         .as_ref()
-        .map(|ri| ri.shader_stage as u32)
-        .unwrap_or(0xFF);
-
-    // Re-interpret the union bytes
+        .map_or(0xFF, |info| u32::from(info.shader_stage));
     let stage_info = {
-        let mut uc = SliceCursor::new(data);
-        uc.seek(SeekFrom::Start(info_start as u64)).ok()?;
-        parse_stage_info(&mut uc, shader_kind_hint)?
+        let mut union_cursor = Cursor::new(data);
+        union_cursor.seek(SeekFrom::Start(info_start)).ok()?;
+        parse_stage_info(&mut union_cursor, shader_kind)?
     };
-
-    let runtime_info_2 = if info_size >= 48 {
-        let x = c.read_u32_le().ok()?;
-        let y = c.read_u32_le().ok()?;
-        let z = c.read_u32_le().ok()?;
+    let version_2 = if info_size >= 48 {
         Some(PSVRuntimeInfo2 {
-            num_threads_x: x,
-            num_threads_y: y,
-            num_threads_z: z,
+            num_threads_x: cursor.read_u32_le().ok()?,
+            num_threads_y: cursor.read_u32_le().ok()?,
+            num_threads_z: cursor.read_u32_le().ok()?,
         })
     } else {
         None
     };
-
     let entry_function_name = if info_size >= 52 {
-        Some(c.read_u32_le().ok()?)
+        Some(cursor.read_u32_le().ok()?)
     } else {
         None
     };
-
     let num_bytes_group_shared_memory = if info_size >= 56 {
-        Some(c.read_u32_le().ok()?)
+        Some(cursor.read_u32_le().ok()?)
     } else {
         None
     };
-
-    // Skip any remaining bytes in the info struct we don't know about.
-    c.seek(SeekFrom::Start((4 + info_size as usize) as u64))
+    cursor
+        .seek(SeekFrom::Start(u64::from(info_size) + 4))
         .ok()?;
+    Some(RuntimeInfo {
+        info_size,
+        stage_info,
+        min_wave_lane_count,
+        max_wave_lane_count,
+        version_1,
+        version_2,
+        entry_function_name,
+        num_bytes_group_shared_memory,
+    })
+}
 
-    // Resource count
-    let resource_count = c.read_u32_le().ok()? as usize;
-    let mut resource_bind_info_size = 0u32;
+fn parse_resources(cursor: &mut Cursor<&[u8]>) -> Option<ResourceInfo> {
+    let resource_count = cursor.read_u32_le().ok()? as usize;
+    let mut bind_info_size = 0;
     let mut resources = Vec::with_capacity(resource_count);
     if resource_count > 0 {
-        resource_bind_info_size = c.read_u32_le().ok()?;
+        bind_info_size = cursor.read_u32_le().ok()?;
         for _ in 0..resource_count {
-            let rbase = c.position();
-            let res_type = c.read_u32_le().ok()?;
-            let space = c.read_u32_le().ok()?;
-            let lower_bound = c.read_u32_le().ok()?;
-            let upper_bound = c.read_u32_le().ok()?;
-            let (res_kind, res_flags) = if resource_bind_info_size >= 24 {
-                (Some(c.read_u32_le().ok()?), Some(c.read_u32_le().ok()?))
+            let base_position = cursor.position();
+            let res_type = cursor.read_u32_le().ok()?;
+            let space = cursor.read_u32_le().ok()?;
+            let lower_bound = cursor.read_u32_le().ok()?;
+            let upper_bound = cursor.read_u32_le().ok()?;
+            let (res_kind, res_flags) = if bind_info_size >= 24 {
+                (
+                    Some(cursor.read_u32_le().ok()?),
+                    Some(cursor.read_u32_le().ok()?),
+                )
             } else {
                 (None, None)
             };
-            // Skip any extra bytes in the bind info struct.
-            let consumed = (c.position() - rbase) as u32;
-            if resource_bind_info_size > consumed {
-                c.seek(SeekFrom::Current(
-                    (resource_bind_info_size - consumed) as i64,
-                ))
-                .ok()?;
+            let consumed = u32::try_from(cursor.position().checked_sub(base_position)?).ok()?;
+            if bind_info_size > consumed {
+                cursor
+                    .seek(SeekFrom::Current(i64::from(bind_info_size - consumed)))
+                    .ok()?;
             }
             resources.push(PSVResourceBindInfo {
                 res_type,
@@ -248,133 +276,151 @@ pub fn parse_psv0(data: &[u8]) -> Option<PipelineStateValidation> {
             });
         }
     }
+    Some(ResourceInfo {
+        bind_info_size,
+        resources,
+    })
+}
 
-    // The rest is v1+ only.
-    let mut string_table = Vec::new();
-    let mut semantic_index_table = Vec::new();
-    let mut sig_element_size = 0u32;
-    let mut sig_input_elements = Vec::new();
-    let mut sig_output_elements = Vec::new();
-    let mut sig_patch_const_or_prim_elements = Vec::new();
-    let mut view_id_output_masks: Vec<Vec<u32>> = Vec::new();
-    let mut view_id_pc_or_prim_output_mask = Vec::new();
-    let mut input_to_output_tables: Vec<Vec<u32>> = Vec::new();
-    let mut input_to_pc_output_table = Vec::new();
-    let mut pc_input_to_output_table = Vec::new();
+fn parse_dependency_tables(
+    cursor: &mut Cursor<&[u8]>,
+    runtime_info: &PSVRuntimeInfo1,
+) -> Option<DependencyTables> {
+    let shader_kind = PSVShaderKind::from_u8(runtime_info.shader_stage);
+    let is_geometry = shader_kind == PSVShaderKind::Geometry;
+    let is_hull = shader_kind == PSVShaderKind::Hull;
+    let is_domain = shader_kind == PSVShaderKind::Domain;
+    let is_mesh = shader_kind == PSVShaderKind::Mesh;
+    let patch_vectors = u32::from(runtime_info.max_vert_or_patch_prim & 0xFF);
+    let stream_count = if is_geometry { PSV_GS_MAX_STREAMS } else { 1 };
+    let mut tables = DependencyTables::default();
 
-    if let Some(ref ri1) = runtime_info_1 {
-        // String table
-        let st_size = c.read_u32_le().ok()? as usize;
-        if st_size > 0 {
-            let pos = c.position();
-            if pos + st_size > data.len() {
-                return None;
-            }
-            string_table = Vec::from(&data[pos..pos + st_size]);
-            c.seek(SeekFrom::Current(st_size as i64)).ok()?;
+    if runtime_info.uses_view_id != 0 {
+        for &output_vectors in &runtime_info.sig_output_vectors[..stream_count] {
+            let dword_count = mask_dwords_from_vectors(u32::from(output_vectors));
+            tables
+                .view_id_output_masks
+                .push(read_u32s(cursor, dword_count)?);
         }
-
-        // Semantic index table
-        let si_entries = c.read_u32_le().ok()? as usize;
-        if si_entries > 0 {
-            semantic_index_table = read_u32s(&mut c, si_entries)?;
-        }
-
-        // Signature elements
-        let total_sig = ri1.sig_input_elements as usize
-            + ri1.sig_output_elements as usize
-            + ri1.sig_patch_const_or_prim_elements as usize;
-        if total_sig > 0 {
-            sig_element_size = c.read_u32_le().ok()?;
-            for _ in 0..ri1.sig_input_elements {
-                sig_input_elements.push(parse_sig_element(&mut c, sig_element_size)?);
-            }
-            for _ in 0..ri1.sig_output_elements {
-                sig_output_elements.push(parse_sig_element(&mut c, sig_element_size)?);
-            }
-            for _ in 0..ri1.sig_patch_const_or_prim_elements {
-                sig_patch_const_or_prim_elements.push(parse_sig_element(&mut c, sig_element_size)?);
-            }
-        }
-
-        let shader_kind = PSVShaderKind::from_u8(shader_kind_hint as u8);
-        let is_gs = shader_kind == PSVShaderKind::Geometry;
-        let is_hs = shader_kind == PSVShaderKind::Hull;
-        let is_ds = shader_kind == PSVShaderKind::Domain;
-        let is_ms = shader_kind == PSVShaderKind::Mesh;
-        let patch_const_vectors = (ri1.max_vert_or_patch_prim & 0xFF) as u32;
-
-        // ViewID output masks
-        if ri1.uses_view_id != 0 {
-            let stream_count = if is_gs { PSV_GS_MAX_STREAMS } else { 1 };
-            for i in 0..stream_count {
-                let ov = ri1.sig_output_vectors[i] as u32;
-                if ov > 0 {
-                    let dwords = mask_dwords_from_vectors(ov);
-                    view_id_output_masks.push(read_u32s(&mut c, dwords)?);
-                } else {
-                    view_id_output_masks.push(Vec::new());
-                }
-                if !is_gs {
-                    break;
-                }
-            }
-            if (is_hs || is_ms) && patch_const_vectors > 0 {
-                let dwords = mask_dwords_from_vectors(patch_const_vectors);
-                view_id_pc_or_prim_output_mask = read_u32s(&mut c, dwords)?;
-            }
-        }
-
-        // Input-to-output dependency tables
-        let stream_count = if is_gs { PSV_GS_MAX_STREAMS } else { 1 };
-        for i in 0..stream_count {
-            let ov = ri1.sig_output_vectors[i] as u32;
-            let iv = ri1.sig_input_vectors as u32;
-            if !is_ms && ov > 0 && iv > 0 {
-                let dwords = io_table_dwords(iv, ov);
-                input_to_output_tables.push(read_u32s(&mut c, dwords)?);
-            } else {
-                input_to_output_tables.push(Vec::new());
-            }
-            if !is_gs {
-                break;
-            }
-        }
-
-        // HS: input-to-patch-constant table
-        if is_hs && patch_const_vectors > 0 && ri1.sig_input_vectors > 0 {
-            let dwords = io_table_dwords(ri1.sig_input_vectors as u32, patch_const_vectors);
-            input_to_pc_output_table = read_u32s(&mut c, dwords)?;
-        }
-
-        // DS: patch-constant-to-output table
-        if is_ds && ri1.sig_output_vectors[0] > 0 && patch_const_vectors > 0 {
-            let dwords = io_table_dwords(patch_const_vectors, ri1.sig_output_vectors[0] as u32);
-            pc_input_to_output_table = read_u32s(&mut c, dwords)?;
+        if (is_hull || is_mesh) && patch_vectors > 0 {
+            let dword_count = mask_dwords_from_vectors(patch_vectors);
+            tables.view_id_pc_or_prim_output_mask = read_u32s(cursor, dword_count)?;
         }
     }
 
-    Some(PipelineStateValidation {
-        info_size,
-        stage_info,
-        min_wave_lane_count,
-        max_wave_lane_count,
-        runtime_info_1,
-        runtime_info_2,
-        entry_function_name,
-        num_bytes_group_shared_memory,
-        resource_bind_info_size,
-        resources,
+    for &output_vectors in &runtime_info.sig_output_vectors[..stream_count] {
+        let input_vectors = u32::from(runtime_info.sig_input_vectors);
+        let output_vectors = u32::from(output_vectors);
+        if !is_mesh && output_vectors > 0 && input_vectors > 0 {
+            let count = io_table_dwords(input_vectors, output_vectors);
+            tables
+                .input_to_output_tables
+                .push(read_u32s(cursor, count)?);
+        } else {
+            tables.input_to_output_tables.push(Vec::new());
+        }
+    }
+    if is_hull && patch_vectors > 0 && runtime_info.sig_input_vectors > 0 {
+        let count = io_table_dwords(u32::from(runtime_info.sig_input_vectors), patch_vectors);
+        tables.input_to_pc_output_table = read_u32s(cursor, count)?;
+    }
+    if is_domain && runtime_info.sig_output_vectors[0] > 0 && patch_vectors > 0 {
+        let count = io_table_dwords(patch_vectors, u32::from(runtime_info.sig_output_vectors[0]));
+        tables.pc_input_to_output_table = read_u32s(cursor, count)?;
+    }
+    Some(tables)
+}
+
+fn parse_versioned_sections(
+    data: &[u8],
+    cursor: &mut Cursor<&[u8]>,
+    runtime_info: Option<&PSVRuntimeInfo1>,
+) -> Option<VersionedSections> {
+    let Some(runtime_info) = runtime_info else {
+        return Some(VersionedSections::default());
+    };
+    let string_size = usize::try_from(cursor.read_u32_le().ok()?).ok()?;
+    let string_start = usize::try_from(cursor.position()).ok()?;
+    let string_end = string_start.checked_add(string_size)?;
+    if string_end > data.len() {
+        return None;
+    }
+    let string_table = Vec::from(&data[string_start..string_end]);
+    cursor
+        .seek(SeekFrom::Current(i64::try_from(string_size).ok()?))
+        .ok()?;
+
+    let semantic_count = usize::try_from(cursor.read_u32_le().ok()?).ok()?;
+    let semantic_index_table = read_u32s(cursor, semantic_count)?;
+    let signature_count = runtime_info.sig_input_elements as usize
+        + runtime_info.sig_output_elements as usize
+        + runtime_info.sig_patch_const_or_prim_elements as usize;
+    let sig_element_size = if signature_count > 0 {
+        cursor.read_u32_le().ok()?
+    } else {
+        0
+    };
+    let mut sig_input_elements = Vec::with_capacity(runtime_info.sig_input_elements as usize);
+    for _ in 0..runtime_info.sig_input_elements {
+        sig_input_elements.push(parse_sig_element(cursor, sig_element_size)?);
+    }
+    let mut sig_output_elements = Vec::with_capacity(runtime_info.sig_output_elements as usize);
+    for _ in 0..runtime_info.sig_output_elements {
+        sig_output_elements.push(parse_sig_element(cursor, sig_element_size)?);
+    }
+    let mut sig_patch_const_or_prim_elements =
+        Vec::with_capacity(runtime_info.sig_patch_const_or_prim_elements as usize);
+    for _ in 0..runtime_info.sig_patch_const_or_prim_elements {
+        sig_patch_const_or_prim_elements.push(parse_sig_element(cursor, sig_element_size)?);
+    }
+    let dependencies = parse_dependency_tables(cursor, runtime_info)?;
+    Some(VersionedSections {
         string_table,
         semantic_index_table,
         sig_element_size,
         sig_input_elements,
         sig_output_elements,
         sig_patch_const_or_prim_elements,
-        view_id_output_masks,
-        view_id_pc_or_prim_output_mask,
-        input_to_output_tables,
-        input_to_pc_output_table,
-        pc_input_to_output_table,
+        view_id_output_masks: dependencies.view_id_output_masks,
+        view_id_pc_or_prim_output_mask: dependencies.view_id_pc_or_prim_output_mask,
+        input_to_output_tables: dependencies.input_to_output_tables,
+        input_to_pc_output_table: dependencies.input_to_pc_output_table,
+        pc_input_to_output_table: dependencies.pc_input_to_output_table,
+    })
+}
+
+/// Parse a PSV0 chunk from raw bytes.
+#[must_use]
+pub fn parse_psv0(data: &[u8]) -> Option<PipelineStateValidation> {
+    if data.len() < 4 {
+        return None;
+    }
+    let mut cursor = Cursor::new(data);
+    let runtime = parse_runtime_info(data, &mut cursor)?;
+    let resource_info = parse_resources(&mut cursor)?;
+    let sections = parse_versioned_sections(data, &mut cursor, runtime.version_1.as_ref())?;
+
+    Some(PipelineStateValidation {
+        info_size: runtime.info_size,
+        stage_info: runtime.stage_info,
+        min_wave_lane_count: runtime.min_wave_lane_count,
+        max_wave_lane_count: runtime.max_wave_lane_count,
+        runtime_info_1: runtime.version_1,
+        runtime_info_2: runtime.version_2,
+        entry_function_name: runtime.entry_function_name,
+        num_bytes_group_shared_memory: runtime.num_bytes_group_shared_memory,
+        resource_bind_info_size: resource_info.bind_info_size,
+        resources: resource_info.resources,
+        string_table: sections.string_table,
+        semantic_index_table: sections.semantic_index_table,
+        sig_element_size: sections.sig_element_size,
+        sig_input_elements: sections.sig_input_elements,
+        sig_output_elements: sections.sig_output_elements,
+        sig_patch_const_or_prim_elements: sections.sig_patch_const_or_prim_elements,
+        view_id_output_masks: sections.view_id_output_masks,
+        view_id_pc_or_prim_output_mask: sections.view_id_pc_or_prim_output_mask,
+        input_to_output_tables: sections.input_to_output_tables,
+        input_to_pc_output_table: sections.input_to_pc_output_table,
+        pc_input_to_output_table: sections.pc_input_to_output_table,
     })
 }

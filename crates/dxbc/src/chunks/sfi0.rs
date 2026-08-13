@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
 use super::{ChunkParser, ChunkWriter};
 
@@ -75,15 +75,16 @@ pub struct ShaderFeatureInfo {
 }
 
 /// Parse an SFI0 chunk.
+#[must_use]
 pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let lo = if data.len() >= 4 {
-        c.read_u32_le().ok()? as u64
+        u64::from(c.read_u32_le().ok()?)
     } else {
         0
     };
     let hi = if data.len() >= 8 {
-        c.read_u32_le().ok()? as u64
+        u64::from(c.read_u32_le().ok()?)
     } else {
         0
     };
@@ -105,14 +106,14 @@ impl ChunkWriter for ShaderFeatureInfo {
 
     fn write_payload(&self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::with_capacity(8);
-        buf.extend_from_slice(&(self.flags as u32).to_le_bytes());
-        buf.extend_from_slice(&((self.flags >> 32) as u32).to_le_bytes());
+        buf.extend_from_slice(&self.flags.to_le_bytes());
         buf
     }
 }
 
 impl ShaderFeatureInfo {
     /// Returns true if the given flag bit is set.
+    #[must_use]
     pub fn has(&self, flag: u64) -> bool {
         self.flags & flag != 0
     }

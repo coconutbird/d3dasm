@@ -18,7 +18,7 @@ fn ret_program() -> Vec<u8> {
         resource_dim: None,
         resource_return_type: None,
         kind: InstructionKind::Generic {
-            operands: Default::default(),
+            operands: dxbc::shex::Operands::new(),
         },
     };
     let program = Program {

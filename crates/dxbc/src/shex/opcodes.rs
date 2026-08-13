@@ -453,11 +453,9 @@ pub enum Opcode {
     Unknown(u32),
 }
 
-impl Opcode {
-    /// Converts a raw opcode value (bits 0–10 of the instruction token) to the
-    /// corresponding variant.
-    pub fn from_u32(v: u32) -> Self {
-        match v {
+macro_rules! opcode_from_u32 {
+    ($value:expr) => {
+        match $value {
             // D3D10 base opcodes (0-87)
             0 => Self::Add,
             1 => Self::And,
@@ -687,13 +685,14 @@ impl Opcode {
             215 => Self::Dtou,
             216 => Self::Itod,
             217 => Self::Utod,
-            _ => Self::Unknown(v),
+            _ => Self::Unknown($value),
         }
-    }
+    };
+}
 
-    /// Converts the opcode back to its raw `u32` value.
-    pub fn to_u32(&self) -> u32 {
-        match self {
+macro_rules! opcode_to_u32 {
+    ($opcode:expr) => {
+        match $opcode {
             Self::Add => 0,
             Self::And => 1,
             Self::Break => 2,
@@ -911,11 +910,12 @@ impl Opcode {
             Self::Utod => 217,
             Self::Unknown(v) => *v,
         }
-    }
+    };
+}
 
-    /// Returns the lowercase mnemonic used in disassembly output.
-    pub fn name(&self) -> &'static str {
-        match self {
+macro_rules! opcode_name {
+    ($opcode:expr) => {
+        match $opcode {
             Self::Add => "add",
             Self::And => "and",
             Self::Break => "break",
@@ -1140,6 +1140,27 @@ impl Opcode {
                 "unknown_op"
             }
         }
+    };
+}
+
+impl Opcode {
+    /// Converts a raw opcode value (bits 0–10 of the instruction token) to the
+    /// corresponding variant.
+    #[must_use]
+    pub fn from_u32(v: u32) -> Self {
+        opcode_from_u32!(v)
+    }
+
+    /// Converts the opcode back to its raw `u32` value.
+    #[must_use]
+    pub fn to_u32(&self) -> u32 {
+        opcode_to_u32!(self)
+    }
+
+    /// Returns the lowercase mnemonic used in disassembly output.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        opcode_name!(self)
     }
 }
 

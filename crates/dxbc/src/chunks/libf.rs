@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
 /// Parsed LIBF (library function table) chunk.
 #[derive(Debug, Clone)]
@@ -26,9 +26,10 @@ pub struct LibraryFunction {
 }
 
 /// Parse a LIBF chunk.
+#[must_use]
 pub fn parse_libf(data: &[u8]) -> Option<LibraryFunction> {
     let function_count = if data.len() >= 4 {
-        let mut c = SliceCursor::new(data);
+        let mut c = Cursor::new(data);
         Some(c.read_u32_le().ok()?)
     } else {
         None
@@ -60,7 +61,7 @@ impl fmt::Display for LibraryFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "// Library Functions: ")?;
         if let Some(count) = self.function_count {
-            write!(f, "{} entries", count)?;
+            write!(f, "{count} entries")?;
         } else {
             write!(f, "empty")?;
         }

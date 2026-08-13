@@ -1,4 +1,8 @@
-use std::io::Write;
+//! Command-line interface for disassembling DXBC binaries and assembling
+//! lossless `.d3dasm` documents.
+
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -59,17 +63,18 @@ fn disassemble(cli: &Cli) -> Result<(), String> {
     let mut out = String::new();
     match cli.emit.as_str() {
         "human" => {
-            out.push_str(&format!("// File: {}\n", cli.file.display()));
-            out.push_str(&format!("// Found {} DXBC shader(s)\n\n", shaders.len()));
+            let _ = writeln!(out, "// File: {}", cli.file.display());
+            let _ = writeln!(out, "// Found {} DXBC shader(s)\n", shaders.len());
             for (i, shader) in shaders.iter().enumerate() {
                 out.push_str("// ============================================================\n");
-                out.push_str(&format!(
-                    "// Shader #{i}: DXBC at 0x{:X}, size={}\n",
+                let _ = writeln!(
+                    out,
+                    "// Shader #{i}: DXBC at 0x{:X}, size={}",
                     shader.offset(),
                     shader.size()
-                ));
+                );
                 out.push_str("// ============================================================\n");
-                out.push_str(&format!("{shader}\n"));
+                let _ = writeln!(out, "{shader}");
             }
         }
         "d3dasm" => {

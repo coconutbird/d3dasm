@@ -16,7 +16,7 @@ fn temp(reg: u32, components: ComponentSelect) -> Operand {
         negate: false,
         abs: false,
         indices: core::iter::once(OperandIndex::Imm32(reg)).collect(),
-        immediate_values: Default::default(),
+        immediate_values: dxbc::shex::Immediates::new(),
     }
 }
 

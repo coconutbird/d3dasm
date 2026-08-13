@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::types::*;
+use super::types::{PartType, RDAT_VERSION_10, RdatPart, RuntimeData};
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -12,10 +12,14 @@ fn align4(size: usize) -> usize {
     (size + 3) & !3
 }
 
-/// Serialize a single part's data (excluding RuntimeDataPartHeader).
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("RDAT size or offset exceeds u32")
+}
+
+/// Serialize a single part's data (excluding `RuntimeDataPartHeader`).
 fn write_part_data(part: &RdatPart) -> Vec<u8> {
     match part {
-        RdatPart::StringBuffer(buf) => buf.clone(),
+        RdatPart::StringBuffer(buf) | RdatPart::RawBytes(buf) => buf.clone(),
         RdatPart::IndexArrays(indices) => {
             let mut out = Vec::with_capacity(indices.len() * 4);
             for &v in indices {
@@ -23,14 +27,13 @@ fn write_part_data(part: &RdatPart) -> Vec<u8> {
             }
             out
         }
-        RdatPart::RawBytes(buf) => buf.clone(),
         RdatPart::RecordTable {
             record_stride,
             records,
             ..
         } => {
             let mut out = Vec::with_capacity(8 + records.len() * *record_stride as usize);
-            write_u32(&mut out, records.len() as u32);
+            write_u32(&mut out, wire_u32(records.len()));
             write_u32(&mut out, *record_stride);
             for rec in records {
                 out.extend_from_slice(rec);
@@ -50,8 +53,7 @@ fn part_type_id(part: &RdatPart) -> u32 {
         RdatPart::StringBuffer(_) => PartType::StringBuffer as u32,
         RdatPart::IndexArrays(_) => PartType::IndexArrays as u32,
         RdatPart::RawBytes(_) => PartType::RawBytes as u32,
-        RdatPart::RecordTable { part_type, .. } => *part_type,
-        RdatPart::Unknown { part_type, .. } => *part_type,
+        RdatPart::RecordTable { part_type, .. } | RdatPart::Unknown { part_type, .. } => *part_type,
     }
 }
 
@@ -72,21 +74,21 @@ pub fn write_rdat(rdat: &RuntimeData) -> Vec<u8> {
         let mut offsets = Vec::with_capacity(part_count);
         let mut cursor = header_size;
         for payload in &payloads {
-            offsets.push(cursor as u32);
+            offsets.push(wire_u32(cursor));
             // PartHeader (8) + aligned payload
             cursor += 8 + align4(payload.len());
         }
 
         let mut out = Vec::with_capacity(cursor);
         write_u32(&mut out, rdat.version);
-        write_u32(&mut out, part_count as u32);
+        write_u32(&mut out, wire_u32(part_count));
         for &off in &offsets {
             write_u32(&mut out, off);
         }
 
         for (i, payload) in payloads.iter().enumerate() {
             write_u32(&mut out, part_type_id(&rdat.parts[i]));
-            write_u32(&mut out, payload.len() as u32);
+            write_u32(&mut out, wire_u32(payload.len()));
             out.extend_from_slice(payload);
             // Pad to 4-byte alignment.
             let padded = align4(payload.len());
@@ -97,10 +99,10 @@ pub fn write_rdat(rdat: &RuntimeData) -> Vec<u8> {
     } else {
         // Legacy: part_count + sequential parts (type + size + data)
         let mut out = Vec::new();
-        write_u32(&mut out, part_count as u32);
+        write_u32(&mut out, wire_u32(part_count));
         for (i, payload) in payloads.iter().enumerate() {
             write_u32(&mut out, part_type_id(&rdat.parts[i]));
-            write_u32(&mut out, payload.len() as u32);
+            write_u32(&mut out, wire_u32(payload.len()));
             out.extend_from_slice(payload);
             let padded = align4(payload.len());
             out.resize(out.len() + padded - payload.len(), 0);

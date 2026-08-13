@@ -46,7 +46,7 @@ const SHADER_TYPES: &[&str] = &["ps", "vs", "gs", "hs", "ds", "cs"];
 
 type R<T> = arbitrary::Result<T>;
 
-fn gen_components(u: &mut Unstructured) -> R<ComponentSelect> {
+fn gen_components(u: &mut Unstructured<'_>) -> R<ComponentSelect> {
     Ok(match u.int_in_range(0u8..=4)? {
         0 => ComponentSelect::ZeroComponent,
         1 => ComponentSelect::OneComponent,
@@ -62,7 +62,7 @@ fn gen_components(u: &mut Unstructured) -> R<ComponentSelect> {
 }
 
 /// A simple, always-encodable operand used inside relative index brackets.
-fn gen_simple_operand(u: &mut Unstructured) -> R<Operand> {
+fn gen_simple_operand(u: &mut Unstructured<'_>) -> R<Operand> {
     let mut indices: Indices = SmallVec::new();
     indices.push(OperandIndex::Imm32(u.int_in_range(0u32..=7)?));
     Ok(Operand {
@@ -75,17 +75,20 @@ fn gen_simple_operand(u: &mut Unstructured) -> R<Operand> {
     })
 }
 
-fn gen_index(u: &mut Unstructured, allow_relative: bool) -> R<OperandIndex> {
+fn gen_index(u: &mut Unstructured<'_>, allow_relative: bool) -> R<OperandIndex> {
     let hi = if allow_relative { 3 } else { 1 };
     Ok(match u.int_in_range(0u8..=hi)? {
         0 => OperandIndex::Imm32(u.int_in_range(0u32..=63)?),
         1 => OperandIndex::Imm64(u.int_in_range(0u64..=63)?),
         2 => OperandIndex::Relative(Box::new(gen_simple_operand(u)?)),
-        _ => OperandIndex::RelativePlusImm(u.int_in_range(0u32..=63)?, Box::new(gen_simple_operand(u)?)),
+        _ => OperandIndex::RelativePlusImm(
+            u.int_in_range(0u32..=63)?,
+            Box::new(gen_simple_operand(u)?),
+        ),
     })
 }
 
-fn gen_operand(u: &mut Unstructured) -> R<Operand> {
+fn gen_operand(u: &mut Unstructured<'_>) -> R<Operand> {
     // ~1 in 8 operands is an inline immediate.
     if u.int_in_range(0u8..=7)? == 0 {
         let (n, comp) = match u.int_in_range(0u8..=2)? {
@@ -132,7 +135,7 @@ fn gen_operand(u: &mut Unstructured) -> R<Operand> {
     })
 }
 
-fn gen_instruction(u: &mut Unstructured) -> R<Instruction> {
+fn gen_instruction(u: &mut Unstructured<'_>) -> R<Instruction> {
     let opcode = if u.int_in_range(0u8..=19)? == 0 {
         Opcode::Unknown(u.int_in_range(218u32..=0x7FF)?)
     } else {
@@ -185,7 +188,7 @@ fn gen_instruction(u: &mut Unstructured) -> R<Instruction> {
     Ok(i)
 }
 
-fn gen_program(u: &mut Unstructured) -> R<Program> {
+fn gen_program(u: &mut Unstructured<'_>) -> R<Program> {
     let shader_type = *u.choose(SHADER_TYPES)?;
     let n = u.int_in_range(1u8..=8)?;
     let mut instructions = Vec::new();

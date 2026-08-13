@@ -90,13 +90,18 @@ fn set_field(s: &mut ShaderStats, key: &str, v: u32) -> bool {
 
 /// Serialize STAT to editable `key=value` lines (plus `size` and `reserved`,
 /// needed to reproduce the exact byte length).
+#[must_use]
 pub fn stat_to_text(s: &ShaderStats) -> String {
     let mut o = String::new();
     let _ = writeln!(o, "size={}", s.raw_size);
     let _ = writeln!(
         o,
         "sample_frequency={}",
-        if s.is_sample_frequency { "true" } else { "false" }
+        if s.is_sample_frequency {
+            "true"
+        } else {
+            "false"
+        }
     );
     let _ = writeln!(
         o,
@@ -111,6 +116,7 @@ pub fn stat_to_text(s: &ShaderStats) -> String {
 
 /// Parse the editable text form produced by [`stat_to_text`]. Whitespace around
 /// the `=` and list commas is ignored; an unknown key is an error.
+#[must_use]
 pub fn stat_from_text(text: &str) -> Option<ShaderStats> {
     let mut s = ShaderStats::default();
     for line in text.lines() {

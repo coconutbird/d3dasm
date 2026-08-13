@@ -8,12 +8,19 @@
 use alloc::string::String;
 use core::fmt::Write;
 
-use super::ir::*;
+use super::ir::{
+    ComponentSelect, CustomDataType, GsPrimitive, Instruction, InstructionKind, Operand,
+    OperandIndex, Program, RegisterType, ReturnType,
+};
 use super::opcodes::Opcode;
 
 // Write functions: stream directly into a fmt::Write sink.
 
 /// Write a decoded [`Program`] as disassembly text into `w`.
+///
+/// # Errors
+///
+/// Returns the sink's formatting error if any write fails.
 pub fn write_program(w: &mut dyn Write, program: &Program) -> core::fmt::Result {
     writeln!(
         w,
@@ -53,6 +60,10 @@ pub fn write_program(w: &mut dyn Write, program: &Program) -> core::fmt::Result 
 }
 
 /// Write a single [`Instruction`] into `w`.
+///
+/// # Errors
+///
+/// Returns the sink's formatting error if any write fails.
 pub fn write_instruction(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
     match &instr.kind {
         InstructionKind::Generic { operands } => write_generic(w, instr, operands),
@@ -62,12 +73,16 @@ pub fn write_instruction(w: &mut dyn Write, instr: &Instruction) -> core::fmt::R
             values,
             raw_dword_count,
             ..
-        } => write_custom_data(w, subtype, values, *raw_dword_count),
+        } => write_custom_data(w, *subtype, values, *raw_dword_count),
         _ => write_declaration(w, instr),
     }
 }
 
 /// Write the full instruction mnemonic (opcode + modifier suffixes) into `w`.
+///
+/// # Errors
+///
+/// Returns the sink's formatting error if any write fails.
 pub fn write_mnemonic(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
     w.write_str(instr.opcode.name())?;
     match instr.resinfo_return_type {
@@ -92,8 +107,9 @@ pub fn write_mnemonic(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resu
     if instr.saturate {
         w.write_str("_sat")?;
     }
-    if let Some([u, v, ww]) = instr.tex_offsets
-        && (u != 0 || v != 0 || ww != 0)
+    if let Some([u, v, ww]) = instr
+        .tex_offsets
+        .filter(|offsets| offsets.iter().any(|offset| *offset != 0))
     {
         write!(w, "({u}, {v}, {ww})")?;
     }
@@ -142,6 +158,10 @@ fn resource_dim_name(dim: u32) -> &'static str {
 }
 
 /// Write a single [`Operand`] into `w` (float immediate formatting).
+///
+/// # Errors
+///
+/// Returns the sink's formatting error if any write fails.
 pub fn write_operand(w: &mut dyn Write, op: &Operand) -> core::fmt::Result {
     write_operand_core(w, op, None, ImmediateType::Float)
 }
@@ -149,6 +169,7 @@ pub fn write_operand(w: &mut dyn Write, op: &Operand) -> core::fmt::Result {
 // String-returning wrappers for backward compatibility.
 
 /// Format a decoded [`Program`] into disassembly text.
+#[must_use]
 pub fn format_program(program: &Program) -> String {
     let mut out = String::new();
     let _ = write_program(&mut out, program);
@@ -156,6 +177,7 @@ pub fn format_program(program: &Program) -> String {
 }
 
 /// Format a single [`Instruction`] into its disassembly text.
+#[must_use]
 pub fn format_instruction(instr: &Instruction) -> String {
     let mut out = String::new();
     let _ = write_instruction(&mut out, instr);
@@ -163,11 +185,13 @@ pub fn format_instruction(instr: &Instruction) -> String {
 }
 
 /// Format the bare opcode name.
+#[must_use]
 pub fn format_opcode(opcode: &Opcode) -> &'static str {
     opcode.name()
 }
 
 /// Format the full instruction mnemonic, including modifier suffixes.
+#[must_use]
 pub fn format_mnemonic(instr: &Instruction) -> String {
     let mut out = String::new();
     let _ = write_mnemonic(&mut out, instr);
@@ -175,6 +199,7 @@ pub fn format_mnemonic(instr: &Instruction) -> String {
 }
 
 /// Format a single [`Operand`].
+#[must_use]
 pub fn format_operand(op: &Operand) -> String {
     let mut out = String::new();
     let _ = write_operand(&mut out, op);
@@ -193,34 +218,11 @@ pub enum ImmediateType {
 }
 
 /// Classify an opcode's source operand type for immediate formatting.
+#[must_use]
 pub fn opcode_imm_type(op: Opcode) -> ImmediateType {
     match op {
-        // Float ALU
-        Opcode::Add | Opcode::Div | Opcode::Dp2 | Opcode::Dp3 | Opcode::Dp4
-        | Opcode::Eq | Opcode::Exp | Opcode::Frc | Opcode::Ge | Opcode::Log
-        | Opcode::Lt | Opcode::Mad | Opcode::Min | Opcode::Max | Opcode::Mul
-        | Opcode::Ne | Opcode::Round_ne | Opcode::Round_ni | Opcode::Round_pi
-        | Opcode::Round_z | Opcode::Rsq | Opcode::Sqrt | Opcode::Sincos
-        | Opcode::Rcp | Opcode::Lod | Opcode::Deriv_rtx | Opcode::Deriv_rty
-        | Opcode::Deriv_rtx_coarse | Opcode::Deriv_rtx_fine
-        | Opcode::Deriv_rty_coarse | Opcode::Deriv_rty_fine
-        | Opcode::Sample | Opcode::SampleC | Opcode::SampleCLz
-        | Opcode::SampleL | Opcode::SampleD | Opcode::SampleB
-        | Opcode::SamplePos | Opcode::SampleInfo
-        | Opcode::Gather4 | Opcode::Gather4C | Opcode::Gather4Po | Opcode::Gather4PoC
-        | Opcode::Eval_snapped | Opcode::Eval_sampleIndex | Opcode::Eval_centroid
-        | Opcode::Discard
-        // Conversion: float sources
-        | Opcode::Ftoi | Opcode::Ftou | Opcode::Ftod | Opcode::F32tof16
-        // Double-precision (double sources, but float formatting works)
-        | Opcode::Dadd | Opcode::Dmax | Opcode::Dmin | Opcode::Dmul
-        | Opcode::Deq | Opcode::Dge | Opcode::Dlt | Opcode::Dne
-        | Opcode::Dmov | Opcode::Dmovc | Opcode::Dtof | Opcode::Ddiv
-        | Opcode::Dfma | Opcode::Drcp | Opcode::Dtoi | Opcode::Dtou
-        => ImmediateType::Float,
-
         // Signed integer ALU
-        | Opcode::Iadd | Opcode::IEq | Opcode::IGe | Opcode::ILt
+        Opcode::Iadd | Opcode::IEq | Opcode::IGe | Opcode::ILt
         | Opcode::IMad | Opcode::IMax | Opcode::IMin | Opcode::IMul
         | Opcode::INe | Opcode::INeg | Opcode::Ishl | Opcode::Ishr
         | Opcode::Ibfe | Opcode::FirstbitShi
@@ -249,15 +251,7 @@ pub fn opcode_imm_type(op: Opcode) -> ImmediateType {
         | Opcode::Msad
         => ImmediateType::Uint,
 
-        // mov/movc/swapc copy bits — use float as default since most shaders are float-heavy
-        | Opcode::Mov | Opcode::Movc | Opcode::Swapc
-        // load/store — typically uint addressing, but payload may be float
-        | Opcode::Ld | Opcode::LdMs | Opcode::LdUavTyped
-        | Opcode::StoreUavTyped | Opcode::StoreRaw
-        | Opcode::StoreStructured | Opcode::Resinfo | Opcode::BufInfo
-        => ImmediateType::Float,
-
-        // Everything else (flow control, declarations, etc.) — float is a safe default
+        // Floating-point, bit-copy, flow-control, and declaration opcodes.
         _ => ImmediateType::Float,
     }
 }
@@ -366,6 +360,12 @@ fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resul
             write_operand_list(w, operands)?;
             write!(w, ", {access}")
         }
+        _ => write_special_declaration(w, instr),
+    }
+}
+
+fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
+    match &instr.kind {
         InstructionKind::DclTemps { count } => write!(w, "dcl_temps {count}"),
         InstructionKind::DclIndexableTemp {
             reg,
@@ -453,6 +453,13 @@ fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resul
             write_operand_list(w, operands)?;
             write!(w, ", {count}")
         }
+        _ => write_function_declaration(w, instr),
+    }
+}
+
+fn write_function_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
+    let name = instr.opcode.name();
+    match &instr.kind {
         InstructionKind::DclFunctionBody { index } => write!(w, "dcl_function_body fb{index}"),
         InstructionKind::DclFunctionTable {
             table_index,
@@ -512,7 +519,7 @@ fn write_uav_flags(w: &mut dyn Write, flags: u32) -> core::fmt::Result {
 
 fn write_custom_data(
     w: &mut dyn Write,
-    subtype: &CustomDataType,
+    subtype: CustomDataType,
     values: &[[f32; 4]],
     raw_dword_count: usize,
 ) -> core::fmt::Result {
@@ -525,7 +532,7 @@ fn write_custom_data(
             return write!(w, "customdata // subtype={v}, {raw_dword_count} dwords");
         }
     };
-    if *subtype == CustomDataType::ImmediateConstantBuffer && !values.is_empty() {
+    if subtype == CustomDataType::ImmediateConstantBuffer && !values.is_empty() {
         write!(w, "{ty} {{")?;
         for v in values {
             w.write_str("\n  { ")?;
@@ -558,7 +565,10 @@ fn dest_component_count(op: Option<&Operand>) -> Option<u8> {
                 None
             } else {
                 // Highest set bit position + 1
-                Some((8 - mask.leading_zeros()) as u8)
+                Some(
+                    u8::try_from(8 - mask.leading_zeros())
+                        .expect("an 8-bit mask has at most eight components"),
+                )
             }
         }
         _ => None,
@@ -652,8 +662,8 @@ fn write_operand_core(
                 w.write_str(", ")?;
             }
             first = false;
-            let lo = op.immediate_values[i] as u64;
-            let hi = op.immediate_values[i + 1] as u64;
+            let lo = u64::from(op.immediate_values[i]);
+            let hi = u64::from(op.immediate_values[i + 1]);
             let f = f64::from_bits(lo | (hi << 32));
             write!(w, "{f:?}")?;
             i += 2;
@@ -799,7 +809,7 @@ fn write_immediate(w: &mut dyn Write, val: u32, imm_type: ImmediateType) -> core
                 write!(w, "{f:.6}")
             }
         }
-        ImmediateType::Int => write!(w, "{}", val as i32),
+        ImmediateType::Int => write!(w, "{}", i32::from_ne_bytes(val.to_ne_bytes())),
         ImmediateType::Uint => {
             if val == 0 {
                 w.write_char('0')

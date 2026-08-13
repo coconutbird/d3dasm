@@ -1,7 +1,6 @@
 //! Emit an RDEF as editable HLSL.
 
 use alloc::string::String;
-use core::fmt::Write as _;
 
 use super::*;
 use dxbc::chunks::ChunkWriter;
@@ -19,7 +18,7 @@ fn emit_binding(o: &mut String, b: &ResourceBinding<'_>, rd: &ResourceDef<'_>) -
     // always carry dimension=Buffer(1) and return=mixed(6), and textures default
     // to the -1 "not multisampled" sentinel — all derived on parse.
     let structured = matches!(b.input_type, 5 | 6 | 9 | 10 | 11);
-    let dim_default = if structured { 1 } else { 0 };
+    let dim_default = u32::from(structured);
     let ret_default = if structured { 6 } else { 0 };
     if !is_texture(b.input_type) && b.dimension != dim_default {
         let _ = write!(o, " dim={}", b.dimension);
@@ -69,20 +68,22 @@ fn emit_var(o: &mut String, v: &CBufferVariable<'_>, indent: &str, sm5: bool) ->
     if other != 0 {
         let _ = write!(o, " var_flags={other:x}");
     }
-    if let Some(e) = &t.sm5_extra
-        && *e != [0; 4]
-    {
+    if let Some(e) = t.sm5_extra.as_ref().filter(|extra| **extra != [0; 4]) {
         let _ = write!(o, " sm5={:x},{:x},{:x},{:x}", e[0], e[1], e[2], e[3]);
     }
-    if let Some(ts) = v.texture_start
-        && (ts != SLOT_UNUSED || v.texture_size.unwrap_or(0) != 0)
+    if let Some(ts) = v
+        .texture_start
+        .filter(|start| *start != SLOT_UNUSED || v.texture_size.unwrap_or(0) != 0)
     {
-        let _ = write!(o, " tex={},{}", ts as i32, v.texture_size.unwrap_or(0));
+        let start = i32::from_ne_bytes(ts.to_ne_bytes());
+        let _ = write!(o, " tex={start},{}", v.texture_size.unwrap_or(0));
     }
-    if let Some(ss) = v.sampler_start
-        && (ss != SLOT_UNUSED || v.sampler_size.unwrap_or(0) != 0)
+    if let Some(ss) = v
+        .sampler_start
+        .filter(|start| *start != SLOT_UNUSED || v.sampler_size.unwrap_or(0) != 0)
     {
-        let _ = write!(o, " samp={},{}", ss as i32, v.sampler_size.unwrap_or(0));
+        let start = i32::from_ne_bytes(ss.to_ne_bytes());
+        let _ = write!(o, " samp={start},{}", v.sampler_size.unwrap_or(0));
     }
     if !v.default_value.is_empty() {
         if let Some(init) = render_default(t, &v.default_value) {
@@ -102,6 +103,7 @@ fn emit_var(o: &mut String, v: &CBufferVariable<'_>, indent: &str, sm5: bool) ->
 
 /// Serialize an RDEF to editable HLSL. Returns `None` for anything this codec
 /// cannot model losslessly (caller falls back to the `key=value` form).
+#[must_use]
 pub fn rdef_to_hlsl(rd: &ResourceDef<'_>) -> Option<String> {
     let sm5 = is_sm5(rd.target_version);
     let mut o = String::new();
@@ -148,12 +150,10 @@ pub fn rdef_to_hlsl(rd: &ResourceDef<'_>) -> Option<String> {
             if t.rows != 1 {
                 let _ = write!(o, " rows={}", t.rows);
             }
-            if t.columns as u32 != struct_size / 4 {
+            if u32::from(t.columns) != struct_size / 4 {
                 let _ = write!(o, " cols={}", t.columns);
             }
-            if let Some(e) = &t.sm5_extra
-                && *e != [0; 4]
-            {
+            if let Some(e) = t.sm5_extra.as_ref().filter(|extra| **extra != [0; 4]) {
                 let _ = write!(o, " sm5={:x},{:x},{:x},{:x}", e[0], e[1], e[2], e[3]);
             }
             o.push_str(" {\n");
@@ -174,8 +174,11 @@ pub fn rdef_to_hlsl(rd: &ResourceDef<'_>) -> Option<String> {
                 if m.offset != running {
                     let _ = write!(o, " +{}", m.offset);
                 }
-                if let Some(e) = &m.member_type.sm5_extra
-                    && *e != [0; 4]
+                if let Some(e) = m
+                    .member_type
+                    .sm5_extra
+                    .as_ref()
+                    .filter(|extra| **extra != [0; 4])
                 {
                     let _ = write!(o, " sm5={:x},{:x},{:x},{:x}", e[0], e[1], e[2], e[3]);
                 }
@@ -193,8 +196,8 @@ pub fn rdef_to_hlsl(rd: &ResourceDef<'_>) -> Option<String> {
     // two-section form when the array orderings don't allow a faithful merge.
     if let Some(body) = emit_merged_body(rd, sm5) {
         let full = alloc::format!("{o}{body}");
-        if let Some(rd2) = rdef_from_hlsl(&full)
-            && rd2.to_writable().data == rd.to_writable().data
+        if rdef_from_hlsl(&full)
+            .is_some_and(|roundtrip| roundtrip.to_writable().data == rd.to_writable().data)
         {
             return Some(full);
         }
@@ -303,4 +306,3 @@ fn emit_merged_body(rd: &ResourceDef<'_>, sm5: bool) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
-

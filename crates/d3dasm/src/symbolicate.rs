@@ -17,7 +17,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use dxbc::chunks::rdef::{CBufferDef, CBufferVariable, ResourceDef};
-use dxbc::shex::{ComponentSelect, Instruction, InstructionKind, Operand, OperandIndex, Program, RegisterType};
+use dxbc::shex::{
+    ComponentSelect, Instruction, InstructionKind, Operand, OperandIndex, Program, RegisterType,
+};
 
 const AXES: [char; 4] = ['x', 'y', 'z', 'w'];
 
@@ -30,7 +32,8 @@ const UAV_INPUT_TYPES: &[u32] = &[4, 6, 8, 9, 10, 11];
 /// instruction) with resolved cbuffer/resource names. Returns the text unchanged
 /// if its line count doesn't line up with the program (defensive — never risk
 /// misaligning a comment onto the wrong instruction).
-pub fn annotate_shex(shex_text: &str, program: &Program, rdef: &ResourceDef) -> String {
+#[must_use]
+pub fn annotate_shex(shex_text: &str, program: &Program, rdef: &ResourceDef<'_>) -> String {
     let lines: Vec<&str> = shex_text.lines().collect();
     if lines.len() != program.instructions.len() + 1 {
         return shex_text.to_string();
@@ -50,7 +53,7 @@ pub fn annotate_shex(shex_text: &str, program: &Program, rdef: &ResourceDef) -> 
 /// Build the `addr = name[, addr = name]` comment for one instruction, or `None`
 /// when it references no resolvable resource. Only computational (`Generic`)
 /// instructions are annotated — declarations index by size/slot, not by access.
-fn resolve_instruction(instr: &Instruction, rdef: &ResourceDef) -> Option<String> {
+fn resolve_instruction(instr: &Instruction, rdef: &ResourceDef<'_>) -> Option<String> {
     if !matches!(instr.kind, InstructionKind::Generic { .. }) {
         return None;
     }
@@ -73,7 +76,7 @@ fn resolve_instruction(instr: &Instruction, rdef: &ResourceDef) -> Option<String
 }
 
 /// `(faithful operand text, resolved name)` for a resource operand, or `None`.
-fn resolve_operand(op: &Operand, rdef: &ResourceDef) -> Option<(String, String)> {
+fn resolve_operand(op: &Operand, rdef: &ResourceDef<'_>) -> Option<(String, String)> {
     let name = match op.reg_type {
         RegisterType::ConstantBuffer => return resolve_cb(op, rdef),
         RegisterType::Resource => binding_name(rdef, slot(op)?, SRV_INPUT_TYPES)?,
@@ -93,14 +96,14 @@ fn slot(op: &Operand) -> Option<u32> {
 }
 
 /// Binding name for a register slot among the given resource input types.
-fn binding_name(rdef: &ResourceDef, reg: u32, input_types: &[u32]) -> Option<String> {
+fn binding_name(rdef: &ResourceDef<'_>, reg: u32, input_types: &[u32]) -> Option<String> {
     rdef.bindings
         .iter()
         .find(|b| input_types.contains(&b.input_type) && b.bind_point == reg)
         .map(|b| b.name.to_string())
 }
 
-fn resolve_cb(op: &Operand, rdef: &ResourceDef) -> Option<(String, String)> {
+fn resolve_cb(op: &Operand, rdef: &ResourceDef<'_>) -> Option<(String, String)> {
     let slot = match op.indices.first()? {
         OperandIndex::Imm32(v) => *v,
         _ => return None,
@@ -116,9 +119,11 @@ fn resolve_cb(op: &Operand, rdef: &ResourceDef) -> Option<(String, String)> {
 
     let name = match op.indices.get(1)? {
         OperandIndex::Imm32(reg) => resolve_cb_static(cb, *reg, &op.components)?,
-        OperandIndex::RelativePlusImm(base, sub) => resolve_cb_dynamic(cb, *base, sub, &op.components)?,
+        OperandIndex::RelativePlusImm(base, sub) => {
+            resolve_cb_dynamic(cb, *base, sub, &op.components)?
+        }
         OperandIndex::Relative(sub) => resolve_cb_dynamic(cb, 0, sub, &op.components)?,
-        _ => return None,
+        OperandIndex::Imm64(_) => return None,
     };
     Some((crate::grammar::shex::operand_string(op), name))
 }
@@ -128,9 +133,9 @@ fn resolve_cb(op: &Operand, rdef: &ResourceDef) -> Option<(String, String)> {
 fn resolve_cb_static(cb: &CBufferDef<'_>, reg: u32, comps: &ComponentSelect) -> Option<String> {
     let comps = component_list(comps);
     // All accessed components must fall within a single variable.
-    let mut var: Option<&CBufferVariable> = None;
+    let mut var: Option<&CBufferVariable<'_>> = None;
     for &c in &comps {
-        let byte = reg * 16 + c as u32 * 4;
+        let byte = reg * 16 + u32::from(c) * 4;
         let v = cb
             .variables
             .iter()
@@ -172,7 +177,11 @@ fn resolve_cb_dynamic(
     } else {
         format!("{dynamic}+{}", base - var_reg)
     };
-    Some(format!("{}[{index}]{}", v.name, swizzle(&component_list(comps), 0)))
+    Some(format!(
+        "{}[{index}]{}",
+        v.name,
+        swizzle(&component_list(comps), 0)
+    ))
 }
 
 fn render_var_access(v: &CBufferVariable<'_>, reg: u32, comps: &[u8]) -> String {
@@ -200,7 +209,7 @@ fn render_var_access(v: &CBufferVariable<'_>, reg: u32, comps: &[u8]) -> String 
 /// Per-element register count of an array variable (HLSL packs each element to a
 /// 16-byte boundary).
 fn elem_registers(v: &CBufferVariable<'_>) -> u32 {
-    let elements = v.var_type.elements.max(1) as u32;
+    let elements = u32::from(v.var_type.elements.max(1));
     let per_elem = v.size.div_ceil(elements);
     per_elem.div_ceil(16).max(1)
 }
@@ -230,8 +239,8 @@ mod tests {
     use super::*;
     use alloc::borrow::Cow;
     use alloc::boxed::Box;
-    use dxbc::chunks::rdef::{CBufferDef, ResourceBinding};
     use dxbc::chunks::rdef::TypeDesc;
+    use dxbc::chunks::rdef::{CBufferDef, ResourceBinding};
     use smallvec::smallvec;
 
     fn td(class: u16, columns: u16, elements: u16) -> TypeDesc<'static> {
@@ -246,7 +255,12 @@ mod tests {
             name: Cow::Borrowed(""),
         }
     }
-    fn var(name: &'static str, offset: u32, size: u32, t: TypeDesc<'static>) -> CBufferVariable<'static> {
+    fn var(
+        name: &'static str,
+        offset: u32,
+        size: u32,
+        t: TypeDesc<'static>,
+    ) -> CBufferVariable<'static> {
         CBufferVariable {
             name: Cow::Borrowed(name),
             offset,
@@ -275,11 +289,11 @@ mod tests {
             constant_buffers: alloc::vec![CBufferDef {
                 name: Cow::Borrowed("cb"),
                 variables: alloc::vec![
-                    var("gColor", 0, 16, td(1, 4, 0)),  // c0  float4
-                    var("gMat", 16, 64, td(2, 4, 0)),   // c1  float4x4
-                    var("gArr", 80, 64, td(1, 4, 4)),   // c5  float4[4]
-                    var("gFlag", 144, 4, td(0, 1, 0)),  // c9.x bool
-                    var("gVec", 148, 12, td(1, 3, 0)),  // c9.y float3
+                    var("gColor", 0, 16, td(1, 4, 0)), // c0  float4
+                    var("gMat", 16, 64, td(2, 4, 0)),  // c1  float4x4
+                    var("gArr", 80, 64, td(1, 4, 4)),  // c5  float4[4]
+                    var("gFlag", 144, 4, td(0, 1, 0)), // c9.x bool
+                    var("gVec", 148, 12, td(1, 3, 0)), // c9.y float3
                 ],
                 size: 160,
                 flags: 0,
@@ -309,16 +323,25 @@ mod tests {
     fn vector_matrix_array_shift_and_crossvar() {
         use ComponentSelect::*;
         // float4 + single component
-        assert_eq!(resolve(OperandIndex::Imm32(0), Scalar(3)).as_deref(), Some("gColor.w"));
+        assert_eq!(
+            resolve(OperandIndex::Imm32(0), Scalar(3)).as_deref(),
+            Some("gColor.w")
+        );
         // matrix row (c2 = row 1 of gMat @ c1)
         assert_eq!(
             resolve(OperandIndex::Imm32(2), Swizzle([0, 1, 2, 3])).as_deref(),
             Some("gMat[1].xyzw")
         );
         // array element (c6 = gArr[1])
-        assert_eq!(resolve(OperandIndex::Imm32(6), Scalar(0)).as_deref(), Some("gArr[1].x"));
+        assert_eq!(
+            resolve(OperandIndex::Imm32(6), Scalar(0)).as_deref(),
+            Some("gArr[1].x")
+        );
         // component shift: gVec @ c9.y, operand .w -> .z
-        assert_eq!(resolve(OperandIndex::Imm32(9), Scalar(3)).as_deref(), Some("gVec.z"));
+        assert_eq!(
+            resolve(OperandIndex::Imm32(9), Scalar(3)).as_deref(),
+            Some("gVec.z")
+        );
         // cross-variable: c9 .xyz spans gFlag(.x) + gVec(.yz) -> no single name
         assert_eq!(resolve(OperandIndex::Imm32(9), Swizzle([0, 1, 2, 0])), None);
     }

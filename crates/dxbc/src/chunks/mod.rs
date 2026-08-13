@@ -43,7 +43,7 @@ pub trait ChunkParser<'a>: Sized + fmt::Debug + fmt::Display {
 /// A chunk payload serialized to bytes, ready for container assembly.
 #[derive(Debug, Clone)]
 pub struct WritableChunk {
-    /// FourCC identifying this chunk type.
+    /// `FourCC` identifying this chunk type.
     pub fourcc: [u8; 4],
     /// Serialized chunk payload (everything after the 8-byte fourcc+size header).
     pub data: Vec<u8>,
@@ -54,7 +54,7 @@ pub struct WritableChunk {
 /// Not all chunk types implement this — only those with fully understood
 /// binary layouts. Implement incrementally as needed.
 pub trait ChunkWriter {
-    /// The FourCC code to use when writing this chunk.
+    /// The `FourCC` code to use when writing this chunk.
     fn fourcc(&self) -> [u8; 4];
 
     /// Serialize the chunk payload (everything after the 8-byte fourcc+size header).
@@ -135,7 +135,7 @@ pub enum ChunkData<'a> {
     LibraryHeader(libh::LibraryHeader),
     /// Unrecognised chunk — preserved so nothing is silently dropped.
     Unknown {
-        /// FourCC identifier of the unknown chunk.
+        /// `FourCC` identifier of the unknown chunk.
         fourcc: [u8; 4],
         /// Raw chunk data.
         data: &'a [u8],
@@ -156,6 +156,7 @@ macro_rules! try_parse {
 }
 
 /// Parse a raw [`DxbcChunk`] into a typed [`ChunkData`].
+#[must_use]
 pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
     let d = chunk.data;
     let cc = chunk.fourcc;
@@ -197,10 +198,10 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
                 data: d,
             },
         },
-        "ILDN" => try_parse!(d, cc, DebugName, ildn::DebugName),
-        "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData),
-        "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData),
-        "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData),
+        "ILDN" => try_parse!(d, cc, DebugName, ildn::DebugName<'_>),
+        "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData<'_>),
+        "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData<'_>),
+        "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData<'_>),
         "PSV0" => match <psv0::PipelineStateValidation as ChunkParser<'_>>::parse(d) {
             Some(v) => ChunkData::PipelineStateValidation(alloc::boxed::Box::new(v)),
             None => ChunkData::Unknown {
@@ -227,6 +228,7 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
 
 impl ChunkData<'_> {
     /// Serialize this chunk back to binary.
+    #[must_use]
     pub fn to_writable(&self) -> Option<WritableChunk> {
         match self {
             ChunkData::Stats(s) => Some(s.to_writable()),
@@ -234,9 +236,9 @@ impl ChunkData<'_> {
             ChunkData::Hash(h) => Some(h.to_writable()),
             ChunkData::DebugName(dn) => Some(dn.to_writable()),
             ChunkData::RootSignature(rs) => Some(rs.to_writable()),
-            ChunkData::InputSignature(sig) => Some(sig.to_writable()),
-            ChunkData::OutputSignature(sig) => Some(sig.to_writable()),
-            ChunkData::PatchConstantSignature(sig) => Some(sig.to_writable()),
+            ChunkData::InputSignature(sig)
+            | ChunkData::OutputSignature(sig)
+            | ChunkData::PatchConstantSignature(sig) => Some(sig.to_writable()),
             ChunkData::DebugData(dd) => Some(dd.to_writable()),
             ChunkData::PrivateData(pd) => Some(pd.to_writable()),
             ChunkData::Dxil(d) => Some(d.to_writable()),

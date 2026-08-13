@@ -2,7 +2,7 @@
 //! `decode -> serialize -> assemble -> encode` and compare against the original
 //! chunk bytes. Verifies that the textual format re-encodes byte-identically.
 //!
-//! Usage: cargo run --release --example text_roundtrip -- shaders/**/*.bin
+//! Usage: cargo run --release --example `text_roundtrip` -- shaders/**/*.bin
 
 fn main() {
     let mut total = 0usize;

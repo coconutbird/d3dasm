@@ -12,6 +12,7 @@
 pub mod hlsl;
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -21,6 +22,7 @@ use dxbc::chunks::rdef::{
 
 /// Serialize an RDEF to a flat, editable `key=value` text form. Returns `None`
 /// for shapes the codec does not model (e.g. nested struct members).
+#[must_use]
 pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
     use core::fmt::Write as _;
 
@@ -89,10 +91,12 @@ pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
             );
             write_type(&mut o, &v.var_type);
             if let Some(ts) = v.texture_start {
-                let _ = write!(o, " tex={},{}", ts as i32, v.texture_size.unwrap_or(0));
+                let start = i32::from_ne_bytes(ts.to_ne_bytes());
+                let _ = write!(o, " tex={start},{}", v.texture_size.unwrap_or(0));
             }
             if let Some(ss) = v.sampler_start {
-                let _ = write!(o, " samp={},{}", ss as i32, v.sampler_size.unwrap_or(0));
+                let start = i32::from_ne_bytes(ss.to_ne_bytes());
+                let _ = write!(o, " samp={start},{}", v.sampler_size.unwrap_or(0));
             }
             if !v.default_value.is_empty() {
                 let _ = write!(o, " default=");
@@ -111,67 +115,156 @@ pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
     Some(o)
 }
 
+fn parse_fields<'a>(tokens: impl Iterator<Item = &'a str>) -> BTreeMap<&'a str, &'a str> {
+    let mut fields = BTreeMap::new();
+    for token in tokens {
+        if let Some((key, value)) = token.split_once('=') {
+            fields.insert(key, value);
+        }
+    }
+    fields
+}
+
+fn parse_decimal(fields: &BTreeMap<&str, &str>, key: &str) -> Option<u32> {
+    fields.get(key)?.parse().ok()
+}
+
+fn parse_hex_field(fields: &BTreeMap<&str, &str>, key: &str) -> Option<u32> {
+    u32::from_str_radix(fields.get(key)?, 16).ok()
+}
+
+fn parse_hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut decoded = Vec::with_capacity(hex.len() / 2);
+    let mut position = 0;
+    while position < bytes.len() {
+        let high = (bytes[position] as char).to_digit(16)?;
+        let low = (bytes[position + 1] as char).to_digit(16)?;
+        decoded.push(u8::try_from(high * 16 + low).ok()?);
+        position += 2;
+    }
+    Some(decoded)
+}
+
+fn parse_flat_type(fields: &BTreeMap<&str, &str>) -> Option<TypeDesc<'static>> {
+    let sm5_extra = match fields.get("sm5") {
+        Some(value) => {
+            let mut values = value.split(',');
+            let mut extra = [0u32; 4];
+            for slot in &mut extra {
+                *slot = u32::from_str_radix(values.next()?, 16).ok()?;
+            }
+            Some(extra)
+        }
+        None => None,
+    };
+    Some(TypeDesc {
+        class: u16::try_from(parse_decimal(fields, "class")?).ok()?,
+        var_type: u16::try_from(parse_decimal(fields, "base")?).ok()?,
+        rows: u16::try_from(parse_decimal(fields, "rows")?).ok()?,
+        columns: u16::try_from(parse_decimal(fields, "cols")?).ok()?,
+        elements: u16::try_from(parse_decimal(fields, "elements")?).ok()?,
+        members: Vec::new(),
+        sm5_extra,
+        name: match fields.get("typename") {
+            Some(value) => Cow::Owned(String::from(*value)),
+            None => Cow::Borrowed(""),
+        },
+    })
+}
+
+fn parse_signed_pair(value: &str) -> Option<(u32, u32)> {
+    let (signed, count) = value.split_once(',')?;
+    let signed = signed.parse::<i32>().ok()?;
+    Some((
+        u32::from_ne_bytes(signed.to_ne_bytes()),
+        count.parse().ok()?,
+    ))
+}
+
+fn optional_pair(fields: &BTreeMap<&str, &str>, key: &str) -> Option<(Option<u32>, Option<u32>)> {
+    match fields.get(key) {
+        Some(value) => {
+            let (start, count) = parse_signed_pair(value)?;
+            Some((Some(start), Some(count)))
+        }
+        None => Some((None, None)),
+    }
+}
+
+fn parse_flat_record(resource_def: &mut ResourceDef<'static>, line: &str) -> Option<()> {
+    let (head, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let mut tokens = rest.split_whitespace();
+    let name = tokens.next()?;
+    let fields = parse_fields(tokens);
+    match head {
+        "binding" => resource_def.bindings.push(ResourceBinding {
+            name: Cow::Owned(String::from(name)),
+            input_type: parse_decimal(&fields, "input")?,
+            return_type: parse_decimal(&fields, "return")?,
+            dimension: parse_decimal(&fields, "dim")?,
+            num_samples: parse_decimal(&fields, "samples")?,
+            bind_point: parse_decimal(&fields, "slot")?,
+            bind_count: parse_decimal(&fields, "count")?,
+            flags: parse_hex_field(&fields, "flags")?,
+        }),
+        "cbuffer" => resource_def.constant_buffers.push(CBufferDef {
+            name: Cow::Owned(String::from(name)),
+            variables: Vec::new(),
+            size: parse_decimal(&fields, "size")?,
+            flags: parse_hex_field(&fields, "flags")?,
+            cb_type: parse_decimal(&fields, "kind")?,
+        }),
+        "member" => {
+            let member_type = parse_flat_type(&fields)?;
+            let offset = parse_decimal(&fields, "offset")?;
+            let variable = resource_def
+                .constant_buffers
+                .last_mut()?
+                .variables
+                .last_mut()?;
+            variable.var_type.members.push(MemberDesc {
+                name: Cow::Owned(String::from(name)),
+                member_type,
+                offset,
+            });
+        }
+        "var" => {
+            let (texture_start, texture_size) = optional_pair(&fields, "tex")?;
+            let (sampler_start, sampler_size) = optional_pair(&fields, "samp")?;
+            let default_value = match fields.get("default") {
+                Some(hex) => parse_hex_bytes(hex)?,
+                None => Vec::new(),
+            };
+            let variable = CBufferVariable {
+                name: Cow::Owned(String::from(name)),
+                offset: parse_decimal(&fields, "offset")?,
+                size: parse_decimal(&fields, "size")?,
+                flags: parse_hex_field(&fields, "flags")?,
+                var_type: parse_flat_type(&fields)?,
+                default_value: Cow::Owned(default_value),
+                texture_start,
+                texture_size,
+                sampler_start,
+                sampler_size,
+            };
+            resource_def
+                .constant_buffers
+                .last_mut()?
+                .variables
+                .push(variable);
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
 /// Parse the text produced by [`rdef_to_text`] back into an owned RDEF.
+#[must_use]
 pub fn rdef_from_text(text: &str) -> Option<ResourceDef<'static>> {
-    use alloc::collections::BTreeMap;
-
-    fn kv<'a>(it: impl Iterator<Item = &'a str>) -> BTreeMap<&'a str, &'a str> {
-        let mut m = BTreeMap::new();
-        for tok in it {
-            if let Some((k, val)) = tok.split_once('=') {
-                m.insert(k, val);
-            }
-        }
-        m
-    }
-    fn dec(m: &BTreeMap<&str, &str>, k: &str) -> Option<u32> {
-        m.get(k)?.parse().ok()
-    }
-    fn hexv(m: &BTreeMap<&str, &str>, k: &str) -> Option<u32> {
-        u32::from_str_radix(m.get(k)?, 16).ok()
-    }
-    fn hex_bytes(h: &str) -> Option<Vec<u8>> {
-        if h.len() % 2 != 0 {
-            return None;
-        }
-        let b = h.as_bytes();
-        let mut out = Vec::with_capacity(h.len() / 2);
-        let mut i = 0;
-        while i < b.len() {
-            let hi = (b[i] as char).to_digit(16)?;
-            let lo = (b[i + 1] as char).to_digit(16)?;
-            out.push((hi * 16 + lo) as u8);
-            i += 2;
-        }
-        Some(out)
-    }
-    fn parse_type(m: &BTreeMap<&str, &str>) -> Option<TypeDesc<'static>> {
-        let sm5_extra = match m.get("sm5") {
-            Some(s) => {
-                let mut it = s.split(',');
-                let mut a = [0u32; 4];
-                for slot in &mut a {
-                    *slot = u32::from_str_radix(it.next()?, 16).ok()?;
-                }
-                Some(a)
-            }
-            None => None,
-        };
-        Some(TypeDesc {
-            class: dec(m, "class")? as u16,
-            var_type: dec(m, "base")? as u16,
-            rows: dec(m, "rows")? as u16,
-            columns: dec(m, "cols")? as u16,
-            elements: dec(m, "elements")? as u16,
-            members: Vec::new(),
-            sm5_extra,
-            name: match m.get("typename") {
-                Some(s) => Cow::Owned(String::from(*s)),
-                None => Cow::Borrowed(""),
-            },
-        })
-    }
-
     let mut rd = ResourceDef {
         constant_buffers: Vec::new(),
         bindings: Vec::new(),
@@ -187,7 +280,8 @@ pub fn rdef_from_text(text: &str) -> Option<ResourceDef<'static>> {
             continue;
         }
         // Header tags (`key=value`).
-        let hex0x = |s: &str| u32::from_str_radix(s.trim().strip_prefix("0x").unwrap_or(s.trim()), 16);
+        let hex0x =
+            |s: &str| u32::from_str_radix(s.trim().strip_prefix("0x").unwrap_or(s.trim()), 16);
         if let Some(v) = line.strip_prefix("version=") {
             rd.target_version = hex0x(v).ok()?;
             continue;
@@ -210,91 +304,7 @@ pub fn rdef_from_text(text: &str) -> Option<ResourceDef<'static>> {
             continue;
         }
 
-        let (head, rest) = line.split_once(' ').unwrap_or((line, ""));
-        match head {
-            "binding" => {
-                let mut f = rest.split_whitespace();
-                let name = f.next()?;
-                let m = kv(f);
-                rd.bindings.push(ResourceBinding {
-                    name: Cow::Owned(String::from(name)),
-                    input_type: dec(&m, "input")?,
-                    return_type: dec(&m, "return")?,
-                    dimension: dec(&m, "dim")?,
-                    num_samples: dec(&m, "samples")?,
-                    bind_point: dec(&m, "slot")?,
-                    bind_count: dec(&m, "count")?,
-                    flags: hexv(&m, "flags")?,
-                });
-            }
-            "cbuffer" => {
-                let mut f = rest.split_whitespace();
-                let name = f.next()?;
-                let m = kv(f);
-                rd.constant_buffers.push(CBufferDef {
-                    name: Cow::Owned(String::from(name)),
-                    variables: Vec::new(),
-                    size: dec(&m, "size")?,
-                    flags: hexv(&m, "flags")?,
-                    cb_type: dec(&m, "kind")?,
-                });
-            }
-            "member" => {
-                let mut f = rest.split_whitespace();
-                let name = f.next()?;
-                let m = kv(f);
-                let member_type = parse_type(&m)?;
-                let offset = dec(&m, "offset")?;
-                let var = rd.constant_buffers.last_mut()?.variables.last_mut()?;
-                var.var_type.members.push(MemberDesc {
-                    name: Cow::Owned(String::from(name)),
-                    member_type,
-                    offset,
-                });
-            }
-            "var" => {
-                let mut f = rest.split_whitespace();
-                let name = f.next()?;
-                let m = kv(f);
-                let pair = |s: &str| -> Option<(u32, u32)> {
-                    let (a, b) = s.split_once(',')?;
-                    Some((a.parse::<i32>().ok()? as u32, b.parse().ok()?))
-                };
-                let (ts, tz) = match m.get("tex") {
-                    Some(s) => {
-                        let (a, b) = pair(s)?;
-                        (Some(a), Some(b))
-                    }
-                    None => (None, None),
-                };
-                let (ss, sz) = match m.get("samp") {
-                    Some(s) => {
-                        let (a, b) = pair(s)?;
-                        (Some(a), Some(b))
-                    }
-                    None => (None, None),
-                };
-                let default = match m.get("default") {
-                    Some(h) => hex_bytes(h)?,
-                    None => Vec::new(),
-                };
-                let var_type = parse_type(&m)?;
-                let cb = rd.constant_buffers.last_mut()?;
-                cb.variables.push(CBufferVariable {
-                    name: Cow::Owned(String::from(name)),
-                    offset: dec(&m, "offset")?,
-                    size: dec(&m, "size")?,
-                    flags: hexv(&m, "flags")?,
-                    var_type,
-                    default_value: Cow::Owned(default),
-                    texture_start: ts,
-                    texture_size: tz,
-                    sampler_start: ss,
-                    sampler_size: sz,
-                });
-            }
-            _ => return None,
-        }
+        parse_flat_record(&mut rd, line)?;
     }
     Some(rd)
 }

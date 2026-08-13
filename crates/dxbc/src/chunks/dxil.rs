@@ -3,13 +3,13 @@
 //! The DXIL chunk replaces SHEX/SHDR for Shader Model 6.0 and above.
 //! Binary layout (`DxilProgramHeader`):
 //!
-//!   0x00: u32 — ProgramVersion: (shader_kind << 16) | (major << 4) | minor
-//!   0x04: u32 — SizeInUint32: total size including header, in u32 units
-//!   DxilBitcodeHeader:
-//!     0x08: u32 — DxilMagic ('DXIL' = 0x4C495844)
-//!     0x0C: u32 — DxilVersion
-//!     0x10: u32 — BitcodeOffset (from start of DxilBitcodeHeader, typically 16)
-//!     0x14: u32 — BitcodeSize
+//!   0x00: u32 — `ProgramVersion`: (`shader_kind` << 16) | (major << 4) | minor
+//!   0x04: u32 — `SizeInUint32`: total size including header, in u32 units
+//!   `DxilBitcodeHeader`:
+//!     0x08: u32 — `DxilMagic` ('DXIL' = 0x4C495844)
+//!     0x0C: u32 — `DxilVersion`
+//!     0x10: u32 — `BitcodeOffset` (from start of `DxilBitcodeHeader`, typically 16)
+//!     0x14: u32 — `BitcodeSize`
 //!   0x18..BitcodeOffset: optional padding
 //!   bitcode payload
 //!
@@ -22,10 +22,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
-/// Magic value for the DxilBitcodeHeader (`'DXIL'` as little-endian u32).
-const DXIL_MAGIC: u32 = 0x4C495844;
+/// Magic value for the `DxilBitcodeHeader` (`'DXIL'` as little-endian u32).
+const DXIL_MAGIC: u32 = 0x4C49_5844;
 
 /// Parsed DXIL chunk — header fields + raw LLVM bitcode.
 ///
@@ -34,7 +34,7 @@ const DXIL_MAGIC: u32 = 0x4C495844;
 /// reconstruct the surrounding header with correct sizes.
 #[derive(Debug, Clone)]
 pub struct DxilData<'a> {
-    /// Shader kind from ProgramVersion (e.g. 0=Pixel, 1=Vertex, …).
+    /// Shader kind from `ProgramVersion` (e.g. 0=Pixel, 1=Vertex, …).
     pub shader_kind: u16,
     /// Shader Model major version (e.g. 6).
     pub major_version: u8,
@@ -47,11 +47,12 @@ pub struct DxilData<'a> {
 }
 
 /// Parse a DXIL chunk.
-pub fn parse_dxil<'a>(data: &'a [u8]) -> Option<DxilData<'a>> {
+#[must_use]
+pub fn parse_dxil(data: &[u8]) -> Option<DxilData<'_>> {
     if data.len() < 0x18 {
         return None;
     }
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
 
     let program_version = c.read_u32_le().ok()?;
     let _size_in_u32 = c.read_u32_le().ok()?;
@@ -97,16 +98,17 @@ impl ChunkWriter for DxilData<'_> {
     }
 
     fn write_payload(&self) -> Vec<u8> {
-        let bc_size = self.bitcode.len() as u32;
+        let bc_size = u32::try_from(self.bitcode.len()).expect("DXIL bitcode size exceeds u32");
         // BitcodeOffset is sizeof(DxilBitcodeHeader) = 16.
         let bitcode_offset: u32 = 16;
         // Total size = DxilProgramHeader(8) + DxilBitcodeHeader(16) + bitcode
         let total_bytes = 8 + bitcode_offset as usize + self.bitcode.len();
-        let size_in_u32 = total_bytes.div_ceil(4) as u32;
+        let size_in_u32 =
+            u32::try_from(total_bytes.div_ceil(4)).expect("DXIL program size exceeds u32");
 
-        let program_version = ((self.shader_kind as u32) << 16)
-            | ((self.major_version as u32) << 4)
-            | (self.minor_version as u32);
+        let program_version = (u32::from(self.shader_kind) << 16)
+            | (u32::from(self.major_version) << 4)
+            | u32::from(self.minor_version);
 
         let mut out = Vec::with_capacity(total_bytes);
         out.extend_from_slice(&program_version.to_le_bytes());

@@ -6,10 +6,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 use smallvec::{SmallVec, smallvec};
 
-use super::ir::*;
+use super::ir::{
+    ComponentSelect, CustomDataType, GsOutputTopology, GsPrimitive, Instruction, InstructionKind,
+    Operand, OperandIndex, Operands, Program, RegisterType, ReturnType, SmallU32Vec,
+    system_value_name,
+};
 use super::opcodes::Opcode;
 
 /// Error returned when decoding a SHEX/SHDR chunk fails.
@@ -26,11 +30,21 @@ impl fmt::Display for DecodeError {
 }
 
 /// Decode a SHEX/SHDR chunk into a structured [`Program`].
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when the chunk header or instruction stream cannot
+/// be read.
 pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
     decode_with_fourcc(data, *b"SHEX")
 }
 
-/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original FourCC.
+/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original `FourCC`.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when the chunk header or instruction stream cannot
+/// be read.
 pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, DecodeError> {
     if data.len() < 8 {
         return Err(DecodeError {
@@ -41,7 +55,7 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
         });
     }
 
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let version_token = c.read_u32_le().map_err(|_| DecodeError {
         message: String::from("failed to read version token"),
     })?;
@@ -80,10 +94,15 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
     }
 
     while offset + 4 <= end {
-        c.seek(SeekFrom::Start(offset as u64)).unwrap();
-        let token = c.read_u32_le().unwrap();
+        c.seek(SeekFrom::Start(offset as u64))
+            .map_err(|_| DecodeError {
+                message: format!("failed to seek to instruction at byte offset {offset}"),
+            })?;
+        let token = c.read_u32_le().map_err(|_| DecodeError {
+            message: format!("failed to read instruction at byte offset {offset}"),
+        })?;
         let opcode_val = token & 0x7FF;
-        let instr_len = instruction_length(token, opcode_val, &mut c, offset, end);
+        let instr_len = instruction_length(token, opcode_val, &mut c, offset, end).unwrap_or(0);
 
         if instr_len == 0 {
             warnings.push(format!(
@@ -101,11 +120,16 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
             break;
         }
 
-        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+        c.seek(SeekFrom::Start(offset as u64))
+            .map_err(|_| DecodeError {
+                message: format!("failed to seek to instruction at byte offset {offset}"),
+            })?;
         tokens.clear();
         tokens.reserve(instr_len);
         for _ in 0..instr_len {
-            tokens.push(c.read_u32_le().unwrap());
+            tokens.push(c.read_u32_le().map_err(|_| DecodeError {
+                message: format!("failed to read instruction at byte offset {offset}"),
+            })?);
         }
 
         instructions.push(decode_instruction(&tokens, opcode_val));
@@ -125,28 +149,28 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
 fn instruction_length(
     token: u32,
     opcode: u32,
-    c: &mut SliceCursor<'_>,
+    c: &mut Cursor<&[u8]>,
     offset: usize,
     end: usize,
-) -> usize {
+) -> Option<usize> {
     let op = Opcode::from_u32(opcode);
     if matches!(op, Opcode::CustomData) {
         if offset + 8 <= end {
-            c.seek(SeekFrom::Start((offset + 4) as u64)).unwrap();
-            return c.read_u32_le().unwrap() as usize;
+            c.seek(SeekFrom::Start((offset + 4) as u64)).ok()?;
+            return usize::try_from(c.read_u32_le().ok()?).ok();
         }
-        return 0;
+        return None;
     }
     let len = ((token >> 24) & 0x7F) as usize;
-    if len == 0 { 1 } else { len }
+    Some(if len == 0 { 1 } else { len })
 }
 
 fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     let op = Opcode::from_u32(opcode_val);
-    let token0 = tokens[0];
+    let primary_token = tokens[0];
 
     // Saturate (bit 13) — not applicable to Sync (which reuses bits 11-14).
-    let saturate = op != Opcode::Sync && (token0 >> 13) & 1 != 0;
+    let saturate = op != Opcode::Sync && (primary_token >> 13) & 1 != 0;
 
     // Conditional test condition: bit 18 (0 = zero, 1 = non-zero).
     let test_nonzero = matches!(
@@ -157,21 +181,21 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
             | Opcode::Continuec
             | Opcode::Discard
             | Opcode::Retc
-    ) && ((token0 >> 18) & 1 != 0);
+    ) && ((primary_token >> 18) & 1 != 0);
 
     // SM5 precise modifier: bits 19-22.
-    let precise_mask = ((token0 >> 19) & 0xF) as u8;
+    let precise_mask = ((primary_token >> 19) & 0xF) as u8;
 
     // Extract resinfo return type (bits [11:12]) for resinfo opcode.
     let resinfo_return_type = if op == Opcode::Resinfo {
-        Some((token0 >> 11) & 0x3)
+        Some((primary_token >> 11) & 0x3)
     } else {
         None
     };
 
     // Sync flags: bits 11-14 (only meaningful for Sync opcode).
     let sync_flags = if op == Opcode::Sync {
-        ((token0 >> 11) & 0xF) as u8
+        ((primary_token >> 11) & 0xF) as u8
     } else {
         0
     };
@@ -179,78 +203,7 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
     // Parse all extended opcode tokens from the instruction header chain.
     let (tex_offsets, resource_dim, resource_return_type) = decode_extended_tokens(tokens);
 
-    let kind = match op {
-        Opcode::CustomData => decode_custom_data(tokens),
-        Opcode::DclGlobalFlags => decode_dcl_global_flags(token0),
-        Opcode::DclInput
-        | Opcode::DclInputSgv
-        | Opcode::DclInputSiv
-        | Opcode::DclInputPs
-        | Opcode::DclInputPsSgv
-        | Opcode::DclInputPsSiv => decode_dcl_input(tokens, &op),
-        Opcode::DclOutput | Opcode::DclOutputSgv | Opcode::DclOutputSiv => {
-            decode_dcl_output(tokens, &op)
-        }
-        Opcode::DclResource => decode_dcl_resource(tokens),
-        Opcode::DclUnorderedAccessViewTyped => decode_dcl_uav_typed(tokens),
-        Opcode::DclUnorderedAccessViewRaw => decode_dcl_uav_raw(tokens),
-        Opcode::DclUnorderedAccessViewStructured => decode_dcl_uav_structured(tokens),
-        Opcode::DclResourceRaw => decode_dcl_resource_raw(tokens),
-        Opcode::DclResourceStructured => decode_dcl_resource_structured(tokens),
-        Opcode::DclStream => {
-            // dcl_stream has a single stream operand — decode it generically
-            decode_generic(tokens)
-        }
-        Opcode::DclIndexRange => decode_dcl_index_range(tokens),
-        Opcode::DclSampler => decode_dcl_sampler(tokens),
-        Opcode::DclConstantBuffer => decode_dcl_cb(tokens),
-        Opcode::DclTemps => InstructionKind::DclTemps {
-            count: if tokens.len() > 1 { tokens[1] } else { 0 },
-        },
-        Opcode::DclIndexableTemp => decode_dcl_indexable_temp(tokens),
-        Opcode::DclGsInputPrimitive => decode_dcl_gs_input(token0),
-        Opcode::DclGsOutputPrimitiveTopology => decode_dcl_gs_output_topo(token0),
-        Opcode::DclMaxOutputVertexCount => InstructionKind::DclMaxOutputVertexCount {
-            count: if tokens.len() > 1 { tokens[1] } else { 0 },
-        },
-        Opcode::DclGsInstanceCount => InstructionKind::DclGsInstanceCount {
-            count: if tokens.len() > 1 { tokens[1] } else { 0 },
-        },
-        Opcode::DclOutputControlPointCount => InstructionKind::DclOutputControlPointCount {
-            count: (token0 >> 11) & 0x3F,
-        },
-        Opcode::DclInputControlPointCount => InstructionKind::DclInputControlPointCount {
-            count: (token0 >> 11) & 0x3F,
-        },
-        Opcode::DclTessDomain => decode_dcl_tess_domain(token0),
-        Opcode::DclTessPartitioning => decode_dcl_tess_partitioning(token0),
-        Opcode::DclTessOutputPrimitive => decode_dcl_tess_output_prim(token0),
-        Opcode::DclHsMaxTessFactor => InstructionKind::DclHsMaxTessFactor {
-            value: if tokens.len() > 1 {
-                f32::from_bits(tokens[1])
-            } else {
-                0.0
-            },
-        },
-        Opcode::DclHsForkPhaseInstanceCount | Opcode::DclHsJoinPhaseInstanceCount => {
-            InstructionKind::DclHsForkPhaseInstanceCount {
-                count: if tokens.len() > 1 { tokens[1] } else { 0 },
-            }
-        }
-        Opcode::DclThreadGroup => InstructionKind::DclThreadGroup {
-            x: if tokens.len() > 1 { tokens[1] } else { 0 },
-            y: if tokens.len() > 2 { tokens[2] } else { 0 },
-            z: if tokens.len() > 3 { tokens[3] } else { 0 },
-        },
-        Opcode::DclFunctionBody => decode_dcl_function_body(tokens),
-        Opcode::DclFunctionTable => decode_dcl_function_table(tokens),
-        Opcode::DclInterface => decode_dcl_interface(tokens),
-        Opcode::HsDecls
-        | Opcode::HsControlPointPhase
-        | Opcode::HsForkPhase
-        | Opcode::HsJoinPhase => InstructionKind::HsPhase,
-        _ => decode_generic(tokens),
-    };
+    let kind = decode_instruction_kind(tokens, op);
 
     // Token0 bits 13 and 19-22 encode saturate / precise for ALU and phase
     // instructions, but for declaration opcodes those same bit positions carry
@@ -277,6 +230,82 @@ fn decode_instruction(tokens: &[u32], opcode_val: u32) -> Instruction {
         resource_dim,
         resource_return_type,
         kind,
+    }
+}
+
+fn decode_instruction_kind(tokens: &[u32], op: Opcode) -> InstructionKind {
+    let primary_token = tokens[0];
+    match op {
+        Opcode::CustomData => decode_custom_data(tokens),
+        Opcode::DclGlobalFlags => decode_dcl_global_flags(primary_token),
+        Opcode::DclInput
+        | Opcode::DclInputSgv
+        | Opcode::DclInputSiv
+        | Opcode::DclInputPs
+        | Opcode::DclInputPsSgv
+        | Opcode::DclInputPsSiv => decode_dcl_input(tokens, op),
+        Opcode::DclOutput | Opcode::DclOutputSgv | Opcode::DclOutputSiv => {
+            decode_dcl_output(tokens, op)
+        }
+        Opcode::DclResource => decode_dcl_resource(tokens),
+        Opcode::DclUnorderedAccessViewTyped => decode_dcl_uav_typed(tokens),
+        Opcode::DclUnorderedAccessViewRaw => decode_dcl_uav_raw(tokens),
+        Opcode::DclUnorderedAccessViewStructured => decode_dcl_uav_structured(tokens),
+        Opcode::DclResourceRaw => decode_dcl_resource_raw(tokens),
+        Opcode::DclResourceStructured => decode_dcl_resource_structured(tokens),
+        Opcode::DclStream => {
+            // dcl_stream has a single stream operand — decode it generically
+            decode_generic(tokens)
+        }
+        Opcode::DclIndexRange => decode_dcl_index_range(tokens),
+        Opcode::DclSampler => decode_dcl_sampler(tokens),
+        Opcode::DclConstantBuffer => decode_dcl_cb(tokens),
+        Opcode::DclTemps => InstructionKind::DclTemps {
+            count: if tokens.len() > 1 { tokens[1] } else { 0 },
+        },
+        Opcode::DclIndexableTemp => decode_dcl_indexable_temp(tokens),
+        Opcode::DclGsInputPrimitive => decode_dcl_gs_input(primary_token),
+        Opcode::DclGsOutputPrimitiveTopology => decode_dcl_gs_output_topo(primary_token),
+        Opcode::DclMaxOutputVertexCount => InstructionKind::DclMaxOutputVertexCount {
+            count: if tokens.len() > 1 { tokens[1] } else { 0 },
+        },
+        Opcode::DclGsInstanceCount => InstructionKind::DclGsInstanceCount {
+            count: if tokens.len() > 1 { tokens[1] } else { 0 },
+        },
+        Opcode::DclOutputControlPointCount => InstructionKind::DclOutputControlPointCount {
+            count: (primary_token >> 11) & 0x3F,
+        },
+        Opcode::DclInputControlPointCount => InstructionKind::DclInputControlPointCount {
+            count: (primary_token >> 11) & 0x3F,
+        },
+        Opcode::DclTessDomain => decode_dcl_tess_domain(primary_token),
+        Opcode::DclTessPartitioning => decode_dcl_tess_partitioning(primary_token),
+        Opcode::DclTessOutputPrimitive => decode_dcl_tess_output_prim(primary_token),
+        Opcode::DclHsMaxTessFactor => InstructionKind::DclHsMaxTessFactor {
+            value: if tokens.len() > 1 {
+                f32::from_bits(tokens[1])
+            } else {
+                0.0
+            },
+        },
+        Opcode::DclHsForkPhaseInstanceCount | Opcode::DclHsJoinPhaseInstanceCount => {
+            InstructionKind::DclHsForkPhaseInstanceCount {
+                count: if tokens.len() > 1 { tokens[1] } else { 0 },
+            }
+        }
+        Opcode::DclThreadGroup => InstructionKind::DclThreadGroup {
+            x: if tokens.len() > 1 { tokens[1] } else { 0 },
+            y: if tokens.len() > 2 { tokens[2] } else { 0 },
+            z: if tokens.len() > 3 { tokens[3] } else { 0 },
+        },
+        Opcode::DclFunctionBody => decode_dcl_function_body(tokens),
+        Opcode::DclFunctionTable => decode_dcl_function_table(tokens),
+        Opcode::DclInterface => decode_dcl_interface(tokens),
+        Opcode::HsDecls
+        | Opcode::HsControlPointPhase
+        | Opcode::HsForkPhase
+        | Opcode::HsJoinPhase => InstructionKind::HsPhase,
+        _ => decode_generic(tokens),
     }
 }
 
@@ -336,7 +365,7 @@ fn decode_dcl_global_flags(token: u32) -> InstructionKind {
     InstructionKind::DclGlobalFlags { flags }
 }
 
-fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
+fn decode_dcl_input(tokens: &[u32], op: Opcode) -> InstructionKind {
     let interpolation = if matches!(
         op,
         Opcode::DclInputPs | Opcode::DclInputPsSiv | Opcode::DclInputPsSgv
@@ -382,7 +411,7 @@ fn decode_dcl_input(tokens: &[u32], op: &Opcode) -> InstructionKind {
     }
 }
 
-fn decode_dcl_output(tokens: &[u32], op: &Opcode) -> InstructionKind {
+fn decode_dcl_output(tokens: &[u32], op: Opcode) -> InstructionKind {
     let has_sv = matches!(op, Opcode::DclOutputSgv | Opcode::DclOutputSiv);
     let system_value = if has_sv && tokens.len() >= 3 {
         Some(system_value_name(tokens[tokens.len() - 1]))
@@ -558,8 +587,8 @@ fn decode_dcl_index_range(tokens: &[u32]) -> InstructionKind {
 ///
 /// Returns `(tex_offsets, resource_dim, resource_return_type)`.
 fn decode_extended_tokens(tokens: &[u32]) -> (Option<[i8; 3]>, Option<u32>, Option<u32>) {
-    let token0 = tokens[0];
-    if (token0 >> 31) & 1 == 0 || tokens.len() < 2 {
+    let primary_token = tokens[0];
+    if (primary_token >> 31) & 1 == 0 || tokens.len() < 2 {
         return (None, None, None);
     }
 
@@ -608,10 +637,11 @@ fn decode_extended_tokens(tokens: &[u32]) -> (Option<[i8; 3]>, Option<u32>, Opti
 
 /// Sign-extend a 4-bit value to i8.
 fn sign_extend_4bit(val: u32) -> i8 {
-    if val & 0x8 != 0 {
-        (val | 0xFFFFFFF0) as i32 as i8
+    let nibble = i8::try_from(val & 0xF).expect("masked nibble fits in i8");
+    if nibble & 0x8 != 0 {
+        nibble - 16
     } else {
-        val as i8
+        nibble
     }
 }
 
@@ -895,7 +925,6 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
 fn decode_components(token: u32, num_components: u32) -> ComponentSelect {
     let sel_mode = (token >> 2) & 0x3;
     match num_components {
-        0 => ComponentSelect::ZeroComponent,
         1 => ComponentSelect::OneComponent,
         2 => match sel_mode {
             0 => ComponentSelect::Mask(((token >> 4) & 0xF) as u8),
@@ -924,7 +953,7 @@ fn decode_index(tokens: &[u32], pos: usize, repr: u32) -> (OperandIndex, usize) 
         }
         1 => {
             if pos + 1 < tokens.len() {
-                let val = tokens[pos] as u64 | ((tokens[pos + 1] as u64) << 32);
+                let val = u64::from(tokens[pos]) | (u64::from(tokens[pos + 1]) << 32);
                 (OperandIndex::Imm64(val), 2)
             } else {
                 (OperandIndex::Imm32(0), 0)

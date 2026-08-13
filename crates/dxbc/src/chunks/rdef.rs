@@ -11,10 +11,12 @@
 //!   0x18: u32 — creator string offset
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
 use super::ChunkWriter;
 use crate::util::read_cstring;
@@ -76,7 +78,7 @@ pub struct CBufferVariable<'a> {
     pub sampler_size: Option<u32>,
 }
 
-/// HLSL type descriptor (D3D11_SHADER_TYPE_DESC).
+/// HLSL type descriptor (`D3D11_SHADER_TYPE_DESC`).
 ///
 /// Binary layout (all u32):
 ///   0: `[class:16 | type:16]`
@@ -120,7 +122,7 @@ pub struct MemberDesc<'a> {
     pub offset: u32,
 }
 
-/// Resource input type (D3D_SHADER_INPUT_TYPE).
+/// Resource input type (`D3D_SHADER_INPUT_TYPE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ResourceInputType {
@@ -152,6 +154,7 @@ pub enum ResourceInputType {
 
 impl ResourceInputType {
     /// Converts a raw `D3D_SHADER_INPUT_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::CBuffer,
@@ -171,6 +174,7 @@ impl ResourceInputType {
     }
 
     /// Returns the lowercase name used in disassembly output.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::CBuffer => "cbuffer",
@@ -223,6 +227,7 @@ pub enum ResourceDimension {
 
 impl ResourceDimension {
     /// Converts a raw `D3D_SRV_DIMENSION` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             1 => Self::Buffer,
@@ -240,6 +245,7 @@ impl ResourceDimension {
     }
 
     /// Returns the short dimension name used in disassembly output.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Buffer => "buf",
@@ -257,6 +263,7 @@ impl ResourceDimension {
 
     /// The HLSL type stem for this dimension (`Texture2DArray`, etc.). Used when
     /// reconstructing editable resource declarations.
+    #[must_use]
     pub fn hlsl_stem(self) -> &'static str {
         match self {
             Self::Buffer => "Buffer",
@@ -273,6 +280,7 @@ impl ResourceDimension {
     }
 
     /// Inverse of [`hlsl_stem`](Self::hlsl_stem).
+    #[must_use]
     pub fn from_hlsl_stem(s: &str) -> Option<Self> {
         Some(match s {
             "Buffer" => Self::Buffer,
@@ -316,14 +324,14 @@ pub const SIF_UNUSED: u32 = 0x10;
 pub const SVF_USED: u32 = 0x2;
 
 /// Sentinel value for unused texture/sampler start slots.
-pub const SLOT_UNUSED: u32 = 0xFFFFFFFF;
+pub const SLOT_UNUSED: u32 = 0xFFFF_FFFF;
 
 /// A shader resource binding (texture, sampler, cbuffer, UAV, etc.).
 #[derive(Debug)]
 pub struct ResourceBinding<'a> {
     /// Binding name.
     pub name: Cow<'a, str>,
-    /// Resource type (0=cbuffer, 2=texture, 3=sampler, 4=uav_rwtyped, …).
+    /// Resource type (0=cbuffer, 2=texture, 3=sampler, `4=uav_rwtyped`, …).
     pub input_type: u32,
     /// Return type for typed resources.
     pub return_type: u32,
@@ -385,6 +393,10 @@ impl ResourceBinding<'_> {
     }
 
     /// Write the type, dimension, slot, bind count, and flags columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if any write fails.
     pub fn fmt_columns(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -409,22 +421,141 @@ impl fmt::Display for ResourceBinding<'_> {
     }
 }
 
+fn parse_bindings(data: &[u8], count: usize, offset: usize) -> Option<Vec<ResourceBinding<'_>>> {
+    let mut cursor = Cursor::new(data);
+    let mut bindings = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = offset + index * 32;
+        if base + 32 > data.len() {
+            break;
+        }
+        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
+        let name_offset = cursor.read_u32_le().ok()? as usize;
+        bindings.push(ResourceBinding {
+            name: Cow::Borrowed(read_cstring(data, name_offset)),
+            input_type: cursor.read_u32_le().ok()?,
+            return_type: cursor.read_u32_le().ok()?,
+            dimension: cursor.read_u32_le().ok()?,
+            num_samples: cursor.read_u32_le().ok()?,
+            bind_point: cursor.read_u32_le().ok()?,
+            bind_count: cursor.read_u32_le().ok()?,
+            flags: cursor.read_u32_le().ok()?,
+        });
+    }
+    Some(bindings)
+}
+
+fn parse_variables<'a>(
+    data: &'a [u8],
+    cursor: &mut Cursor<&[u8]>,
+    count: usize,
+    offset: usize,
+    stride: usize,
+    is_sm5: bool,
+) -> Option<Vec<CBufferVariable<'a>>> {
+    let mut variables = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = offset + index * stride;
+        if base + stride > data.len() {
+            break;
+        }
+        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
+        let name_offset = cursor.read_u32_le().ok()? as usize;
+        let variable_offset = cursor.read_u32_le().ok()?;
+        let size = cursor.read_u32_le().ok()?;
+        let flags = cursor.read_u32_le().ok()?;
+        let type_offset = cursor.read_u32_le().ok()? as usize;
+        let default_offset = cursor.read_u32_le().ok()? as usize;
+        let (texture_start, texture_size, sampler_start, sampler_size) = if is_sm5 {
+            (
+                Some(cursor.read_u32_le().ok()?),
+                Some(cursor.read_u32_le().ok()?),
+                Some(cursor.read_u32_le().ok()?),
+                Some(cursor.read_u32_le().ok()?),
+            )
+        } else {
+            (None, None, None, None)
+        };
+        let default_end = default_offset.checked_add(size as usize)?;
+        let default_value: Cow<'a, [u8]> =
+            if default_offset != 0 && size > 0 && default_end <= data.len() {
+                Cow::Borrowed(&data[default_offset..default_end])
+            } else {
+                Cow::Borrowed(&[])
+            };
+        variables.push(CBufferVariable {
+            name: Cow::Borrowed(read_cstring(data, name_offset)),
+            offset: variable_offset,
+            size,
+            flags,
+            var_type: parse_type_desc(data, type_offset, is_sm5),
+            default_value,
+            texture_start,
+            texture_size,
+            sampler_start,
+            sampler_size,
+        });
+    }
+    Some(variables)
+}
+
+fn parse_constant_buffers(
+    data: &[u8],
+    count: usize,
+    offset: usize,
+    variable_stride: usize,
+    is_sm5: bool,
+) -> Option<Vec<CBufferDef<'_>>> {
+    let mut cursor = Cursor::new(data);
+    let mut buffers = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = offset + index * 24;
+        if base + 24 > data.len() {
+            break;
+        }
+        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
+        let name_offset = cursor.read_u32_le().ok()? as usize;
+        let variable_count = cursor.read_u32_le().ok()? as usize;
+        let variable_offset = cursor.read_u32_le().ok()? as usize;
+        let size = cursor.read_u32_le().ok()?;
+        let flags = cursor.read_u32_le().ok()?;
+        let buffer_type = cursor.read_u32_le().ok()?;
+        let variables = parse_variables(
+            data,
+            &mut cursor,
+            variable_count,
+            variable_offset,
+            variable_stride,
+            is_sm5,
+        )?;
+        buffers.push(CBufferDef {
+            name: Cow::Borrowed(read_cstring(data, name_offset)),
+            variables,
+            size,
+            flags,
+            cb_type: buffer_type,
+        });
+    }
+    Some(buffers)
+}
+
 /// Parse an RDEF chunk.
 ///
 /// RDEF header layout (28 bytes):
-///   0: u32 constant_buffer_count
-///   4: u32 constant_buffer_offset
-///   8: u32 bound_resource_count
-///  12: u32 bound_resource_offset
-///  16: u32 target_version  (minor | major<<8 | type<<16)
+///   0: u32 `constant_buffer_count`
+///   4: u32 `constant_buffer_offset`
+///   8: u32 `bound_resource_count`
+///  12: u32 `bound_resource_offset`
+///  16: u32 `target_version`  (minor | major<<8 | type<<16)
 ///  20: u32 flags
-///  24: u32 creator_offset
+///  24: u32 `creator_offset`
+#[must_use]
 pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
     if data.len() < 28 {
         return None;
     }
 
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let cb_count = c.read_u32_le().ok()? as usize;
     let cb_offset = c.read_u32_le().ok()? as usize;
     let binding_count = c.read_u32_le().ok()? as usize;
@@ -461,107 +592,8 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
         None
     };
 
-    // Parse resource bindings
-    let mut bindings = Vec::with_capacity(binding_count);
-    for i in 0..binding_count {
-        let base = binding_offset + i * 32;
-        if base + 32 > data.len() {
-            break;
-        }
-        c.seek(SeekFrom::Start(base as u64)).ok()?;
-        let name_off = c.read_u32_le().ok()? as usize;
-        let input_type = c.read_u32_le().ok()?;
-        let return_type = c.read_u32_le().ok()?;
-        let dimension = c.read_u32_le().ok()?;
-        let num_samples = c.read_u32_le().ok()?;
-        let bind_point = c.read_u32_le().ok()?;
-        let bind_count = c.read_u32_le().ok()?;
-        let flags = c.read_u32_le().ok()?;
-        bindings.push(ResourceBinding {
-            name: Cow::Borrowed(read_cstring(data, name_off)),
-            input_type,
-            return_type,
-            dimension,
-            num_samples,
-            bind_point,
-            bind_count,
-            flags,
-        });
-    }
-
-    // Parse constant buffers
-    let mut constant_buffers = Vec::with_capacity(cb_count);
-    for i in 0..cb_count {
-        let base = cb_offset + i * 24;
-        if base + 24 > data.len() {
-            break;
-        }
-        c.seek(SeekFrom::Start(base as u64)).ok()?;
-        let name_off = c.read_u32_le().ok()? as usize;
-        let var_count = c.read_u32_le().ok()? as usize;
-        let var_offset = c.read_u32_le().ok()? as usize;
-        let cb_size = c.read_u32_le().ok()?;
-        let cb_flags = c.read_u32_le().ok()?;
-        let cb_type = c.read_u32_le().ok()?;
-
-        let mut variables = Vec::with_capacity(var_count);
-        for j in 0..var_count {
-            let vbase = var_offset + j * var_stride;
-            if vbase + var_stride > data.len() {
-                break;
-            }
-            c.seek(SeekFrom::Start(vbase as u64)).ok()?;
-            let vname_off = c.read_u32_le().ok()? as usize;
-            let v_offset = c.read_u32_le().ok()?;
-            let v_size = c.read_u32_le().ok()?;
-            let v_flags = c.read_u32_le().ok()?;
-            let v_type_offset = c.read_u32_le().ok()? as usize;
-            let v_default_value_offset = c.read_u32_le().ok()? as usize;
-            let (tex_start, tex_size, samp_start, samp_size) = if is_sm5 {
-                (
-                    Some(c.read_u32_le().ok()?),
-                    Some(c.read_u32_le().ok()?),
-                    Some(c.read_u32_le().ok()?),
-                    Some(c.read_u32_le().ok()?),
-                )
-            } else {
-                (None, None, None, None)
-            };
-
-            let var_type = parse_type_desc(data, v_type_offset, is_sm5);
-            let default_value: Cow<'_, [u8]> = if v_default_value_offset != 0 && v_size > 0 {
-                let end = v_default_value_offset + v_size as usize;
-                if end <= data.len() {
-                    Cow::Borrowed(&data[v_default_value_offset..end])
-                } else {
-                    Cow::Borrowed(&[])
-                }
-            } else {
-                Cow::Borrowed(&[])
-            };
-
-            variables.push(CBufferVariable {
-                name: Cow::Borrowed(read_cstring(data, vname_off)),
-                offset: v_offset,
-                size: v_size,
-                flags: v_flags,
-                var_type,
-                default_value,
-                texture_start: tex_start,
-                texture_size: tex_size,
-                sampler_start: samp_start,
-                sampler_size: samp_size,
-            });
-        }
-
-        constant_buffers.push(CBufferDef {
-            name: Cow::Borrowed(read_cstring(data, name_off)),
-            variables,
-            size: cb_size,
-            flags: cb_flags,
-            cb_type,
-        });
-    }
+    let bindings = parse_bindings(data, binding_count, binding_offset)?;
+    let constant_buffers = parse_constant_buffers(data, cb_count, cb_offset, var_stride, is_sm5)?;
 
     Some(ResourceDef {
         constant_buffers,
@@ -588,23 +620,20 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
     if offset + 16 > data.len() {
         return empty;
     }
-    let mut c = SliceCursor::new(data);
-    if c.seek(SeekFrom::Start(offset as u64)).is_err() {
+    let mut cursor = Cursor::new(data);
+    if cursor.seek(SeekFrom::Start(offset as u64)).is_err() {
         return empty;
     }
-    let class_type = match c.read_u32_le() {
-        Ok(v) => v,
-        Err(_) => return empty,
+    let Ok(class_type) = cursor.read_u32_le() else {
+        return empty;
     };
-    let rows_cols = match c.read_u32_le() {
-        Ok(v) => v,
-        Err(_) => return empty,
+    let Ok(rows_cols) = cursor.read_u32_le() else {
+        return empty;
     };
-    let elems_members = match c.read_u32_le() {
-        Ok(v) => v,
-        Err(_) => return empty,
+    let Ok(elems_members) = cursor.read_u32_le() else {
+        return empty;
     };
-    let member_offset = match c.read_u32_le() {
+    let member_offset = match cursor.read_u32_le() {
         Ok(v) => v as usize,
         Err(_) => return empty,
     };
@@ -617,11 +646,12 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
     let member_count = (elems_members >> 16) as u16;
 
     let sm5_extra = if is_sm5 {
-        let a = c.read_u32_le().unwrap_or(0);
-        let b = c.read_u32_le().unwrap_or(0);
-        let d = c.read_u32_le().unwrap_or(0);
-        let e = c.read_u32_le().unwrap_or(0);
-        Some([a, b, d, e])
+        Some([
+            cursor.read_u32_le().unwrap_or(0),
+            cursor.read_u32_le().unwrap_or(0),
+            cursor.read_u32_le().unwrap_or(0),
+            cursor.read_u32_le().unwrap_or(0),
+        ])
     } else {
         None
     };
@@ -630,14 +660,14 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
     let mut members = Vec::new();
     if member_count > 0 && member_offset + (member_count as usize) * 12 <= data.len() {
         members.reserve(member_count as usize);
-        for k in 0..member_count as usize {
-            let mbase = member_offset + k * 12;
-            if c.seek(SeekFrom::Start(mbase as u64)).is_err() {
+        for member_index in 0..member_count as usize {
+            let mbase = member_offset + member_index * 12;
+            if cursor.seek(SeekFrom::Start(mbase as u64)).is_err() {
                 break;
             }
-            let mname_off = c.read_u32_le().unwrap_or(0) as usize;
-            let mtype_off = c.read_u32_le().unwrap_or(0) as usize;
-            let moffset = c.read_u32_le().unwrap_or(0);
+            let mname_off = cursor.read_u32_le().unwrap_or(0) as usize;
+            let mtype_off = cursor.read_u32_le().unwrap_or(0) as usize;
+            let moffset = cursor.read_u32_le().unwrap_or(0);
             members.push(MemberDesc {
                 name: Cow::Borrowed(read_cstring(data, mname_off)),
                 member_type: parse_type_desc(data, mtype_off, is_sm5),
@@ -651,8 +681,8 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
         // Name offset is at: base + 16 (fixed) + 16 (4 unknowns) = base + 32
         let name_pos = offset + 32;
         if name_pos + 4 <= data.len() {
-            if c.seek(SeekFrom::Start(name_pos as u64)).is_ok() {
-                let noff = c.read_u32_le().unwrap_or(0) as usize;
+            if cursor.seek(SeekFrom::Start(name_pos as u64)).is_ok() {
+                let noff = cursor.read_u32_le().unwrap_or(0) as usize;
                 if noff > 0 && noff < data.len() {
                     Cow::Borrowed(read_cstring(data, noff))
                 } else {
@@ -692,6 +722,10 @@ fn push_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("RDEF size or offset exceeds u32")
+}
+
 fn patch_u32(out: &mut [u8], pos: usize, v: u32) {
     out[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -713,7 +747,7 @@ fn intern(
     if let Some(&off) = pool.get(s) {
         return off;
     }
-    let off = out.len() as u32;
+    let off = wire_u32(out.len());
     out.extend_from_slice(s.as_bytes());
     out.push(0);
     pool.insert(alloc::string::String::from(s), off);
@@ -748,6 +782,7 @@ fn base_type_from(s: &str) -> Option<u16> {
 /// qualifier or array suffix handling beyond `[N]`). Returns `None` for types
 /// outside the standard scalar/vector/matrix/struct families so the caller can
 /// fall back to the explicit numeric form.
+#[must_use]
 pub fn hlsl_type_name(td: &TypeDesc<'_>) -> Option<alloc::string::String> {
     use alloc::string::String;
     // Struct / object types are named directly.
@@ -774,6 +809,7 @@ pub fn hlsl_type_name(td: &TypeDesc<'_>) -> Option<alloc::string::String> {
 /// Parse a canonical HLSL type spelling into `(class, base, rows, cols,
 /// elements)`. Matrices default to column-major (`class = 3`); a `row_major`
 /// qualifier is handled by the caller. Returns `None` for unrecognised spellings.
+#[must_use]
 pub fn parse_hlsl_type(s: &str) -> Option<(u16, u16, u16, u16, u16)> {
     // Optional [N] array suffix.
     let (core, elements) = match s.split_once('[') {
@@ -845,7 +881,7 @@ fn place_type<'a>(
             ));
         }
         pad4(out);
-        let moff = out.len() as u32;
+        let moff = wire_u32(out.len());
         for (i, m) in td.members.iter().enumerate() {
             let mn = intern(out, pool, &m.name);
             push_u32(out, mn);
@@ -855,12 +891,14 @@ fn place_type<'a>(
         moff
     };
     pad4(out);
-    let off = out.len() as u32;
-    push_u32(out, (td.class as u32) | ((td.var_type as u32) << 16));
-    push_u32(out, (td.rows as u32) | ((td.columns as u32) << 16));
+    let off = wire_u32(out.len());
+    push_u32(out, u32::from(td.class) | (u32::from(td.var_type) << 16));
+    push_u32(out, u32::from(td.rows) | (u32::from(td.columns) << 16));
     push_u32(
         out,
-        (td.elements as u32) | ((td.members.len() as u32) << 16),
+        u32::from(td.elements)
+            | (u32::from(u16::try_from(td.members.len()).expect("RDEF member count exceeds u16"))
+                << 16),
     );
     push_u32(out, member_off);
     if is_sm5 {
@@ -880,154 +918,198 @@ fn place_type<'a>(
     off
 }
 
+#[derive(Default)]
+struct RdefPools<'a> {
+    binding_names: BTreeMap<String, u32>,
+    variable_names: BTreeMap<String, u32>,
+    default_values: BTreeMap<Vec<u8>, u32>,
+    placed_types: Vec<(TypeDesc<'a>, u32)>,
+    member_types: Vec<(TypeDesc<'a>, u32)>,
+}
+
+fn write_bindings(
+    out: &mut Vec<u8>,
+    names: &mut BTreeMap<String, u32>,
+    bindings: &[ResourceBinding<'_>],
+) {
+    let mut name_positions = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        name_positions.push(out.len());
+        push_u32(out, 0);
+        push_u32(out, binding.input_type);
+        push_u32(out, binding.return_type);
+        push_u32(out, binding.dimension);
+        push_u32(out, binding.num_samples);
+        push_u32(out, binding.bind_point);
+        push_u32(out, binding.bind_count);
+        push_u32(out, binding.flags);
+    }
+    for (position, binding) in name_positions.into_iter().zip(bindings) {
+        let offset = intern(out, names, &binding.name);
+        patch_u32(out, position, offset);
+    }
+}
+
+fn write_constant_buffer_headers(
+    out: &mut Vec<u8>,
+    names: &mut BTreeMap<String, u32>,
+    buffers: &[CBufferDef<'_>],
+    section_position: usize,
+) -> Vec<usize> {
+    if !buffers.is_empty() {
+        pad4(out);
+    }
+    let section_offset = if buffers.is_empty() {
+        0
+    } else {
+        wire_u32(out.len())
+    };
+    patch_u32(out, section_position, section_offset);
+
+    let mut name_positions = Vec::with_capacity(buffers.len());
+    let mut variable_positions = Vec::with_capacity(buffers.len());
+    for buffer in buffers {
+        name_positions.push(out.len());
+        push_u32(out, 0);
+        push_u32(out, wire_u32(buffer.variables.len()));
+        variable_positions.push(out.len());
+        push_u32(out, 0);
+        push_u32(out, buffer.size);
+        push_u32(out, buffer.flags);
+        push_u32(out, buffer.cb_type);
+    }
+    for (position, buffer) in name_positions.into_iter().zip(buffers) {
+        let offset = intern(out, names, &buffer.name);
+        patch_u32(out, position, offset);
+    }
+    variable_positions
+}
+
+fn write_variable_sections<'a>(
+    out: &mut Vec<u8>,
+    pools: &mut RdefPools<'a>,
+    buffers: &[CBufferDef<'a>],
+    section_positions: &[usize],
+    is_sm5: bool,
+) {
+    for (buffer, &section_position) in buffers.iter().zip(section_positions) {
+        pad4(out);
+        let section_offset = wire_u32(out.len());
+        patch_u32(out, section_position, section_offset);
+
+        let mut name_positions = Vec::with_capacity(buffer.variables.len());
+        let mut type_positions = Vec::with_capacity(buffer.variables.len());
+        let mut default_positions = Vec::with_capacity(buffer.variables.len());
+        for variable in &buffer.variables {
+            name_positions.push(out.len());
+            push_u32(out, 0);
+            push_u32(out, variable.offset);
+            push_u32(out, variable.size);
+            push_u32(out, variable.flags);
+            type_positions.push(out.len());
+            push_u32(out, 0);
+            default_positions.push(out.len());
+            push_u32(out, 0);
+            if is_sm5 {
+                push_u32(out, variable.texture_start.unwrap_or(SLOT_UNUSED));
+                push_u32(out, variable.texture_size.unwrap_or(0));
+                push_u32(out, variable.sampler_start.unwrap_or(SLOT_UNUSED));
+                push_u32(out, variable.sampler_size.unwrap_or(0));
+            }
+        }
+        write_variable_data(
+            out,
+            pools,
+            buffer,
+            &name_positions,
+            &type_positions,
+            &default_positions,
+            is_sm5,
+        );
+    }
+}
+
+fn write_variable_data<'a>(
+    out: &mut Vec<u8>,
+    pools: &mut RdefPools<'a>,
+    buffer: &CBufferDef<'a>,
+    name_positions: &[usize],
+    type_positions: &[usize],
+    default_positions: &[usize],
+    is_sm5: bool,
+) {
+    for (index, variable) in buffer.variables.iter().enumerate() {
+        let name_offset = intern(out, &mut pools.variable_names, &variable.name);
+        patch_u32(out, name_positions[index], name_offset);
+        let type_offset = place_type(
+            out,
+            &mut pools.variable_names,
+            &mut pools.placed_types,
+            &mut pools.member_types,
+            &variable.var_type,
+            is_sm5,
+            buffer.cb_type == 0,
+        );
+        patch_u32(out, type_positions[index], type_offset);
+        let default_position = default_positions[index];
+        if variable.default_value.is_empty() {
+            patch_u32(out, default_position, 0);
+        } else if let Some(&offset) = pools.default_values.get(variable.default_value.as_ref()) {
+            patch_u32(out, default_position, offset);
+        } else {
+            pad4(out);
+            let offset = wire_u32(out.len());
+            out.extend_from_slice(&variable.default_value);
+            pools
+                .default_values
+                .insert(variable.default_value.to_vec(), offset);
+            patch_u32(out, default_position, offset);
+        }
+    }
+}
+
 impl ChunkWriter for ResourceDef<'_> {
     fn fourcc(&self) -> [u8; 4] {
         *b"RDEF"
     }
 
     fn write_payload(&self) -> Vec<u8> {
-        use alloc::collections::BTreeMap;
-        use alloc::string::String;
-
         let is_sm5 = self.is_sm5();
-        let rd11_size = if self.rd11_extra.is_some() { 32 } else { 0 };
-
+        let rd11_size: u32 = if self.rd11_extra.is_some() { 32 } else { 0 };
         let mut out: Vec<u8> = Vec::new();
-        // Binding/cbuffer names share one pool; variable + type names use a
-        // separate pool (fxc does not dedup variable names against bindings).
-        let mut bpool: BTreeMap<String, u32> = BTreeMap::new();
-        let mut vpool: BTreeMap<String, u32> = BTreeMap::new();
-        let mut dpool: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+        let mut pools = RdefPools::default();
 
-        // Header (28 bytes). cb_offset and creator_offset are patched later.
-        push_u32(&mut out, self.constant_buffers.len() as u32);
-        let cb_off_pos = out.len();
+        push_u32(&mut out, wire_u32(self.constant_buffers.len()));
+        let buffer_section_position = out.len();
         push_u32(&mut out, 0);
-        push_u32(&mut out, self.bindings.len() as u32);
-        push_u32(&mut out, (28 + rd11_size) as u32); // binding section always present
+        push_u32(&mut out, wire_u32(self.bindings.len()));
+        push_u32(&mut out, 28 + rd11_size);
         push_u32(&mut out, self.target_version);
         push_u32(&mut out, self.compile_flags);
-        let creator_pos = out.len();
+        let creator_position = out.len();
         push_u32(&mut out, 0);
-
         if let Some(rd11) = &self.rd11_extra {
-            for v in rd11 {
-                push_u32(&mut out, *v);
+            for value in rd11 {
+                push_u32(&mut out, *value);
             }
         }
 
-        // Resource bindings, then their name strings (cbuffer names share these).
-        let mut binding_name_pos = Vec::with_capacity(self.bindings.len());
-        for b in &self.bindings {
-            binding_name_pos.push(out.len());
-            push_u32(&mut out, 0);
-            push_u32(&mut out, b.input_type);
-            push_u32(&mut out, b.return_type);
-            push_u32(&mut out, b.dimension);
-            push_u32(&mut out, b.num_samples);
-            push_u32(&mut out, b.bind_point);
-            push_u32(&mut out, b.bind_count);
-            push_u32(&mut out, b.flags);
-        }
-        for (i, b) in self.bindings.iter().enumerate() {
-            let off = intern(&mut out, &mut bpool, &b.name);
-            patch_u32(&mut out, binding_name_pos[i], off);
-        }
-
-        // Constant-buffer descriptors (cb_offset is 0 when there are none).
-        // Only align when a cbuffer section follows.
-        if !self.constant_buffers.is_empty() {
-            pad4(&mut out);
-        }
-        let cb_section = out.len() as u32;
-        patch_u32(
+        write_bindings(&mut out, &mut pools.binding_names, &self.bindings);
+        let variable_positions = write_constant_buffer_headers(
             &mut out,
-            cb_off_pos,
-            if self.constant_buffers.is_empty() {
-                0
-            } else {
-                cb_section
-            },
+            &mut pools.binding_names,
+            &self.constant_buffers,
+            buffer_section_position,
         );
-        let mut cb_name_pos = Vec::with_capacity(self.constant_buffers.len());
-        let mut cb_var_pos = Vec::with_capacity(self.constant_buffers.len());
-        for cb in &self.constant_buffers {
-            cb_name_pos.push(out.len());
-            push_u32(&mut out, 0);
-            push_u32(&mut out, cb.variables.len() as u32);
-            cb_var_pos.push(out.len());
-            push_u32(&mut out, 0);
-            push_u32(&mut out, cb.size);
-            push_u32(&mut out, cb.flags);
-            push_u32(&mut out, cb.cb_type);
-        }
-        for (i, cb) in self.constant_buffers.iter().enumerate() {
-            let off = intern(&mut out, &mut bpool, &cb.name);
-            patch_u32(&mut out, cb_name_pos[i], off);
-        }
-
-        // Per cbuffer: variable descriptors, then per-variable name/type/default.
-        let mut placed_types: Vec<(TypeDesc<'_>, u32)> = Vec::new();
-        let mut member_types: Vec<(TypeDesc<'_>, u32)> = Vec::new();
-        for (ci, cb) in self.constant_buffers.iter().enumerate() {
-            pad4(&mut out);
-            let var_section = out.len() as u32;
-            patch_u32(&mut out, cb_var_pos[ci], var_section);
-
-            let mut name_pos = Vec::with_capacity(cb.variables.len());
-            let mut type_pos = Vec::with_capacity(cb.variables.len());
-            let mut def_pos = Vec::with_capacity(cb.variables.len());
-            for v in &cb.variables {
-                name_pos.push(out.len());
-                push_u32(&mut out, 0);
-                push_u32(&mut out, v.offset);
-                push_u32(&mut out, v.size);
-                push_u32(&mut out, v.flags);
-                type_pos.push(out.len());
-                push_u32(&mut out, 0);
-                def_pos.push(out.len());
-                push_u32(&mut out, 0);
-                if is_sm5 {
-                    push_u32(&mut out, v.texture_start.unwrap_or(SLOT_UNUSED));
-                    push_u32(&mut out, v.texture_size.unwrap_or(0));
-                    push_u32(&mut out, v.sampler_start.unwrap_or(SLOT_UNUSED));
-                    push_u32(&mut out, v.sampler_size.unwrap_or(0));
-                }
-            }
-            for (vi, v) in cb.variables.iter().enumerate() {
-                let noff = intern(&mut out, &mut vpool, &v.name);
-                patch_u32(&mut out, name_pos[vi], noff);
-                // Types in resource cbuffers (kind != 0, e.g. structured-buffer
-                // `$Element`) are placed fresh, not deduped against regular ones.
-                let toff = place_type(
-                    &mut out,
-                    &mut vpool,
-                    &mut placed_types,
-                    &mut member_types,
-                    &v.var_type,
-                    is_sm5,
-                    cb.cb_type == 0,
-                );
-                patch_u32(&mut out, type_pos[vi], toff);
-                if v.default_value.is_empty() {
-                    patch_u32(&mut out, def_pos[vi], 0);
-                } else if let Some(&doff) = dpool.get(v.default_value.as_ref()) {
-                    patch_u32(&mut out, def_pos[vi], doff); // shared identical default
-                } else {
-                    pad4(&mut out); // default values are 4-byte aligned
-                    let doff = out.len() as u32;
-                    out.extend_from_slice(&v.default_value);
-                    dpool.insert(v.default_value.to_vec(), doff);
-                    patch_u32(&mut out, def_pos[vi], doff);
-                }
-            }
-        }
-
-        // Creator string, last.
-        let coff = intern(&mut out, &mut vpool, &self.creator);
-        patch_u32(&mut out, creator_pos, coff);
-
-        // Pad the whole chunk to a 4-byte boundary.
+        write_variable_sections(
+            &mut out,
+            &mut pools,
+            &self.constant_buffers,
+            &variable_positions,
+            is_sm5,
+        );
+        let creator_offset = intern(&mut out, &mut pools.variable_names, &self.creator);
+        patch_u32(&mut out, creator_position, creator_offset);
         pad4(&mut out);
         out
     }
@@ -1075,8 +1157,14 @@ mod tests {
             assert_eq!(ResourceDimension::from_hlsl_stem(d.hlsl_stem()), Some(d));
             assert_eq!(d as u32, v);
         }
-        assert_eq!(ResourceDimension::from_u32(5).unwrap().hlsl_stem(), "Texture2DArray");
-        assert_eq!(ResourceDimension::from_u32(8).unwrap().hlsl_stem(), "Texture3D");
+        assert_eq!(
+            ResourceDimension::from_u32(5).unwrap().hlsl_stem(),
+            "Texture2DArray"
+        );
+        assert_eq!(
+            ResourceDimension::from_u32(8).unwrap().hlsl_stem(),
+            "Texture3D"
+        );
     }
 
     #[test]

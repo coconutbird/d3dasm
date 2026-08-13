@@ -1,16 +1,17 @@
 //! Verify the DXBC checksum implementation against real shaders: recompute the
 //! header digest from each container's content and compare to the stored hash.
 //!
-//! Usage: cargo run --release --example hash_check -- shaders/**/*.bin
+//! Usage: cargo run --release --example `hash_check` -- shaders/**/*.bin
+
+use std::fmt::Write as _;
 
 fn main() {
     let mut total = 0usize;
     let mut matched = 0usize;
 
     for arg in std::env::args().skip(1) {
-        let data = match std::fs::read(&arg) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Ok(data) = std::fs::read(&arg) else {
+            continue;
         };
         for c in dxbc::scan_dxbc(&data) {
             total += 1;
@@ -38,5 +39,9 @@ fn main() {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut encoded = String::with_capacity(b.len() * 2);
+    for byte in b {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }

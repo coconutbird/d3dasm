@@ -17,7 +17,7 @@ const BANNER: &str =
     "// ============================================================================\n";
 
 /// Write the full forensic metadata header for `shader` into `out`.
-pub fn write_metadata_header(out: &mut String, shader: &Shader) {
+pub fn write_metadata_header(out: &mut String, shader: &Shader<'_>) {
     out.push_str(BANNER);
     out.push_str("// DXBC forensic metadata — informational; ignored on reassembly\n");
     out.push_str(BANNER);

@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
 use super::{ChunkParser, ChunkWriter};
 
@@ -12,7 +12,7 @@ use super::{ChunkParser, ChunkWriter};
 pub struct RootSignature {
     /// Root signature version (1 = v1.0, 2 = v1.1).
     pub version: u32,
-    /// Root signature flags (e.g. ALLOW_INPUT_ASSEMBLER, DENY_*_SHADER_ROOT_ACCESS).
+    /// Root signature flags (e.g. `ALLOW_INPUT_ASSEMBLER`, DENY_*_`SHADER_ROOT_ACCESS`).
     pub flags: u32,
     /// Root parameters (descriptor tables, constants, root descriptors).
     pub parameters: Vec<RootParameter>,
@@ -165,12 +165,41 @@ fn parse_rt(v: u32) -> DescriptorRangeType {
     }
 }
 
+fn parse_static_samplers(data: &[u8], count: usize, offset: usize) -> Option<Vec<StaticSampler>> {
+    let mut cursor = Cursor::new(data);
+    let mut samplers = Vec::with_capacity(count);
+    for index in 0..count {
+        let sampler_offset = offset + index * 52;
+        if sampler_offset + 52 > data.len() {
+            break;
+        }
+        cursor.seek(SeekFrom::Start(sampler_offset as u64)).ok()?;
+        samplers.push(StaticSampler {
+            filter: cursor.read_u32_le().ok()?,
+            address_u: cursor.read_u32_le().ok()?,
+            address_v: cursor.read_u32_le().ok()?,
+            address_w: cursor.read_u32_le().ok()?,
+            mip_lod_bias: cursor.read_f32_le().ok()?,
+            max_anisotropy: cursor.read_u32_le().ok()?,
+            comparison_func: cursor.read_u32_le().ok()?,
+            border_color: cursor.read_u32_le().ok()?,
+            min_lod: cursor.read_f32_le().ok()?,
+            max_lod: cursor.read_f32_le().ok()?,
+            shader_register: cursor.read_u32_le().ok()?,
+            register_space: cursor.read_u32_le().ok()?,
+            visibility: parse_vis(cursor.read_u32_le().ok()?),
+        });
+    }
+    Some(samplers)
+}
+
 /// Parse RTS0 chunk data (bytes *after* the 8-byte fourcc+size header).
+#[must_use]
 pub fn parse_rts0(data: &[u8]) -> Option<RootSignature> {
     if data.len() < 24 {
         return None;
     }
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
     let version = c.read_u32_le().ok()?;
     let np = c.read_u32_le().ok()? as usize;
     let p_off = c.read_u32_le().ok()? as usize;
@@ -246,29 +275,7 @@ pub fn parse_rts0(data: &[u8]) -> Option<RootSignature> {
         });
     }
 
-    let mut static_samplers = Vec::with_capacity(ns);
-    for i in 0..ns {
-        let s = s_off + i * 52;
-        if s + 52 > data.len() {
-            break;
-        }
-        c.seek(SeekFrom::Start(s as u64)).ok()?;
-        static_samplers.push(StaticSampler {
-            filter: c.read_u32_le().ok()?,
-            address_u: c.read_u32_le().ok()?,
-            address_v: c.read_u32_le().ok()?,
-            address_w: c.read_u32_le().ok()?,
-            mip_lod_bias: c.read_f32_le().ok()?,
-            max_anisotropy: c.read_u32_le().ok()?,
-            comparison_func: c.read_u32_le().ok()?,
-            border_color: c.read_u32_le().ok()?,
-            min_lod: c.read_f32_le().ok()?,
-            max_lod: c.read_f32_le().ok()?,
-            shader_register: c.read_u32_le().ok()?,
-            register_space: c.read_u32_le().ok()?,
-            visibility: parse_vis(c.read_u32_le().ok()?),
-        });
-    }
+    let static_samplers = parse_static_samplers(data, ns, s_off)?;
     Some(RootSignature {
         version,
         flags,
@@ -303,6 +310,7 @@ impl fmt::Display for DescriptorRangeType {
 
 impl DescriptorRangeType {
     /// Returns the HLSL register prefix character for this range type.
+    #[must_use]
     pub fn prefix(&self) -> char {
         match self {
             Self::Srv => 't',
@@ -315,13 +323,13 @@ impl DescriptorRangeType {
 
 impl fmt::Display for DescriptorRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cnt = if self.num_descriptors == 0xFFFFFFFF {
+        let cnt = if self.num_descriptors == 0xFFFF_FFFF {
             alloc::string::String::from("unbounded")
         } else {
             alloc::format!("{}", self.num_descriptors)
         };
 
-        let off = if self.offset_in_descriptors_from_table_start == 0xFFFFFFFF {
+        let off = if self.offset_in_descriptors_from_table_start == 0xFFFF_FFFF {
             alloc::string::String::from("APPEND")
         } else {
             alloc::format!("{}", self.offset_in_descriptors_from_table_start)
@@ -396,7 +404,7 @@ impl ChunkParser<'_> for RootSignature {
     }
 }
 
-fn vis_to_u32(v: &ShaderVisibility) -> u32 {
+fn vis_to_u32(v: ShaderVisibility) -> u32 {
     match v {
         ShaderVisibility::All => 0,
         ShaderVisibility::Vertex => 1,
@@ -407,13 +415,17 @@ fn vis_to_u32(v: &ShaderVisibility) -> u32 {
     }
 }
 
-fn rt_to_u32(r: &DescriptorRangeType) -> u32 {
+fn rt_to_u32(r: DescriptorRangeType) -> u32 {
     match r {
         DescriptorRangeType::Srv => 0,
         DescriptorRangeType::Uav => 1,
         DescriptorRangeType::Cbv => 2,
         DescriptorRangeType::Sampler => 3,
     }
+}
+
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("root-signature size or offset exceeds u32")
 }
 
 impl ChunkWriter for RootSignature {
@@ -461,10 +473,10 @@ impl ChunkWriter for RootSignature {
 
         // Header
         w(&mut buf, self.version);
-        w(&mut buf, np as u32);
-        w(&mut buf, params_offset as u32);
-        w(&mut buf, ns as u32);
-        w(&mut buf, samplers_offset as u32);
+        w(&mut buf, wire_u32(np));
+        w(&mut buf, wire_u32(params_offset));
+        w(&mut buf, wire_u32(ns));
+        w(&mut buf, wire_u32(samplers_offset));
         w(&mut buf, self.flags);
 
         // Parameter entries
@@ -477,8 +489,8 @@ impl ChunkWriter for RootSignature {
                 RootParameterType::Uav { .. } => 4,
             };
             w(&mut buf, pt);
-            w(&mut buf, vis_to_u32(&p.visibility));
-            w(&mut buf, payload_offsets[i] as u32);
+            w(&mut buf, vis_to_u32(p.visibility));
+            w(&mut buf, wire_u32(payload_offsets[i]));
         }
 
         // Parameter payloads
@@ -486,13 +498,13 @@ impl ChunkWriter for RootSignature {
             match &p.param_type {
                 RootParameterType::DescriptorTable { ranges } => {
                     let nr = ranges.len();
-                    w(&mut buf, nr as u32);
+                    w(&mut buf, wire_u32(nr));
                     // Ranges are written right after the (count, ranges_offset) pair.
                     // The ranges_offset points to absolute position within chunk data.
                     let ro = buf.len() + 4; // after the u32 we're about to write
-                    w(&mut buf, ro as u32);
+                    w(&mut buf, wire_u32(ro));
                     for r in ranges {
-                        w(&mut buf, rt_to_u32(&r.range_type));
+                        w(&mut buf, rt_to_u32(r.range_type));
                         w(&mut buf, r.num_descriptors);
                         w(&mut buf, r.base_shader_register);
                         w(&mut buf, r.register_space);
@@ -531,7 +543,7 @@ impl ChunkWriter for RootSignature {
             wf(&mut buf, s.max_lod);
             w(&mut buf, s.shader_register);
             w(&mut buf, s.register_space);
-            w(&mut buf, vis_to_u32(&s.visibility));
+            w(&mut buf, vis_to_u32(s.visibility));
         }
 
         buf
@@ -553,12 +565,12 @@ impl fmt::Display for RootSignature {
                 RootParameterType::DescriptorTable { ranges } => {
                     writeln!(f, "//   [{i:2}] DescriptorTable  vis={}", p.visibility)?;
                     for r in ranges {
-                        let cnt = if r.num_descriptors == 0xFFFFFFFF {
+                        let cnt = if r.num_descriptors == 0xFFFF_FFFF {
                             alloc::string::String::from("unbounded")
                         } else {
                             alloc::format!("{}", r.num_descriptors)
                         };
-                        let off = if r.offset_in_descriptors_from_table_start == 0xFFFFFFFF {
+                        let off = if r.offset_in_descriptors_from_table_start == 0xFFFF_FFFF {
                             alloc::string::String::from("APPEND")
                         } else {
                             alloc::format!("{}", r.offset_in_descriptors_from_table_start)

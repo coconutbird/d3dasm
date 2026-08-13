@@ -4,7 +4,7 @@
 //! as a length-prefixed string. Layout:
 //!   0x00: u16 — flags / unknown
 //!   0x02: u16 — name length in bytes (excluding null terminator)
-//!   0x04: [u8; name_len] — UTF-8 name
+//!   0x04: [u8; `name_len`] — UTF-8 name
 //!
 //! Some compilers write a simpler variant with just a null-terminated string.
 
@@ -21,7 +21,8 @@ pub struct DebugName<'a> {
 }
 
 /// Parse an ILDN chunk.
-pub fn parse_ildn<'a>(data: &'a [u8]) -> Option<DebugName<'a>> {
+#[must_use]
+pub fn parse_ildn(data: &[u8]) -> Option<DebugName<'_>> {
     if data.len() < 4 {
         return None;
     }
@@ -65,7 +66,8 @@ impl ChunkWriter for DebugName<'_> {
         let name_bytes = self.name.as_bytes();
         let mut buf = alloc::vec::Vec::with_capacity(4 + name_bytes.len() + 1);
         buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        let name_len = u16::try_from(name_bytes.len()).expect("debug name length exceeds u16");
+        buf.extend_from_slice(&name_len.to_le_bytes());
         buf.extend_from_slice(name_bytes);
         buf.push(0); // null terminator
         buf

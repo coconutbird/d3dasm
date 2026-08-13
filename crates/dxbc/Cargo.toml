@@ -1,26 +1,29 @@
 [package]
 name = "dxbc"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "DXBC (DirectX Bytecode) container parser and SM4/SM5 shader disassembler"
-license = "MIT"
-repository = "https://github.com/coconutbird/d3dasm"
-homepage = "https://github.com/coconutbird/d3dasm"
-authors = ["Jon-Luke Biddle"]
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 keywords = ["dxbc", "directx", "shader", "disassembler", "hlsl"]
 categories = ["parser-implementations", "no-std", "game-development"]
-readme = "../../README.md"
+readme.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = []
 std = ["nostdio/std"]
 
 [dependencies]
-memchr = { version = "2.8.0", default-features = false }
-nostdio = "0.1.0"
-smallvec = { version = "1.15.1", default-features = false, features = ["union"] }
+memchr.workspace = true
+nostdio.workspace = true
+smallvec.workspace = true
 
 [dev-dependencies]
 # Integration tests construct IR with the public `SmallVec`-based type aliases.
-smallvec = { version = "1.15.1", features = ["union"] }
+smallvec.workspace = true

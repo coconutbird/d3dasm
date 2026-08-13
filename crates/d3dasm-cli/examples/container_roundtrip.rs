@@ -2,7 +2,7 @@
 //! `.d3dasm` document (containers + `.raw` wrapper segments) and assemble it
 //! back, asserting byte-identity with the entire original file.
 //!
-//! Usage: cargo run --release --example container_roundtrip -- shaders/**/*.bin
+//! Usage: cargo run --release --example `container_roundtrip` -- shaders/**/*.bin
 
 fn main() {
     let mut files = 0usize;

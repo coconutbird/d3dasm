@@ -1,19 +1,19 @@
 //! RDAT chunk parser.
 //!
 //! Binary layout:
-//!   RuntimeDataHeader { u32 version, u32 part_count }
-//!   u32 offsets\[part_count\]   (relative to header start)
+//!   `RuntimeDataHeader` { u32 version, u32 `part_count` }
+//!   u32 offsets\[`part_count`\]   (relative to header start)
 //!   For each part at offset:
-//!     RuntimeDataPartHeader { u32 type, u32 size }
+//!     `RuntimeDataPartHeader` { u32 type, u32 size }
 //!     byte data[ALIGN4(size)]
 //!   For record tables, data starts with:
-//!     RuntimeDataTableHeader { u32 record_count, u32 record_stride }
-//!     byte records[record_count * record_stride]
+//!     `RuntimeDataTableHeader` { u32 `record_count`, u32 `record_stride` }
+//!     byte records[`record_count` * `record_stride`]
 
 use alloc::vec::Vec;
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
-use super::types::*;
+use super::types::{PartType, RDAT_VERSION_10, RdatPart, RuntimeData};
 
 fn is_record_table(part_type: u32) -> bool {
     match PartType::from_u32(part_type) {
@@ -24,11 +24,12 @@ fn is_record_table(part_type: u32) -> bool {
 }
 
 /// Parse an RDAT chunk from raw bytes.
+#[must_use]
 pub fn parse_rdat(data: &[u8]) -> Option<RuntimeData> {
     if data.len() < 8 {
         return None;
     }
-    let mut c = SliceCursor::new(data);
+    let mut c = Cursor::new(data);
 
     let first_u32 = c.read_u32_le().ok()?;
 
@@ -61,25 +62,27 @@ pub fn parse_rdat(data: &[u8]) -> Option<RuntimeData> {
 
     for offset_entry in offsets.iter().take(part_count) {
         let part_offset = if version >= RDAT_VERSION_10 {
-            header_base + *offset_entry as usize
+            header_base.checked_add(usize::try_from(*offset_entry).ok()?)?
         } else {
-            c.position()
+            usize::try_from(c.position()).ok()?
         };
 
-        if part_offset + 8 > data.len() {
+        if part_offset.checked_add(8)? > data.len() {
             break;
         }
-        c.seek(SeekFrom::Start(part_offset as u64)).ok()?;
+        c.seek(SeekFrom::Start(u64::try_from(part_offset).ok()?))
+            .ok()?;
 
         let part_type = c.read_u32_le().ok()?;
-        let part_size = c.read_u32_le().ok()? as usize;
-        let part_data_start = c.position();
+        let part_size = usize::try_from(c.read_u32_le().ok()?).ok()?;
+        let part_data_start = usize::try_from(c.position()).ok()?;
+        let part_data_end = part_data_start.checked_add(part_size)?;
 
-        if part_data_start + part_size > data.len() {
+        if part_data_end > data.len() {
             break;
         }
 
-        let part_data = &data[part_data_start..part_data_start + part_size];
+        let part_data = &data[part_data_start..part_data_end];
         let known = PartType::from_u32(part_type);
         let part = match known {
             Some(PartType::StringBuffer) => RdatPart::StringBuffer(Vec::from(part_data)),
