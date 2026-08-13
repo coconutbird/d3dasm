@@ -508,7 +508,7 @@ pub enum GsOutputTopology {
 }
 
 impl GsOutputTopology {
-    /// Decode from the raw 3-bit field stored in token0 bits 11–13.
+    /// Decode from the raw 6-bit field stored in token0 bits 11–16.
     #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {

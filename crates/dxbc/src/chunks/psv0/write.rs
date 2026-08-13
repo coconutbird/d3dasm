@@ -247,7 +247,10 @@ pub fn write_psv0(psv: &PipelineStateValidation) -> Vec<u8> {
     let runtime_end = 4usize
         .checked_add(usize::try_from(psv.info_size).expect("PSV info size fits in usize"))
         .expect("PSV info size overflows usize");
-    assert!(out.len() <= runtime_end, "PSV runtime info exceeds info_size");
+    assert!(
+        out.len() <= runtime_end,
+        "PSV runtime info exceeds info_size"
+    );
     out.resize(runtime_end, 0);
 
     // Resource count

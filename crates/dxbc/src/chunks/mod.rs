@@ -12,6 +12,7 @@ pub mod ildn;
 pub mod lfs0;
 pub mod libf;
 pub mod libh;
+pub mod pdbi;
 pub mod priv_;
 pub mod psv0;
 pub mod rdat;
@@ -19,6 +20,7 @@ pub mod rdef;
 pub mod rts0;
 pub mod sfi0;
 pub mod signature;
+pub mod srci;
 pub mod stat;
 pub mod vers;
 
@@ -80,6 +82,7 @@ pub use ildn::DebugName;
 pub use lfs0::LibraryFunctionSignatures;
 pub use libf::LibraryFunction;
 pub use libh::LibraryHeader;
+pub use pdbi::ShaderPdbInfo;
 pub use priv_::PrivateData;
 pub use psv0::PipelineStateValidation;
 pub use rdat::RuntimeData;
@@ -87,6 +90,7 @@ pub use rdef::ResourceDef;
 pub use rts0::RootSignature;
 pub use sfi0::ShaderFeatureInfo;
 pub use signature::{Signature, SignatureElement};
+pub use srci::SourceInfo;
 pub use stat::ShaderStats;
 pub use vers::CompilerVersion;
 
@@ -121,6 +125,10 @@ pub enum ChunkData<'a> {
     DebugName(ildn::DebugName<'a>),
     /// ILDB — embedded debug data blob.
     DebugData(ildb::DebugData<'a>),
+    /// SRCI — embedded source names, contents, and compiler arguments.
+    SourceInfo(srci::SourceInfo<'a>),
+    /// PDBI — compressed or uncompressed RDAT-formatted PDB metadata.
+    ShaderPdbInfo(pdbi::ShaderPdbInfo<'a>),
     /// PRIV — private / tool-specific data.
     PrivateData(priv_::PrivateData<'a>),
     /// DXIL — SM6.0+ shader bytecode (LLVM IR).
@@ -218,6 +226,8 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
         },
         "ILDN" => try_parse!(d, cc, DebugName, ildn::DebugName<'_>),
         "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData<'_>),
+        "SRCI" => try_parse!(d, cc, SourceInfo, srci::SourceInfo<'_>),
+        "PDBI" => try_parse!(d, cc, ShaderPdbInfo, pdbi::ShaderPdbInfo<'_>),
         "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData<'_>),
         "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData<'_>),
         "PSV0" => match <psv0::PipelineStateValidation as ChunkParser<'_>>::parse(d) {
@@ -259,6 +269,8 @@ impl ChunkData<'_> {
             | ChunkData::OutputSignature(sig)
             | ChunkData::PatchConstantSignature(sig) => Some(sig.to_writable()),
             ChunkData::DebugData(dd) => Some(dd.to_writable()),
+            ChunkData::SourceInfo(si) => Some(si.to_writable()),
+            ChunkData::ShaderPdbInfo(pi) => Some(pi.to_writable()),
             ChunkData::PrivateData(pd) => Some(pd.to_writable()),
             ChunkData::Dxil(d) | ChunkData::DxilReflection(d) => Some(d.to_writable()),
             ChunkData::PipelineStateValidation(p) => Some(p.to_writable()),

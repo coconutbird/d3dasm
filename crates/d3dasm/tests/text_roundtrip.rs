@@ -16,7 +16,7 @@ fn temp(reg: u32, components: ComponentSelect) -> Operand {
         components,
         negate: false,
         abs: false,
-        min_precision: Default::default(),
+        min_precision: MinPrecision::default(),
         non_uniform: false,
         indices: core::iter::once(OperandIndex::Imm32(reg)).collect(),
         immediate_values: dxbc::shex::Immediates::new(),
@@ -43,7 +43,7 @@ fn generic(opcode: Opcode, operands: Vec<Operand>) -> Instruction {
         opcode,
         InstructionKind::Generic {
             operands: operands.into_iter().collect(),
-            trailing_tokens: Default::default(),
+            trailing_tokens: dxbc::shex::SmallU32Vec::default(),
         },
     )
 }
@@ -67,10 +67,7 @@ fn container_text_roundtrip() {
             insn(Opcode::DclTemps, InstructionKind::DclTemps { count: 1 }),
             generic(
                 Opcode::Mov,
-                vec![
-                    temp(0, ComponentSelect::Mask(0xF)),
-                    tagged_source,
-                ],
+                vec![temp(0, ComponentSelect::Mask(0xF)), tagged_source],
             ),
             generic(Opcode::Ret, vec![]),
         ],

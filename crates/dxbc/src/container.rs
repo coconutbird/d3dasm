@@ -246,6 +246,11 @@ pub fn build_dxbc(chunks: &[WritableChunk]) -> Vec<u8> {
 /// header `hash`. The inverse of [`scan_dxbc`] for a single container: feeding
 /// a parsed container's chunks plus its `version`/`header_hash` reproduces the
 /// original bytes (for the standard contiguous chunk layout).
+///
+/// # Panics
+///
+/// Panics if the chunk table, a chunk payload, or the completed container
+/// cannot be represented by the 32-bit offsets and sizes used on the wire.
 #[must_use]
 pub fn build_dxbc_with_header(
     chunks: &[WritableChunk],

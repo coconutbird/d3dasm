@@ -67,9 +67,7 @@ fn main() {
                         encoded.data.len()
                     );
                     let start = difference.saturating_sub(difference % 4);
-                    let end = (start + 24)
-                        .min(chunk.data.len())
-                        .min(encoded.data.len());
+                    let end = (start + 24).min(chunk.data.len()).min(encoded.data.len());
                     eprintln!(
                         "  original[{start}..{end}]={:02x?}\n  encoded [{start}..{end}]={:02x?}",
                         &chunk.data[start..end],

@@ -260,7 +260,9 @@ pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'sta
             None
         };
         let padding = match m.get("pad") {
-            Some(value) => u16::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()?,
+            Some(value) => {
+                u16::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()?
+            }
             None => 0,
         };
         elements.push(SignatureElement {

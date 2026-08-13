@@ -68,6 +68,11 @@ fn container_document_roundtrip() {
 
     // Forensic header + directives are present.
     assert!(text.contains("// Container:"), "missing header:\n{text}");
+    assert!(text.contains(" hash="), "missing stored hash:\n{text}");
+    assert!(
+        text.contains(" checksum="),
+        "missing content checksum:\n{text}"
+    );
     assert!(text.contains("PRIV"), "missing chunk inventory:\n{text}");
     assert!(
         text.contains(".code SHEX"),
@@ -86,6 +91,40 @@ fn container_document_roundtrip() {
         &dxbc::checksum::dxbc_checksum(&rebuilt[20..])[..],
         "header hash not recomputed"
     );
+}
+
+#[test]
+fn stale_header_hash_is_preserved_until_content_changes() {
+    let mut original = valid_container(
+        &[WritableChunk {
+            fourcc: *b"PRIV",
+            data: vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03],
+        }],
+        1,
+    );
+    let stale_hash = [0xa5; 16];
+    original[4..20].copy_from_slice(&stale_hash);
+
+    let shader = d3dasm::parse(&original).pop().expect("container");
+    let text = d3dasm::container_doc::serialize(&shader);
+    let rebuilt = d3dasm::container_doc::assemble(&text).expect("assemble unchanged container");
+    assert_eq!(rebuilt, original, "stale stored hash was not preserved");
+
+    let edited = text.replacen("deadbeef010203", "deadbeef010204", 1);
+    assert_ne!(edited, text, "fixture payload was not found in document");
+    let rebuilt = d3dasm::container_doc::assemble(&edited).expect("assemble edited container");
+    assert_ne!(&rebuilt[4..20], &stale_hash);
+    assert_eq!(
+        &rebuilt[4..20],
+        &dxbc::checksum::dxbc_checksum(&rebuilt[20..]),
+        "edited container was not rehashed"
+    );
+}
+
+#[test]
+fn dxbc_directive_rejects_unknown_metadata() {
+    let document = ".dxbc version=1 surprise=true\n.end\n";
+    assert!(d3dasm::container_doc::assemble(document).is_err());
 }
 
 #[test]

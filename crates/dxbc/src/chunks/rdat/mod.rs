@@ -43,7 +43,11 @@ impl fmt::Display for RuntimeData {
                 writeln!(f, "// Runtime Data (v1.0): {} part(s)", self.parts.len())?;
             }
             types::RuntimeDataVersion::Newer(raw) => {
-                writeln!(f, "// Runtime Data (0x{raw:08X}): {} part(s)", self.parts.len())?;
+                writeln!(
+                    f,
+                    "// Runtime Data (0x{raw:08X}): {} part(s)",
+                    self.parts.len()
+                )?;
             }
         }
         for (i, part) in self.parts.iter().enumerate() {

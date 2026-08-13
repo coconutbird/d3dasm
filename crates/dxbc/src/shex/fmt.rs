@@ -9,8 +9,8 @@ use alloc::string::String;
 use core::fmt::Write;
 
 use super::ir::{
-    ComponentSelect, CustomDataType, GsPrimitive, Instruction, InstructionKind, Operand,
-    MinPrecision, OperandIndex, Program, RegisterType, ReturnType, SystemValue,
+    ComponentSelect, CustomDataType, GsPrimitive, Instruction, InstructionKind, MinPrecision,
+    Operand, OperandIndex, Program, RegisterType, ReturnType, SystemValue,
 };
 use super::opcodes::Opcode;
 
@@ -424,6 +424,12 @@ fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fm
             write!(w, "dcl_hsJoinPhaseInstanceCount {count}")
         }
         InstructionKind::DclThreadGroup { x, y, z } => write!(w, "dcl_thread_group {x}, {y}, {z}"),
+        _ => write_resource_declaration(w, instr),
+    }
+}
+
+fn write_resource_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
+    match &instr.kind {
         InstructionKind::DclUavTyped {
             dimension,
             return_type,
@@ -770,12 +776,11 @@ fn write_operand_core(
 
 fn write_operand_annotations(w: &mut dyn Write, op: &Operand) -> core::fmt::Result {
     let precision = match op.min_precision {
-        MinPrecision::Default => None,
+        MinPrecision::Default | MinPrecision::Reserved(_) => None,
         MinPrecision::Float16 => Some("min16f"),
         MinPrecision::Float2_8 => Some("min2_8f"),
         MinPrecision::Sint16 => Some("min16i"),
         MinPrecision::Uint16 => Some("min16u"),
-        MinPrecision::Reserved(_) => None,
     };
     if let Some(precision) = precision {
         write!(w, " {{{precision}}}")?;

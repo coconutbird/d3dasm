@@ -189,14 +189,12 @@ fn parse_runtime_info_1(cursor: &mut Cursor<&[u8]>) -> Option<PSVRuntimeInfo1> {
     let shader_kind = PSVShaderKind::from_u8(shader_stage);
     let stage_union = match shader_kind {
         PSVShaderKind::Geometry => PSVRuntimeInfo1Union::MaxVertexCount(raw_union),
-        PSVShaderKind::Hull | PSVShaderKind::Domain => {
-            PSVRuntimeInfo1Union::PatchConstantVectors {
-                vectors: raw_union as u8,
-                padding: (raw_union >> 8) as u8,
-            }
-        }
+        PSVShaderKind::Hull | PSVShaderKind::Domain => PSVRuntimeInfo1Union::PatchConstantVectors {
+            vectors: raw_union.to_le_bytes()[0],
+            padding: (raw_union >> 8) as u8,
+        },
         PSVShaderKind::Mesh => PSVRuntimeInfo1Union::Mesh {
-            signature_primitive_vectors: raw_union as u8,
+            signature_primitive_vectors: raw_union.to_le_bytes()[0],
             output_topology: (raw_union >> 8) as u8,
         },
         _ => PSVRuntimeInfo1Union::Reserved(raw_union),
@@ -223,9 +221,7 @@ fn parse_runtime_info_1(cursor: &mut Cursor<&[u8]>) -> Option<PSVRuntimeInfo1> {
 
 fn parse_runtime_info(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Option<RuntimeInfo> {
     let info_size = cursor.read_u32_le().ok()?;
-    if info_size < 24
-        || data.len() < 4usize.checked_add(usize::try_from(info_size).ok()?)?
-    {
+    if info_size < 24 || data.len() < 4usize.checked_add(usize::try_from(info_size).ok()?)? {
         return None;
     }
     let info_start = cursor.position();
@@ -244,7 +240,10 @@ fn parse_runtime_info(data: &[u8], cursor: &mut Cursor<&[u8]>) -> Option<Runtime
         .map_or(0xFF, |info| u32::from(info.shader_stage));
     let union_start = usize::try_from(info_start).ok()?;
     let union_end = union_start.checked_add(16)?;
-    let stage_info = parse_stage_info(data.get(union_start..union_end)?.try_into().ok()?, shader_kind)?;
+    let stage_info = parse_stage_info(
+        data.get(union_start..union_end)?.try_into().ok()?,
+        shader_kind,
+    )?;
     let version_2 = if info_size >= 48 {
         Some(PSVRuntimeInfo2 {
             num_threads_x: cursor.read_u32_le().ok()?,

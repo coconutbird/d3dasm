@@ -3,7 +3,7 @@
 //!
 //! Layout (after the `//` forensic header, which is ignored on parse):
 //! ```text
-//! .dxbc version=1      ; header hash is recomputed on reassembly, not stored here
+//! .dxbc version=1 hash=<stored-digest> checksum=<content-digest>
 //! .code SHEX            ; editable shader program (lossless disassembly body)
 //! ps_5_0
 //! ...
@@ -24,11 +24,36 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::AsmError;
-use dxbc::chunks::WritableChunk;
+use dxbc::chunks::{ChunkWriter, WritableChunk};
 
 use crate::{Shader, forensic};
 
 const HEX_PER_LINE: usize = 32;
+
+struct DxbcDirective {
+    version: u32,
+    original_hash: Option<[u8; 16]>,
+    content_checksum: Option<[u8; 16]>,
+}
+
+fn write_digest(out: &mut String, digest: &[u8; 16]) {
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+}
+
+fn container_content_checksum(container: &dxbc::container::DxbcContainer<'_>) -> [u8; 16] {
+    let chunks: Vec<WritableChunk> = container
+        .chunks
+        .iter()
+        .map(|chunk| WritableChunk {
+            fourcc: chunk.fourcc,
+            data: chunk.data.to_vec(),
+        })
+        .collect();
+    let bytes = dxbc::container::build_dxbc_with_header(&chunks, container.version, &[0; 16]);
+    dxbc::checksum::dxbc_checksum(&bytes[20..])
+}
 
 /// Serialize a whole DXBC container to a forensic `.d3dasm` document.
 #[must_use]
@@ -37,10 +62,12 @@ pub fn serialize(shader: &Shader<'_>) -> String {
     forensic::write_metadata_header(&mut out, shader);
 
     let container = shader.container();
-    // The header hash is recomputed on reassembly (see `assemble`), so it is
-    // not part of the directive — the original is recorded in the comment above.
     out.push_str(".dxbc version=");
     let _ = write!(out, "{}", container.version);
+    out.push_str(" hash=");
+    write_digest(&mut out, &container.header_hash);
+    out.push_str(" checksum=");
+    write_digest(&mut out, &container_content_checksum(container));
     out.push('\n');
 
     // Resource definitions, used to symbolicate cbuffer/resource operands in the
@@ -123,7 +150,6 @@ fn encode_to_text(fourcc: [u8; 4], data: &[u8]) -> Option<String> {
             crate::grammar::rdef::hlsl::rdef_from_hlsl(&hlsl).map(|roundtrip| (hlsl, roundtrip))
         });
         if let Some((hlsl, rd2)) = hlsl_roundtrip {
-            use dxbc::chunks::ChunkWriter;
             if rd2.to_writable().data == data {
                 return Some(hlsl);
             }
@@ -142,17 +168,14 @@ fn body_to_chunk(fourcc: [u8; 4], body: &str) -> Result<Vec<u8>, AsmError> {
     if SIGNATURE_FOURCCS.contains(&&fourcc) {
         let sig = crate::grammar::signature::signature_from_text(fourcc, body)
             .ok_or_else(|| err("malformed signature text"))?;
-        use dxbc::chunks::ChunkWriter;
         return Ok(sig.to_writable().data);
     }
     if &fourcc == b"STAT" {
-        use dxbc::chunks::ChunkWriter;
         let stats =
             crate::grammar::stat::stat_from_text(body).ok_or_else(|| err("malformed stat text"))?;
         return Ok(stats.to_writable().data);
     }
     if &fourcc == b"RDEF" {
-        use dxbc::chunks::ChunkWriter;
         // Auto-detect: the HLSL form opens with `target`, key=value with `version`.
         let is_hlsl = body
             .lines()
@@ -208,7 +231,7 @@ pub fn assemble(text: &str) -> Result<Vec<u8>, AsmError> {
     let header = lines
         .first()
         .ok_or_else(|| err("empty container document"))?;
-    let version = parse_dxbc_directive(header)?;
+    let directive = parse_dxbc_directive(header)?;
     idx += 1;
 
     let mut chunks: Vec<WritableChunk> = Vec::new();
@@ -249,12 +272,14 @@ pub fn assemble(text: &str) -> Result<Vec<u8>, AsmError> {
         }
     }
 
-    // Build, then recompute the header checksum over the assembled content so
-    // edited shaders carry a valid digest (and unedited ones reproduce the
-    // original, keeping byte-identity).
-    let mut bytes = dxbc::container::build_dxbc_with_header(&chunks, version, &[0u8; 16]);
-    let digest = dxbc::checksum::dxbc_checksum(&bytes[20..]);
-    bytes[4..20].copy_from_slice(&digest);
+    let mut bytes = dxbc::container::build_dxbc_with_header(&chunks, directive.version, &[0u8; 16]);
+    let computed = dxbc::checksum::dxbc_checksum(&bytes[20..]);
+    let header_hash = match (directive.original_hash, directive.content_checksum) {
+        (Some(original), Some(content)) if content == computed => original,
+        (Some(original), None) => original,
+        _ => computed,
+    };
+    bytes[4..20].copy_from_slice(&header_hash);
     Ok(bytes)
 }
 
@@ -374,15 +399,55 @@ pub fn is_container(text: &str) -> bool {
         .is_some_and(|l| l.starts_with(".dxbc"))
 }
 
-fn parse_dxbc_directive(line: &str) -> Result<u32, AsmError> {
-    // `.dxbc version=N`. The header hash is always recomputed on reassembly,
-    // so it is not carried in the directive.
-    for tok in line.split_whitespace() {
-        if let Some(v) = tok.strip_prefix("version=") {
-            return v.parse::<u32>().map_err(|_| err("bad version"));
+fn parse_dxbc_directive(line: &str) -> Result<DxbcDirective, AsmError> {
+    let mut tokens = line.split_whitespace();
+    if tokens.next() != Some(".dxbc") {
+        return Err(err("malformed .dxbc directive"));
+    }
+    let mut version = None;
+    let mut original_hash = None;
+    let mut content_checksum = None;
+    for token in tokens {
+        if let Some(value) = token.strip_prefix("version=") {
+            if version
+                .replace(value.parse::<u32>().map_err(|_| err("bad version"))?)
+                .is_some()
+            {
+                return Err(err("duplicate .dxbc version"));
+            }
+        } else if let Some(value) = token.strip_prefix("hash=") {
+            if original_hash.replace(parse_digest(value)?).is_some() {
+                return Err(err("duplicate .dxbc hash"));
+            }
+        } else if let Some(value) = token.strip_prefix("checksum=") {
+            if content_checksum.replace(parse_digest(value)?).is_some() {
+                return Err(err("duplicate .dxbc checksum"));
+            }
+        } else {
+            return Err(err(format!("unknown .dxbc token: {token:?}")));
         }
     }
-    Err(err("malformed .dxbc directive (missing version=)"))
+    let version = version.ok_or_else(|| err("malformed .dxbc directive (missing version=)"))?;
+    if content_checksum.is_some() && original_hash.is_none() {
+        return Err(err(".dxbc checksum requires hash"));
+    }
+    Ok(DxbcDirective {
+        version,
+        original_hash,
+        content_checksum,
+    })
+}
+
+fn parse_digest(value: &str) -> Result<[u8; 16], AsmError> {
+    if value.len() != 32 {
+        return Err(err("DXBC digest must contain exactly 32 hex digits"));
+    }
+    let encoded = value.as_bytes();
+    let mut digest = [0; 16];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = (hex_nibble(encoded[index * 2])? << 4) | hex_nibble(encoded[index * 2 + 1])?;
+    }
+    Ok(digest)
 }
 
 fn parse_fourcc(s: &str) -> Result<[u8; 4], AsmError> {

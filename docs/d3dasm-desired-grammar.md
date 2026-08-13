@@ -58,7 +58,7 @@ Non-goals: matching `fxc` syntax (this is its own format), and human
 | 3 | `flags=` bit `0x2` means two different things | Binding flags and variable flags are **separate keywords** (`flags=` vs `var_flags=`) with documented, non-overlapping vocab |
 | 4 | RDEF merged/two-section inferred from a substring | Explicit `form=` marker on the `.code RDEF` line |
 | 5 | Annotations omitted when "derivable"; RDEF needs SHEX | **Always emit** `flags`/`dim`/`ret`/`samples`/`used`; derivation is opt-in via `derive` |
-| 6 | Stale `hash=` in docs | `.dxbc version=<n>` only; hashes never stored (already true) |
+| 6 | Stale header hashes broke byte identity | Store `hash=` plus the original content `checksum=`; rehash only after edits |
 | 7 | `target` vs `version` for the same field | Always `target=` |
 | 8 | Longest-prefix opcode/register tokenization | Keep maximal-munch, but **document the token tables** as the contract |
 | 9 | Mixed positional/named tags; silent token drops | Operands positional-first, then **named** `key=value` tags; unknown tags are an **error**, not dropped |
@@ -133,7 +133,8 @@ error** (typos surface immediately) rather than being silently ignored.
 document    = magic_line { raw_segment | container }
 magic_line  = ".d3dasm" SP INT NL                  ; format version, e.g. ".d3dasm 2"
 container   = dxbc_line { section } end_line
-dxbc_line   = ".dxbc" SP "version=" INT NL          ; nothing else; hash is recomputed
+dxbc_line   = ".dxbc" SP "version=" INT
+              [ SP "hash=" HEX32 SP "checksum=" HEX32 ] NL
 end_line    = ".end" NL
 raw_segment = ".raw" NL hex_block
 section     = ".code"  SP FOURCC { SP tag } NL body
@@ -402,7 +403,7 @@ Compare with `d3dasm-grammar.md` §10 (current form):
 
 ```
 .d3dasm 2
-.dxbc version=1
+.dxbc version=1 hash=00000000000000000000000000000000 checksum=00000000000000000000000000000000
 .code RDEF form=hlsl
 target=0xffff0500 flags=0x100 creator="Microsoft (R) HLSL Shader Compiler 10.0.10011.0"
 rd11=0x31314452,0x3c,0x18,0x20,0x28,0x24,0xc,0x0

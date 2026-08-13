@@ -170,7 +170,8 @@ container   = metadata_header dxbc_line { section } end_line ;
 ### 3.2 Directives
 
 ```
-dxbc_line   = ".dxbc" SP "version=" INT { SP token } NL
+dxbc_line   = ".dxbc" SP "version=" INT
+              [ SP "hash=" HEX32 SP "checksum=" HEX32 ] NL
 end_line    = ".end" NL
 raw_segment = ".raw" NL hex_block
 section     = code_section | chunk_section
@@ -181,11 +182,13 @@ FOURCC      = <exactly 4 bytes>                    e.g. SHEX, RDEF, ISGN, STAT
 
 Rules:
 
-- **`.dxbc`** must be the first non-comment line of a container. Only the
-  `version=` token is read; **any other tokens are ignored** (the parser scans
-  for `version=` and stops). In particular the `hash=…` shown in some older
-  examples is *not* emitted and *not* parsed — the header checksum is always
-  recomputed on reassembly. See [§12.6](#126-stale-hash-in-dxbc).
+- **`.dxbc`** must be the first non-comment line of a container. `hash=` is the
+  exact 16-byte digest stored in the original header; `checksum=` is the
+  computed digest of the original bytes from offset 20 onward. If the content
+  is unchanged, the assembler restores `hash=` byte-for-byte (including a
+  deliberately stale digest). If it changed, the assembler writes a newly
+  computed digest. Omitting both tags retains the legacy recompute behavior.
+  Unknown or duplicate tokens are errors. See [§12.6](#126-header-hash-preservation).
 - **`.code <FOURCC>`** introduces an *editable* chunk body whose grammar is
   selected by the FourCC ([§5](#5-rdef-resource-definitions)–[§9](#9-shex-shader-program)).
 - **`.chunk <FOURCC>`** introduces a chunk preserved as **raw hex**
@@ -626,7 +629,7 @@ The opening of a pixel-shader container (abridged), showing the layering:
 
 ```
 // ===== forensic header (informational, ignored on parse) =====
-.dxbc version=1
+.dxbc version=1 hash=00000000000000000000000000000000 checksum=00000000000000000000000000000000
 .code RDEF form=hlsl
 target=0xffff0500
 flags=0x100
@@ -762,14 +765,16 @@ emit `flags`/`dim`/`ret`/`samples`/`used` explicitly (accept their omission for
 backward compatibility, but don't rely on cross-chunk derivation). This trades a
 little verbosity for a context-free RDEF grammar.
 
-### 12.6 Stale `hash=` in `.dxbc` documentation
+### 12.6 Header-hash preservation
 
-**Observed.** The module doc-comment advertises `.dxbc version=1 hash=<32 hex>`,
-but the serializer emits only `version=` and the parser reads only `version=`
-(extra tokens ignored). The header checksum is always recomputed.
+**Observed.** Some official compiler test fixtures intentionally carry a stale
+header digest. Recomputing it during an otherwise unchanged reassembly violates
+the format's byte-identity invariant.
 
-**Recommended.** Fix the doc-comment to `.dxbc version=<N>`. (A trivial
-code-comment correction; the grammar above already reflects reality.)
+**Implemented.** The directive records both the stored `hash=` and the computed
+content `checksum=`. Their separation lets unchanged documents restore even a
+stale hash, while edits are detected and receive a valid newly computed hash.
+Legacy documents that omit both fields continue to recompute the hash.
 
 ### 12.7 RDEF field-name divergence (`target` vs `version`)
 

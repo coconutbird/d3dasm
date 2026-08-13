@@ -415,8 +415,8 @@ impl SignatureSystemValue {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         const VALUES: &[u32] = &[
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 24, 25, 64, 65,
-            66, 67, 68, 69, 70,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 24, 25, 64, 65, 66, 67,
+            68, 69, 70,
         ];
         VALUES
             .iter()
@@ -564,10 +564,7 @@ pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Option<Vec<Signature
 /// Parse a complete signature chunk, including opaque trailing string-table
 /// data needed for a byte-exact rewrite.
 #[must_use]
-pub fn parse_signature_chunk<'a>(
-    fourcc: [u8; 4],
-    data: &'a [u8],
-) -> Option<Signature<'a>> {
+pub fn parse_signature_chunk(fourcc: [u8; 4], data: &[u8]) -> Option<Signature<'_>> {
     let fourcc_str = core::str::from_utf8(&fourcc).ok()?;
     let (elements, trailing_data) = parse_signature_data(fourcc_str, data)?;
     let mut signature = Signature {
@@ -711,6 +708,12 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
 
 /// Serialize a signature and append preserved bytes after its referenced
 /// semantic strings.
+///
+/// # Panics
+///
+/// Panics if the `fourcc` is not a supported ASCII signature tag, or if an
+/// element count, semantic-name offset, or serialized size exceeds its 32-bit
+/// wire field.
 #[must_use]
 pub fn write_signature_with_trailing(
     fourcc: [u8; 4],
@@ -837,8 +840,8 @@ mod tests {
         noncanonical.splice(8..8, [0xde, 0xad, 0xbe, 0xef]);
         noncanonical[12..16].copy_from_slice(&36u32.to_le_bytes());
 
-        let mut parsed = parse_signature_chunk(*b"ISGN", &noncanonical)
-            .expect("valid offset-based signature");
+        let mut parsed =
+            parse_signature_chunk(*b"ISGN", &noncanonical).expect("valid offset-based signature");
         assert_eq!(parsed.write_payload(), noncanonical);
         parsed.elements[0].semantic_index = 1;
         let edited = parsed.write_payload();

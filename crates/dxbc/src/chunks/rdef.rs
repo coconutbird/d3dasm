@@ -350,7 +350,7 @@ impl ResourceDimension {
     #[must_use]
     pub fn hlsl_stem(self) -> &'static str {
         match self {
-            Self::Unknown => return "Unknown",
+            Self::Unknown => "Unknown",
             Self::Buffer => "Buffer",
             Self::Texture1D => "Texture1D",
             Self::Texture1DArray => "Texture1DArray",
@@ -586,12 +586,12 @@ fn parse_bindings(
     Some(bindings)
 }
 
-fn parse_variables<'a>(
-    data: &'a [u8],
+fn parse_variables(
+    data: &[u8],
     count: usize,
     offset: usize,
     layout: RdefLayout,
-) -> Option<Vec<CBufferVariable<'a>>> {
+) -> Option<Vec<CBufferVariable<'_>>> {
     if layout.variable_stride < if layout.is_sm5 { 40 } else { 24 }
         || layout.variable_stride % 4 != 0
     {
@@ -1222,63 +1222,63 @@ fn write_variable_data<'a>(
 }
 
 fn write_rdef_canonical(rdef: &ResourceDef<'_>) -> Vec<u8> {
-        let is_sm5 = rdef.is_sm5();
-        assert_eq!(
-            is_sm5,
-            rdef.rd11.is_some(),
-            "SM5 RDEF requires an RD11 header"
-        );
-        let rd11_size: u32 = if rdef.rd11.is_some() { 32 } else { 0 };
-        let binding_stride = rdef.rd11.map_or(32, |header| {
-            assert_eq!(header.header_size, 60, "unsupported RD11 header size");
-            assert_eq!(header.constant_buffer_stride, 24);
-            assert!(matches!(header.resource_binding_stride, 32 | 40));
-            assert_eq!(header.variable_stride, 40);
-            assert_eq!(header.type_stride, 36);
-            assert_eq!(header.member_stride, 12);
-            usize::try_from(header.resource_binding_stride).expect("u32 fits in usize")
-        });
-        let mut out: Vec<u8> = Vec::new();
-        let mut pools = RdefPools::default();
+    let is_sm5 = rdef.is_sm5();
+    assert_eq!(
+        is_sm5,
+        rdef.rd11.is_some(),
+        "SM5 RDEF requires an RD11 header"
+    );
+    let rd11_size: u32 = if rdef.rd11.is_some() { 32 } else { 0 };
+    let binding_stride = rdef.rd11.map_or(32, |header| {
+        assert_eq!(header.header_size, 60, "unsupported RD11 header size");
+        assert_eq!(header.constant_buffer_stride, 24);
+        assert!(matches!(header.resource_binding_stride, 32 | 40));
+        assert_eq!(header.variable_stride, 40);
+        assert_eq!(header.type_stride, 36);
+        assert_eq!(header.member_stride, 12);
+        usize::try_from(header.resource_binding_stride).expect("u32 fits in usize")
+    });
+    let mut out: Vec<u8> = Vec::new();
+    let mut pools = RdefPools::default();
 
-        push_u32(&mut out, wire_u32(rdef.constant_buffers.len()));
-        let buffer_section_position = out.len();
-        push_u32(&mut out, 0);
-        push_u32(&mut out, wire_u32(rdef.bindings.len()));
-        push_u32(&mut out, 28 + rd11_size);
-        push_u32(&mut out, rdef.target_version);
-        push_u32(&mut out, rdef.compile_flags);
-        let creator_position = out.len();
-        push_u32(&mut out, 0);
-        if let Some(rd11) = rdef.rd11 {
-            for value in rd11.to_words() {
-                push_u32(&mut out, value);
-            }
+    push_u32(&mut out, wire_u32(rdef.constant_buffers.len()));
+    let buffer_section_position = out.len();
+    push_u32(&mut out, 0);
+    push_u32(&mut out, wire_u32(rdef.bindings.len()));
+    push_u32(&mut out, 28 + rd11_size);
+    push_u32(&mut out, rdef.target_version);
+    push_u32(&mut out, rdef.compile_flags);
+    let creator_position = out.len();
+    push_u32(&mut out, 0);
+    if let Some(rd11) = rdef.rd11 {
+        for value in rd11.to_words() {
+            push_u32(&mut out, value);
         }
+    }
 
-        write_bindings(
-            &mut out,
-            &mut pools.binding_names,
-            &rdef.bindings,
-            binding_stride,
-        );
-        let variable_positions = write_constant_buffer_headers(
-            &mut out,
-            &mut pools.binding_names,
-            &rdef.constant_buffers,
-            buffer_section_position,
-        );
-        write_variable_sections(
-            &mut out,
-            &mut pools,
-            &rdef.constant_buffers,
-            &variable_positions,
-            is_sm5,
-        );
-        let creator_offset = intern(&mut out, &mut pools.variable_names, &rdef.creator);
-        patch_u32(&mut out, creator_position, creator_offset);
-        pad4(&mut out);
-        out
+    write_bindings(
+        &mut out,
+        &mut pools.binding_names,
+        &rdef.bindings,
+        binding_stride,
+    );
+    let variable_positions = write_constant_buffer_headers(
+        &mut out,
+        &mut pools.binding_names,
+        &rdef.constant_buffers,
+        buffer_section_position,
+    );
+    write_variable_sections(
+        &mut out,
+        &mut pools,
+        &rdef.constant_buffers,
+        &variable_positions,
+        is_sm5,
+    );
+    let creator_offset = intern(&mut out, &mut pools.variable_names, &rdef.creator);
+    patch_u32(&mut out, creator_position, creator_offset);
+    pad4(&mut out);
+    out
 }
 
 impl ChunkWriter for ResourceDef<'_> {
@@ -1346,7 +1346,10 @@ mod tests {
         parsed.creator = Cow::Borrowed("y");
         let edited = parsed.write_payload();
         assert_ne!(edited, noncanonical);
-        assert_eq!(parse_rdef(&edited).expect("canonical edited RDEF").creator, "y");
+        assert_eq!(
+            parse_rdef(&edited).expect("canonical edited RDEF").creator,
+            "y"
+        );
     }
 
     #[test]

@@ -233,6 +233,16 @@ mod tests {
     }
 
     #[test]
+    fn dcl_global_flags_all_resources_bound() {
+        // D3D12 added ALL_RESOURCES_BOUND at token0 bit 19.
+        let tokens = [instr_token(106, 1) | (1 << 19)];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("allResourcesBound"), "got: {output}");
+        assert_roundtrip(&data);
+    }
+
+    #[test]
     fn dcl_temps() {
         // opcode 104, length 2, followed by count=4
         let tokens = [instr_token(104, 2), 4];

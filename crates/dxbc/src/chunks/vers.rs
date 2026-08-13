@@ -22,10 +22,13 @@ pub struct CompilerVersion<'a> {
     pub flags: u32,
     /// Source-control commit count.
     pub commit_count: u32,
-    /// Source-control commit identifier, when present.
-    pub commit_sha: Option<Cow<'a, str>>,
-    /// Custom compiler version string, when present.
-    pub custom_version: Option<Cow<'a, str>>,
+    /// Source-control commit identifier bytes, when present.
+    ///
+    /// The published structure promises a null-terminated byte string but
+    /// does not require UTF-8, so the raw bytes are retained.
+    pub commit_sha: Option<Cow<'a, [u8]>>,
+    /// Custom compiler version bytes, when present.
+    pub custom_version: Option<Cow<'a, [u8]>>,
 }
 
 /// Parse a VERS payload.
@@ -48,7 +51,7 @@ pub fn parse_vers(data: &[u8]) -> Option<CompilerVersion<'_>> {
     }
 
     let list = &data[HEADER_SIZE..list_end];
-    let mut strings: [Option<Cow<'_, str>>; 2] = [None, None];
+    let mut strings: [Option<Cow<'_, [u8]>>; 2] = [None, None];
     let mut position = 0usize;
     for slot in &mut strings {
         if position == list.len() {
@@ -56,8 +59,7 @@ pub fn parse_vers(data: &[u8]) -> Option<CompilerVersion<'_>> {
         }
         let relative_end = list[position..].iter().position(|&byte| byte == 0)?;
         let end = position.checked_add(relative_end)?;
-        let value = core::str::from_utf8(&list[position..end]).ok()?;
-        *slot = Some(Cow::Borrowed(value));
+        *slot = Some(Cow::Borrowed(&list[position..end]));
         position = end.checked_add(1)?;
     }
     if position != list.len() {
@@ -89,10 +91,10 @@ impl ChunkWriter for CompilerVersion<'_> {
         let mut strings = Vec::new();
         if let Some(commit_sha) = &self.commit_sha {
             assert!(
-                !commit_sha.as_bytes().contains(&0),
+                !commit_sha.contains(&0),
                 "VERS commit SHA cannot contain a null byte"
             );
-            strings.extend_from_slice(commit_sha.as_bytes());
+            strings.extend_from_slice(commit_sha);
             strings.push(0);
         }
         if let Some(custom_version) = &self.custom_version {
@@ -101,10 +103,10 @@ impl ChunkWriter for CompilerVersion<'_> {
                 strings.push(0);
             }
             assert!(
-                !custom_version.as_bytes().contains(&0),
+                !custom_version.contains(&0),
                 "VERS custom version cannot contain a null byte"
             );
-            strings.extend_from_slice(custom_version.as_bytes());
+            strings.extend_from_slice(custom_version);
             strings.push(0);
         }
 
@@ -131,12 +133,27 @@ impl fmt::Display for CompilerVersion<'_> {
             self.major, self.minor, self.commit_count
         )?;
         if let Some(sha) = &self.commit_sha {
-            write!(f, ", {sha}")?;
+            write!(f, ", {}", StringBytes(sha))?;
         }
         if let Some(custom) = &self.custom_version {
-            write!(f, ", {custom}")?;
+            write!(f, ", {}", StringBytes(custom))?;
         }
         writeln!(f, ", flags=0x{:08X})", self.flags)
+    }
+}
+
+struct StringBytes<'a>(&'a [u8]);
+
+impl fmt::Display for StringBytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Ok(value) = core::str::from_utf8(self.0) {
+            f.write_str(value)
+        } else {
+            for byte in self.0 {
+                write!(f, "\\x{byte:02X}")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -156,8 +173,27 @@ mod tests {
         bytes.extend_from_slice(b"1.9.0.5402\0");
 
         let version = parse_vers(&bytes).expect("valid VERS");
-        assert_eq!(version.commit_sha.as_deref(), Some("0d3ee6b5"));
-        assert_eq!(version.custom_version.as_deref(), Some("1.9.0.5402"));
+        assert_eq!(version.commit_sha.as_deref(), Some(b"0d3ee6b5".as_slice()));
+        assert_eq!(
+            version.custom_version.as_deref(),
+            Some(b"1.9.0.5402".as_slice())
+        );
+        assert_eq!(version.write_payload(), bytes);
+    }
+
+    #[test]
+    fn non_utf8_version_bytes_are_preserved() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&9u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xff, 0, 0x80, 0]);
+
+        let version = parse_vers(&bytes).expect("byte strings are valid VERS data");
+        assert_eq!(version.commit_sha.as_deref(), Some([0xff].as_slice()));
+        assert_eq!(version.custom_version.as_deref(), Some([0x80].as_slice()));
         assert_eq!(version.write_payload(), bytes);
     }
 }

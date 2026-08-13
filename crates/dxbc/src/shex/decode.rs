@@ -10,9 +10,9 @@ use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 use smallvec::{SmallVec, smallvec};
 
 use super::ir::{
-    ComponentSelect, CustomDataType, GsOutputTopology, GsPrimitive, Instruction, InstructionKind,
-    MinPrecision, Operand, OperandIndex, Operands, Program, RegisterType, ReturnType, SmallU32Vec,
-    SystemValue,
+    ComponentSelect, CustomDataType, GsOutputTopology, GsPrimitive, Immediates, Indices,
+    Instruction, InstructionKind, MinPrecision, Operand, OperandIndex, Operands, Program,
+    RegisterType, ReturnType, SmallU32Vec, SystemValue,
 };
 use super::opcodes::Opcode;
 
@@ -39,13 +39,14 @@ pub fn decode(data: &[u8]) -> Result<Program, DecodeError> {
     decode_with_fourcc(data, *b"SHEX")
 }
 
-/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original `FourCC`.
-///
-/// # Errors
-///
-/// Returns [`DecodeError`] when the chunk header or instruction stream cannot
-/// be read.
-pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, DecodeError> {
+struct ProgramHeader {
+    shader_type: &'static str,
+    major: u32,
+    minor: u32,
+    declared_bytes: usize,
+}
+
+fn decode_header(data: &[u8], fourcc: [u8; 4]) -> Result<ProgramHeader, DecodeError> {
     if !matches!(&fourcc, b"SHEX" | b"SHDR") {
         return Err(DecodeError {
             message: format!("invalid shader-code FourCC: {fourcc:?}"),
@@ -65,32 +66,40 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
         });
     }
 
-    let mut c = Cursor::new(data);
-    let version_token = c.read_u32_le().map_err(|_| DecodeError {
+    let mut cursor = Cursor::new(data);
+    let version_token = cursor.read_u32_le().map_err(|_| DecodeError {
         message: String::from("failed to read version token"),
     })?;
-    let length_dwords = c.read_u32_le().map_err(|_| DecodeError {
+    let length_dwords = cursor.read_u32_le().map_err(|_| DecodeError {
         message: String::from("failed to read length"),
     })? as usize;
-    let shader_type_val = (version_token >> 16) & 0xFFFF;
-    let major = (version_token >> 4) & 0xF;
-    let minor = version_token & 0xF;
+    let shader_type_value = (version_token >> 16) & 0xffff;
+    let major = (version_token >> 4) & 0xf;
+    let minor = version_token & 0xf;
 
-    if version_token & 0x0000_FF00 != 0 {
+    if version_token & 0x0000_ff00 != 0 {
         return Err(DecodeError {
             message: format!("version token has reserved bits set: 0x{version_token:08X}"),
         });
     }
-    if !matches!((major, minor), (4, 0 | 1) | (5, 0 | 1)) {
+    if !matches!((major, minor), (4 | 5, 0 | 1)) {
         return Err(DecodeError {
             message: format!("unsupported shader model {major}.{minor}"),
         });
     }
-    if shader_type_val > 5 {
-        return Err(DecodeError {
-            message: format!("invalid tokenized-program type {shader_type_val}"),
-        });
-    }
+    let shader_type = match shader_type_value {
+        0 => "ps",
+        1 => "vs",
+        2 => "gs",
+        3 => "hs",
+        4 => "ds",
+        5 => "cs",
+        _ => {
+            return Err(DecodeError {
+                message: format!("invalid tokenized-program type {shader_type_value}"),
+            });
+        }
+    };
 
     let declared_bytes = length_dwords.checked_mul(4).ok_or_else(|| DecodeError {
         message: String::from("declared shader length overflows usize"),
@@ -103,114 +112,147 @@ pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, Decod
             ),
         });
     }
+    Ok(ProgramHeader {
+        shader_type,
+        major,
+        minor,
+        declared_bytes,
+    })
+}
 
-    let shader_type = match shader_type_val {
-        0 => "ps",
-        1 => "vs",
-        2 => "gs",
-        3 => "hs",
-        4 => "ds",
-        5 => "cs",
-        _ => unreachable!("program type validated above"),
-    };
-
+fn decode_instruction_stream(
+    data: &[u8],
+    header: &ProgramHeader,
+) -> Result<Vec<Instruction>, DecodeError> {
+    let mut cursor = Cursor::new(data);
     let mut instructions = Vec::new();
     let mut offset = 8;
-    let end = declared_bytes;
-    // Reuse a single token buffer across the decode loop to avoid
-    // allocating a fresh Vec<u32> for every instruction.
-    let mut tokens: Vec<u32> = Vec::new();
-
-    while offset + 4 <= end {
-        c.seek(SeekFrom::Start(offset as u64))
+    let mut tokens = Vec::new();
+    while offset + 4 <= header.declared_bytes {
+        cursor
+            .seek(SeekFrom::Start(offset as u64))
             .map_err(|_| DecodeError {
                 message: format!("failed to seek to instruction at byte offset {offset}"),
             })?;
-        let token = c.read_u32_le().map_err(|_| DecodeError {
+        let token = cursor.read_u32_le().map_err(|_| DecodeError {
             message: format!("failed to read instruction at byte offset {offset}"),
         })?;
-        let opcode_val = token & 0x7FF;
-        let instr_len = instruction_length(token, opcode_val, &mut c, offset, end).unwrap_or(0);
-
-        if instr_len == 0 {
+        let opcode_value = token & 0x7ff;
+        let length = instruction_length(
+            token,
+            opcode_value,
+            &mut cursor,
+            offset,
+            header.declared_bytes,
+        )
+        .unwrap_or(0);
+        if length == 0 {
             return Err(DecodeError {
                 message: format!("instruction at byte offset {offset} has zero length"),
             });
         }
-        let instr_bytes = instr_len.checked_mul(4).ok_or_else(|| DecodeError {
+        let byte_count = length.checked_mul(4).ok_or_else(|| DecodeError {
             message: format!("instruction length overflows at byte offset {offset}"),
         })?;
-        if offset + instr_bytes > end {
+        if offset + byte_count > header.declared_bytes {
             return Err(DecodeError {
                 message: format!(
-                    "instruction at byte offset {offset} extends past end of chunk (needs {instr_bytes} bytes, only {} available)",
-                    end - offset
+                    "instruction at byte offset {offset} extends past end of chunk (needs {byte_count} bytes, only {} available)",
+                    header.declared_bytes - offset
                 ),
             });
         }
-
-        c.seek(SeekFrom::Start(offset as u64))
-            .map_err(|_| DecodeError {
-                message: format!("failed to seek to instruction at byte offset {offset}"),
-            })?;
-        tokens.clear();
-        tokens.reserve(instr_len);
-        for _ in 0..instr_len {
-            tokens.push(c.read_u32_le().map_err(|_| DecodeError {
-                message: format!("failed to read instruction at byte offset {offset}"),
-            })?);
-        }
-
-        let shader_model_5_1_or_later = major > 5 || (major == 5 && minor > 0);
+        read_instruction_tokens(&mut cursor, &mut tokens, offset, length)?;
         let instruction = decode_instruction(
             &tokens,
-            opcode_val,
-            shader_model_5_1_or_later,
+            opcode_value,
+            header.major == 5 && header.minor == 1,
         );
-        if let InstructionKind::Generic { operands, .. } = &instruction.kind {
-            if let Some(expected) = instruction.opcode.expected_operand_count() {
-                if operands.len() != expected {
-                    return Err(DecodeError {
-                        message: format!(
-                            "{} at byte offset {offset} has {} operands; specification requires {expected}",
-                            instruction.opcode.name(),
-                            operands.len()
-                        ),
-                    });
-                }
-            }
-        }
+        validate_operand_count(&instruction, offset)?;
         instructions.push(instruction);
-        offset += instr_bytes;
+        offset += byte_count;
     }
-
-    if offset != end {
-        return Err(DecodeError {
-            message: format!("{} trailing shader-code bytes", end - offset),
-        });
-    }
-
-    let program = Program {
-        shader_type,
-        major_version: major,
-        minor_version: minor,
-        instructions,
-        warnings: Vec::new(),
-        fourcc,
-    };
-    let encoded = super::encode::encode(&program);
-    if encoded != data {
-        let difference = encoded
-            .iter()
-            .zip(data)
-            .position(|(encoded, original)| encoded != original)
-            .unwrap_or(encoded.len().min(data.len()));
+    if offset != header.declared_bytes {
         return Err(DecodeError {
             message: format!(
-                "unsupported or non-canonical token encoding at byte offset {difference}"
+                "{} trailing shader-code bytes",
+                header.declared_bytes - offset
             ),
         });
     }
+    Ok(instructions)
+}
+
+fn read_instruction_tokens(
+    cursor: &mut Cursor<&[u8]>,
+    tokens: &mut Vec<u32>,
+    offset: usize,
+    length: usize,
+) -> Result<(), DecodeError> {
+    cursor
+        .seek(SeekFrom::Start(offset as u64))
+        .map_err(|_| DecodeError {
+            message: format!("failed to seek to instruction at byte offset {offset}"),
+        })?;
+    tokens.clear();
+    tokens.reserve(length);
+    for _ in 0..length {
+        tokens.push(cursor.read_u32_le().map_err(|_| DecodeError {
+            message: format!("failed to read instruction at byte offset {offset}"),
+        })?);
+    }
+    Ok(())
+}
+
+fn validate_operand_count(instruction: &Instruction, offset: usize) -> Result<(), DecodeError> {
+    if let InstructionKind::Generic { operands, .. } = &instruction.kind {
+        if let Some(expected) = instruction.opcode.expected_operand_count() {
+            if operands.len() != expected {
+                return Err(DecodeError {
+                    message: format!(
+                        "{} at byte offset {offset} has {} operands; specification requires {expected}",
+                        instruction.opcode.name(),
+                        operands.len()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_canonical_encoding(program: &Program, data: &[u8]) -> Result<(), DecodeError> {
+    let encoded = super::encode::encode(program);
+    if encoded == data {
+        return Ok(());
+    }
+    let difference = encoded
+        .iter()
+        .zip(data)
+        .position(|(encoded, original)| encoded != original)
+        .unwrap_or(encoded.len().min(data.len()));
+    Err(DecodeError {
+        message: format!("unsupported or non-canonical token encoding at byte offset {difference}"),
+    })
+}
+
+/// Decode a SHEX/SHDR chunk into a structured [`Program`], preserving the original `FourCC`.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when the chunk header or instruction stream cannot
+/// be read.
+pub fn decode_with_fourcc(data: &[u8], fourcc: [u8; 4]) -> Result<Program, DecodeError> {
+    let header = decode_header(data, fourcc)?;
+    let program = Program {
+        shader_type: header.shader_type,
+        major_version: header.major,
+        minor_version: header.minor,
+        instructions: decode_instruction_stream(data, &header)?,
+        warnings: Vec::new(),
+        fourcc,
+    };
+    validate_canonical_encoding(&program, data)?;
     Ok(program)
 }
 
@@ -223,8 +265,7 @@ fn instruction_length(
 ) -> Option<usize> {
     let op = Opcode::from_u32(opcode);
     if matches!(op, Opcode::CustomData)
-        || (token >> 31 != 0
-            && matches!(op, Opcode::DclInterface | Opcode::DclFunctionTable))
+        || (token >> 31 != 0 && matches!(op, Opcode::DclInterface | Opcode::DclFunctionTable))
     {
         if offset + 8 <= end {
             c.seek(SeekFrom::Start((offset + 4) as u64)).ok()?;
@@ -276,14 +317,12 @@ fn decode_instruction(
     };
 
     // Parse all extended opcode tokens from the instruction header chain.
-    let (tex_offsets, resource_dim, resource_return_type) = if matches!(
-        op,
-        Opcode::DclInterface | Opcode::DclFunctionTable
-    ) {
-        (None, None, None)
-    } else {
-        decode_extended_tokens(tokens)
-    };
+    let (tex_offsets, resource_dim, resource_return_type) =
+        if matches!(op, Opcode::DclInterface | Opcode::DclFunctionTable) {
+            (None, None, None)
+        } else {
+            decode_extended_tokens(tokens)
+        };
 
     let kind = decode_instruction_kind(tokens, op, shader_model_5_1_or_later);
 
@@ -337,9 +376,7 @@ fn decode_instruction_kind(
         Opcode::DclUnorderedAccessViewTyped => {
             decode_dcl_uav_typed(tokens, shader_model_5_1_or_later)
         }
-        Opcode::DclUnorderedAccessViewRaw => {
-            decode_dcl_uav_raw(tokens, shader_model_5_1_or_later)
-        }
+        Opcode::DclUnorderedAccessViewRaw => decode_dcl_uav_raw(tokens, shader_model_5_1_or_later),
         Opcode::DclUnorderedAccessViewStructured => {
             decode_dcl_uav_structured(tokens, shader_model_5_1_or_later)
         }
@@ -387,11 +424,9 @@ fn decode_instruction_kind(
         Opcode::DclHsForkPhaseInstanceCount => InstructionKind::DclHsForkPhaseInstanceCount {
             count: if tokens.len() > 1 { tokens[1] } else { 0 },
         },
-        Opcode::DclHsJoinPhaseInstanceCount => {
-            InstructionKind::DclHsJoinPhaseInstanceCount {
-                count: if tokens.len() > 1 { tokens[1] } else { 0 },
-            }
-        }
+        Opcode::DclHsJoinPhaseInstanceCount => InstructionKind::DclHsJoinPhaseInstanceCount {
+            count: if tokens.len() > 1 { tokens[1] } else { 0 },
+        },
         Opcode::DclThreadGroup => InstructionKind::DclThreadGroup {
             x: if tokens.len() > 1 { tokens[1] } else { 0 },
             y: if tokens.len() > 2 { tokens[2] } else { 0 },
@@ -456,6 +491,7 @@ fn decode_dcl_global_flags(token: u32) -> InstructionKind {
         "enableMinPrecision",
         "enable11_1DoubleExtensions",
         "enable11_1ShaderExtensions",
+        "allResourcesBound",
     ];
     for (i, name) in names.iter().enumerate() {
         if flags_bits & (1 << i) != 0 {
@@ -630,10 +666,7 @@ fn decode_dcl_uav_raw(tokens: &[u32], shader_model_5_1_or_later: bool) -> Instru
     }
 }
 
-fn decode_dcl_uav_structured(
-    tokens: &[u32],
-    shader_model_5_1_or_later: bool,
-) -> InstructionKind {
+fn decode_dcl_uav_structured(tokens: &[u32], shader_model_5_1_or_later: bool) -> InstructionKind {
     let flags = (tokens[0] >> 16) & 0xFF;
     let (operands, pos) = decode_single_operand(tokens, 1);
     InstructionKind::DclUavStructured {
@@ -847,7 +880,7 @@ fn decode_dcl_gs_input(token: u32) -> InstructionKind {
 }
 
 fn decode_dcl_gs_output_topo(token: u32) -> InstructionKind {
-    let topo = (token >> 11) & 0xF;
+    let topo = (token >> 11) & 0x3F;
     InstructionKind::DclGsOutputTopology {
         topology: GsOutputTopology::from_raw(topo),
     }
@@ -906,12 +939,7 @@ fn decode_dcl_function_table(tokens: &[u32]) -> InstructionKind {
     } else {
         0
     };
-    let body_indices: SmallU32Vec = tokens
-        .iter()
-        .skip(start + 2)
-        .take(count)
-        .copied()
-        .collect();
+    let body_indices: SmallU32Vec = tokens.iter().skip(start + 2).take(count).copied().collect();
     InstructionKind::DclFunctionTable {
         table_index,
         body_indices,
@@ -1035,6 +1063,85 @@ fn decode_one_operand(tokens: &[u32], pos: usize) -> (Operand, usize) {
     decode_one_operand_at_depth(tokens, pos, 0)
 }
 
+struct OperandModifiers {
+    negate: bool,
+    abs: bool,
+    min_precision: MinPrecision,
+    non_uniform: bool,
+}
+
+fn decode_operand_modifiers(
+    tokens: &[u32],
+    pos: usize,
+    is_extended: bool,
+) -> Option<(OperandModifiers, usize)> {
+    let mut modifiers = OperandModifiers {
+        negate: false,
+        abs: false,
+        min_precision: MinPrecision::Default,
+        non_uniform: false,
+    };
+    let mut consumed = 1;
+    let mut has_more = is_extended;
+    if has_more && pos + consumed >= tokens.len() {
+        return None;
+    }
+    while has_more && pos + consumed < tokens.len() {
+        let extension = tokens[pos + consumed];
+        consumed += 1;
+        has_more = extension >> 31 != 0;
+        if extension & 0x3f == 1 {
+            let modifier = (extension >> 6) & 0xff;
+            modifiers.negate = matches!(modifier, 1 | 3);
+            modifiers.abs = matches!(modifier, 2 | 3);
+            modifiers.min_precision = MinPrecision::from_u32((extension >> 14) & 0x7);
+            modifiers.non_uniform = extension & (1 << 17) != 0;
+        }
+    }
+    (!has_more).then_some((modifiers, consumed))
+}
+
+fn decode_operand_data(
+    tokens: &[u32],
+    pos: usize,
+    token: u32,
+    component_count: u32,
+    depth: usize,
+    mut consumed: usize,
+) -> Option<(Indices, Immediates, usize)> {
+    let operand_type = (token >> 12) & 0xff;
+    let index_dimension = (token >> 20) & 0x3;
+    let mut indices = Indices::new();
+    let mut immediate_values = Immediates::new();
+    if index_dimension == 0 {
+        if matches!(operand_type, 4 | 5) {
+            let dword_count = match component_count {
+                0 => 0,
+                1 => 1,
+                _ => 4,
+            };
+            if tokens.len().saturating_sub(pos + consumed) < dword_count {
+                return None;
+            }
+            immediate_values
+                .extend_from_slice(&tokens[pos + consumed..pos + consumed + dword_count]);
+            consumed += dword_count;
+        }
+        return Some((indices, immediate_values, consumed));
+    }
+
+    for dimension in 0..index_dimension {
+        let representation = (token >> (22 + dimension * 3)) & 0x7;
+        let (index, index_dwords) = decode_index(tokens, pos + consumed, representation, depth);
+        if index_dwords == 0 {
+            return None;
+        }
+        indices.push(index);
+        consumed += index_dwords;
+    }
+    Some((indices, immediate_values, consumed))
+}
+
 fn decode_one_operand_at_depth(tokens: &[u32], pos: usize, depth: usize) -> (Operand, usize) {
     const MAX_OPERAND_DEPTH: usize = 64;
     if depth >= MAX_OPERAND_DEPTH {
@@ -1047,141 +1154,35 @@ fn decode_one_operand_at_depth(tokens: &[u32], pos: usize, depth: usize) -> (Ope
     let num_components = token & 0x3;
     let op_type_val = (token >> 12) & 0xFF;
     let index_dim = (token >> 20) & 0x3;
-    let is_extended = (token >> 31) & 1 != 0;
-
     let reg_type = RegisterType::from_u32(op_type_val);
-    if matches!(reg_type, RegisterType::Immediate32 | RegisterType::Immediate64)
-        && index_dim != 0
+    if matches!(
+        reg_type,
+        RegisterType::Immediate32 | RegisterType::Immediate64
+    ) && index_dim != 0
     {
         return (empty_operand(), 0);
     }
-    let mut consumed = 1usize;
-
-    // Extended operand tokens precede index/immediate data. The public token
-    // format currently defines only type 1 (modifier), but permits a chained
-    // sequence for forward compatibility.
-    let mut negate = false;
-    let mut abs = false;
-    let mut min_precision = MinPrecision::Default;
-    let mut non_uniform = false;
-    let mut has_more_extensions = is_extended;
-    if has_more_extensions && pos + consumed >= tokens.len() {
+    let Some((modifiers, consumed)) = decode_operand_modifiers(tokens, pos, token >> 31 != 0)
+    else {
         return (empty_operand(), 0);
-    }
-    while has_more_extensions && pos + consumed < tokens.len() {
-        let ext = tokens[pos + consumed];
-        consumed += 1;
-        has_more_extensions = ext >> 31 != 0;
-        if ext & 0x3F == 1 {
-            let modifier = (ext >> 6) & 0xFF;
-            negate = matches!(modifier, 1 | 3);
-            abs = matches!(modifier, 2 | 3);
-            min_precision = MinPrecision::from_u32((ext >> 14) & 0x7);
-            non_uniform = ext & (1 << 17) != 0;
-        }
-    }
-    if has_more_extensions {
-        return (empty_operand(), 0);
-    }
+    };
 
     let components = decode_components(token, num_components);
     let num_components = components.num_components();
-
-    // Decode indices and immediates
-    let mut indices = SmallVec::new();
-    let mut immediate_values = SmallVec::new();
-
-    match index_dim {
-        0 => {
-            if op_type_val == 4 {
-                // Immediate32: dword count depends on num_components
-                //   0 → 0 components (no data)
-                //   1 → 1 component  (1 dword)
-                //   2 → N-component  (4 dwords for Immediate32)
-                let count = match num_components {
-                    0 => 0,
-                    1 => 1,
-                    _ => 4,
-                };
-                if tokens.len().saturating_sub(pos + consumed) < count {
-                    return (empty_operand(), 0);
-                }
-                for i in 0..count {
-                    immediate_values.push(tokens[pos + consumed + i]);
-                }
-                consumed += count;
-            } else if op_type_val == 5 {
-                // The tokenized-program format stores the raw immediate64
-                // payload in the same 1-or-4 DWORD component slots used by
-                // Microsoft's parser. A four-component token therefore holds
-                // two packed 64-bit values.
-                let dword_count = match num_components {
-                    0 => 0,
-                    1 => 1,
-                    _ => 4,
-                };
-                if tokens.len().saturating_sub(pos + consumed) < dword_count {
-                    return (empty_operand(), 0);
-                }
-                for i in 0..dword_count {
-                    immediate_values.push(tokens[pos + consumed + i]);
-                }
-                consumed += dword_count;
-            }
-        }
-        1 => {
-            let parent_token = tokens[pos];
-            let idx0_repr = (parent_token >> 22) & 0x7;
-            let (idx, ic) = decode_index(tokens, pos + consumed, idx0_repr, depth);
-            if ic == 0 {
-                return (empty_operand(), 0);
-            }
-            indices.push(idx);
-            consumed += ic;
-        }
-        2 => {
-            let parent_token = tokens[pos];
-            let idx0_repr = (parent_token >> 22) & 0x7;
-            let idx1_repr = (parent_token >> 25) & 0x7;
-            let (idx0, ic0) = decode_index(tokens, pos + consumed, idx0_repr, depth);
-            if ic0 == 0 {
-                return (empty_operand(), 0);
-            }
-            indices.push(idx0);
-            consumed += ic0;
-            let (idx1, ic1) = decode_index(tokens, pos + consumed, idx1_repr, depth);
-            if ic1 == 0 {
-                return (empty_operand(), 0);
-            }
-            indices.push(idx1);
-            consumed += ic1;
-        }
-        3 => {
-            let parent_token = tokens[pos];
-            let idx0_repr = (parent_token >> 22) & 0x7;
-            let idx1_repr = (parent_token >> 25) & 0x7;
-            let idx2_repr = (parent_token >> 28) & 0x7;
-            let reprs = [idx0_repr, idx1_repr, idx2_repr];
-            for repr in reprs {
-                let (idx, ic) = decode_index(tokens, pos + consumed, repr, depth);
-                if ic == 0 {
-                    return (empty_operand(), 0);
-                }
-                indices.push(idx);
-                consumed += ic;
-            }
-        }
-        _ => {}
-    }
+    let Some((indices, immediate_values, consumed)) =
+        decode_operand_data(tokens, pos, token, num_components, depth, consumed)
+    else {
+        return (empty_operand(), 0);
+    };
 
     (
         Operand {
             reg_type,
             components,
-            negate,
-            abs,
-            min_precision,
-            non_uniform,
+            negate: modifiers.negate,
+            abs: modifiers.abs,
+            min_precision: modifiers.min_precision,
+            non_uniform: modifiers.non_uniform,
             indices,
             immediate_values,
         },

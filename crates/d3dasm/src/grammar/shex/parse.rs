@@ -410,11 +410,9 @@ fn parse_scalar_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, 
         DclHsForkPhaseInstanceCount => Ok(InstructionKind::DclHsForkPhaseInstanceCount {
             count: parse_trailing_dec(c)?,
         }),
-        DclHsJoinPhaseInstanceCount => {
-            Ok(InstructionKind::DclHsJoinPhaseInstanceCount {
-                count: parse_trailing_dec(c)?,
-            })
-        }
+        DclHsJoinPhaseInstanceCount => Ok(InstructionKind::DclHsJoinPhaseInstanceCount {
+            count: parse_trailing_dec(c)?,
+        }),
         DclThreadGroup => {
             c.skip_spaces();
             let x = parse_dec(c.take_token())?;
@@ -810,7 +808,10 @@ fn parse_generic(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     }
     c.skip_spaces();
     if !c.eof() {
-        return err(format!("unexpected generic-instruction text: {:?}", c.rest()));
+        return err(format!(
+            "unexpected generic-instruction text: {:?}",
+            c.rest()
+        ));
     }
 
     Ok(InstructionKind::Generic {

@@ -122,9 +122,8 @@ fn resolve_cb(op: &Operand, rdef: &ResourceDef<'_>) -> Option<(String, String)> 
         OperandIndex::RelativePlusImm(base, sub) => {
             resolve_cb_dynamic(cb, *base, sub, &op.components)?
         }
-        OperandIndex::RelativePlusImm64(_, _) => return None,
+        OperandIndex::RelativePlusImm64(_, _) | OperandIndex::Imm64(_) => return None,
         OperandIndex::Relative(sub) => resolve_cb_dynamic(cb, 0, sub, &op.components)?,
-        OperandIndex::Imm64(_) => return None,
     };
     Some((crate::grammar::shex::operand_string(op), name))
 }
@@ -316,7 +315,7 @@ mod tests {
             components: comps,
             negate: false,
             abs: false,
-            min_precision: Default::default(),
+            min_precision: dxbc::shex::MinPrecision::default(),
             non_uniform: false,
             indices: smallvec![OperandIndex::Imm32(0), reg],
             immediate_values: smallvec![],
@@ -360,7 +359,7 @@ mod tests {
             components: ComponentSelect::Scalar(0),
             negate: false,
             abs: false,
-            min_precision: Default::default(),
+            min_precision: dxbc::shex::MinPrecision::default(),
             non_uniform: false,
             indices: smallvec![OperandIndex::Imm32(0)],
             immediate_values: smallvec![],

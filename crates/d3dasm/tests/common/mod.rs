@@ -3,12 +3,10 @@
 //! These tests exercise only the public API (`serialize` / `assemble` /
 //! `decode` / `encode` plus the public IR types), so they live in `tests/`.
 
-#![allow(dead_code)]
-
 use d3dasm::{assemble, serialize};
 use dxbc::shex::{
-    ComponentSelect, Indices, Instruction, InstructionKind, Opcode, Operand, OperandIndex, Program,
-    RegisterType, decode, encode,
+    ComponentSelect, Indices, Instruction, InstructionKind, MinPrecision, Opcode, Operand,
+    OperandIndex, Program, RegisterType, SmallU32Vec, decode, encode,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -46,7 +44,7 @@ pub fn generic(opcode: Opcode, operands: Vec<Operand>) -> Instruction {
         opcode,
         InstructionKind::Generic {
             operands: operands.into_iter().collect(),
-            trailing_tokens: Default::default(),
+            trailing_tokens: SmallU32Vec::default(),
         },
     )
 }
@@ -65,7 +63,7 @@ pub fn reg_op(reg_type: RegisterType, components: ComponentSelect, indices: Indi
         components,
         negate: false,
         abs: false,
-        min_precision: Default::default(),
+        min_precision: MinPrecision::default(),
         non_uniform: false,
         indices,
         immediate_values: SmallVec::new(),

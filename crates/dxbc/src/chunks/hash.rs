@@ -17,7 +17,7 @@ pub struct ShaderHash {
 ///
 /// The payload is exactly a four-byte flags field followed by a 16-byte
 /// digest, matching Microsoft's `DxilShaderHash` structure. No public
-/// Microsoft contract was found for `XHSH`, so that FourCC is deliberately
+/// Microsoft contract was found for `XHSH`, so that `FourCC` is deliberately
 /// left opaque by the container dispatcher.
 #[must_use]
 pub fn parse_hash(data: &[u8], fourcc: [u8; 4]) -> Option<ShaderHash> {

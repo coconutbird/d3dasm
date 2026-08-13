@@ -8,8 +8,8 @@ mod common;
 use common::*;
 use d3dasm::{assemble, serialize};
 use dxbc::shex::{
-    ComponentSelect, CustomDataType, InstructionKind, Opcode, Operand, OperandIndex, Program,
-    RegisterType, ReturnType, decode, encode,
+    ComponentSelect, CustomDataType, InstructionKind, MinPrecision, Opcode, Operand, OperandIndex,
+    Program, RegisterType, ReturnType, decode, encode,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -74,7 +74,7 @@ fn immediate_operand() {
         components: XYZW,
         negate: false,
         abs: false,
-        min_precision: Default::default(),
+        min_precision: MinPrecision::default(),
         non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x4000_0000, 0x0000_0000, 0xc080_0000],
@@ -346,7 +346,7 @@ fn float_immediate_edges() {
         components: XYZW,
         negate: false,
         abs: false,
-        min_precision: Default::default(),
+        min_precision: MinPrecision::default(),
         non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x8000_0000, 0x7f80_0000, 0x7fc0_0000],
@@ -464,7 +464,7 @@ fn vector_immediate_has_no_trailing_colon() {
         components: ComponentSelect::Mask(0),
         negate: false,
         abs: false,
-        min_precision: Default::default(),
+        min_precision: MinPrecision::default(),
         non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x3f80_0000, 0, 0],

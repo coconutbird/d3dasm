@@ -133,8 +133,14 @@ impl ChunkWriter for DxilData<'_> {
     }
 
     fn write_payload(&self) -> Vec<u8> {
-        assert!(self.major_version <= 0x0f, "DXIL major version exceeds 4 bits");
-        assert!(self.minor_version <= 0x0f, "DXIL minor version exceeds 4 bits");
+        assert!(
+            self.major_version <= 0x0f,
+            "DXIL major version exceeds 4 bits"
+        );
+        assert!(
+            self.minor_version <= 0x0f,
+            "DXIL minor version exceeds 4 bits"
+        );
         let bc_size = u32::try_from(self.bitcode.len()).expect("DXIL bitcode size exceeds u32");
         let bitcode_offset = 16usize
             .checked_add(self.bitcode_prefix.len())

@@ -173,6 +173,12 @@ mod tests {
         data[0] = 9;
         let edited = parsed.write_payload();
         assert_ne!(edited, noncanonical);
-        assert_eq!(parse_rdat(&edited).expect("canonical edited RDAT").parts.len(), 1);
+        assert_eq!(
+            parse_rdat(&edited)
+                .expect("canonical edited RDAT")
+                .parts
+                .len(),
+            1
+        );
     }
 }

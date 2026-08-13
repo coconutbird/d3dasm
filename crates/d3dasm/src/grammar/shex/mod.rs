@@ -147,6 +147,7 @@ pub(crate) const GLOBAL_FLAGS: &[&str] = &[
     "enableMinPrecision",
     "enable11_1DoubleExtensions",
     "enable11_1ShaderExtensions",
+    "allResourcesBound",
 ];
 
 /// Intern `s` to the canonical `&'static str` in a `(name, value)` table.

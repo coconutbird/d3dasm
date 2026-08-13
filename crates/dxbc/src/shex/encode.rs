@@ -38,8 +38,8 @@ pub fn encode(program: &Program) -> Vec<u8> {
     // Placeholder for length (dword count including header).
     dwords.push(0);
 
-    let shader_model_5_1_or_later = program.major_version > 5
-        || (program.major_version == 5 && program.minor_version > 0);
+    let shader_model_5_1_or_later =
+        program.major_version > 5 || (program.major_version == 5 && program.minor_version > 0);
     for instr in &program.instructions {
         encode_instruction(instr, shader_model_5_1_or_later, &mut dwords);
     }
@@ -52,11 +52,7 @@ pub fn encode(program: &Program) -> Vec<u8> {
 }
 
 /// Encode a single instruction into the dword stream.
-fn encode_instruction(
-    instr: &Instruction,
-    shader_model_5_1_or_later: bool,
-    out: &mut Vec<u32>,
-) {
+fn encode_instruction(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut Vec<u32>) {
     let opcode_val = instr.opcode.to_u32();
 
     if let InstructionKind::CustomData {
@@ -156,6 +152,7 @@ fn declaration_token0(kind: &InstructionKind) -> Option<u32> {
                 "enableMinPrecision",
                 "enable11_1DoubleExtensions",
                 "enable11_1ShaderExtensions",
+                "allResourcesBound",
             ];
             let mut bits = 0u32;
             for flag in flags {
@@ -195,7 +192,7 @@ fn declaration_token0(kind: &InstructionKind) -> Option<u32> {
             u32::from(*access == "dynamicIndexed") << 11
         }
         InstructionKind::DclGsInputPrimitive { primitive } => (primitive.to_raw() & 0x3F) << 11,
-        InstructionKind::DclGsOutputTopology { topology } => (topology.to_raw() & 0xF) << 11,
+        InstructionKind::DclGsOutputTopology { topology } => (topology.to_raw() & 0x3F) << 11,
         InstructionKind::DclOutputControlPointCount { count }
         | InstructionKind::DclInputControlPointCount { count } => (count & 0x3F) << 11,
         InstructionKind::DclTessDomain { domain } => {
@@ -311,6 +308,20 @@ fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut V
         | InstructionKind::DclTessPartitioning { .. }
         | InstructionKind::DclTessOutputPrimitive { .. }
         | InstructionKind::HsPhase => {}
+        InstructionKind::CustomData { .. } => {
+            // Already handled in encode_instruction.
+            unreachable!();
+        }
+        _ => encode_declaration_kind(instr, shader_model_5_1_or_later, out),
+    }
+}
+
+fn encode_declaration_kind(
+    instr: &Instruction,
+    shader_model_5_1_or_later: bool,
+    out: &mut Vec<u32>,
+) {
+    match &instr.kind {
         InstructionKind::DclInput {
             system_value,
             operands,
@@ -367,6 +378,29 @@ fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut V
                 out.push(*space);
             }
         }
+        InstructionKind::DclUavStructured {
+            operands,
+            stride,
+            space,
+            ..
+        }
+        | InstructionKind::DclResourceStructured {
+            stride,
+            operands,
+            space,
+        } => {
+            encode_operands(operands, out);
+            out.push(*stride);
+            if shader_model_5_1_or_later {
+                out.push(*space);
+            }
+        }
+        _ => encode_auxiliary_kind(instr, out),
+    }
+}
+
+fn encode_auxiliary_kind(instr: &Instruction, out: &mut Vec<u32>) {
+    match &instr.kind {
         InstructionKind::DclTemps { count }
         | InstructionKind::DclMaxOutputVertexCount { count }
         | InstructionKind::DclGsInstanceCount { count }
@@ -389,23 +423,6 @@ fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut V
             out.push(*y);
             out.push(*z);
         }
-        InstructionKind::DclUavStructured {
-            operands,
-            stride,
-            space,
-            ..
-        }
-        | InstructionKind::DclResourceStructured {
-            stride,
-            operands,
-            space,
-        } => {
-            encode_operands(operands, out);
-            out.push(*stride);
-            if shader_model_5_1_or_later {
-                out.push(*space);
-            }
-        }
         InstructionKind::DclThreadGroupSharedMemoryRaw {
             operands,
             byte_count,
@@ -422,6 +439,12 @@ fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut V
             out.push(*stride);
             out.push(*count);
         }
+        _ => encode_interface_kind(instr, out),
+    }
+}
+
+fn encode_interface_kind(instr: &Instruction, out: &mut Vec<u32>) {
+    match &instr.kind {
         InstructionKind::DclFunctionBody { index } => {
             out.push(*index);
         }
@@ -460,10 +483,7 @@ fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut V
             encode_operands(operands, out);
             out.push(*count);
         }
-        InstructionKind::CustomData { .. } => {
-            // Already handled in encode_instruction.
-            unreachable!();
-        }
+        _ => unreachable!("instruction kind was not classified for encoding"),
     }
 }
 
@@ -495,10 +515,8 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
         ComponentSelect::Scalar(c) => (2u32 << 2) | (u32::from(*c) << 4),
     };
 
-    let has_extended = op.negate
-        || op.abs
-        || op.min_precision != MinPrecision::Default
-        || op.non_uniform;
+    let has_extended =
+        op.negate || op.abs || op.min_precision != MinPrecision::Default || op.non_uniform;
 
     // Build operand token.
     let mut token = num_components | sel_bits;
@@ -621,6 +639,10 @@ fn build_extended_tokens(instr: &Instruction) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::boxed::Box;
+
+    use smallvec::smallvec;
+
     use super::*;
     use crate::shex::decode_with_fourcc;
 
@@ -654,8 +676,73 @@ mod tests {
         let token = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         let extended_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         assert_ne!(token & (1 << 31), 0);
-        assert_eq!((token >> 24) & 0x7f, 129 & 0x7f);
+        assert_eq!((token >> 24) & 0x7f, 0x81 & 0x7f);
         assert_eq!(extended_length, 129);
+        assert_eq!(decode_with_fourcc(&bytes, *b"SHEX").unwrap(), program);
+    }
+
+    #[test]
+    fn immediate64_plus_relative_index_uses_full_three_bit_field() {
+        let relative = Operand {
+            reg_type: RegisterType::Temp,
+            components: ComponentSelect::OneComponent,
+            negate: false,
+            abs: false,
+            min_precision: MinPrecision::Default,
+            non_uniform: false,
+            indices: smallvec![OperandIndex::Imm32(2)],
+            immediate_values: smallvec![],
+        };
+        let destination = Operand {
+            reg_type: RegisterType::Temp,
+            components: ComponentSelect::Mask(0xf),
+            negate: false,
+            abs: false,
+            min_precision: MinPrecision::Default,
+            non_uniform: false,
+            indices: smallvec![OperandIndex::Imm32(0)],
+            immediate_values: smallvec![],
+        };
+        let source = Operand {
+            reg_type: RegisterType::ConstantBuffer,
+            components: ComponentSelect::Swizzle([0, 1, 2, 3]),
+            negate: false,
+            abs: false,
+            min_precision: MinPrecision::Default,
+            non_uniform: false,
+            indices: smallvec![OperandIndex::RelativePlusImm64(
+                0x1122_3344_5566_7788,
+                Box::new(relative),
+            )],
+            immediate_values: smallvec![],
+        };
+        let instruction = Instruction {
+            opcode: Opcode::Mov,
+            saturate: false,
+            test_nonzero: false,
+            precise_mask: 0,
+            resinfo_return_type: None,
+            sync_flags: 0,
+            tex_offsets: None,
+            resource_dim: None,
+            resource_return_type: None,
+            kind: InstructionKind::Generic {
+                operands: smallvec![destination, source],
+                trailing_tokens: smallvec![],
+            },
+        };
+        let program = Program {
+            shader_type: "ps",
+            major_version: 5,
+            minor_version: 0,
+            instructions: alloc::vec![instruction],
+            warnings: Vec::new(),
+            fourcc: *b"SHEX",
+        };
+
+        let bytes = encode(&program);
+        let source_token = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        assert_eq!((source_token >> 22) & 0x7, 4);
         assert_eq!(decode_with_fourcc(&bytes, *b"SHEX").unwrap(), program);
     }
 }

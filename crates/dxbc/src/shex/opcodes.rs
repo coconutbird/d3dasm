@@ -5,7 +5,6 @@
 /// Covers the full D3D10–D3D11.3 range. Unknown opcodes are preserved
 /// as `Unknown(u32)` for forward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
 pub enum Opcode {
     // D3D10 ALU / flow-control (0–87)
     /// Floating-point add: `dest = src0 + src1`.
@@ -31,9 +30,9 @@ pub enum Opcode {
     /// Switch-default label.
     Default,
     /// Partial derivative with respect to screen-space X.
-    Deriv_rtx,
+    DerivRtx,
     /// Partial derivative with respect to screen-space Y.
-    Deriv_rty,
+    DerivRty,
     /// Conditionally discard the current pixel.
     Discard,
     /// Floating-point divide: `dest = src0 / src1`.
@@ -137,13 +136,13 @@ pub enum Opcode {
     /// Conditional return.
     Retc,
     /// Round to nearest even.
-    Round_ne,
+    RoundNe,
     /// Round towards negative infinity (floor).
-    Round_ni,
+    RoundNi,
     /// Round towards positive infinity (ceil).
-    Round_pi,
+    RoundPi,
     /// Round towards zero (truncate).
-    Round_z,
+    RoundZ,
     /// Reciprocal square root: `dest = 1 / sqrt(src)`.
     Rsq,
     /// Sample a texture.
@@ -254,13 +253,13 @@ pub enum Opcode {
     /// Query buffer element count / stride.
     BufInfo,
     /// Coarse partial derivative with respect to X.
-    Deriv_rtx_coarse,
+    DerivRtxCoarse,
     /// Fine partial derivative with respect to X.
-    Deriv_rtx_fine,
+    DerivRtxFine,
     /// Coarse partial derivative with respect to Y.
-    Deriv_rty_coarse,
+    DerivRtyCoarse,
     /// Fine partial derivative with respect to Y.
-    Deriv_rty_fine,
+    DerivRtyFine,
     /// Four-sample gather with comparison.
     Gather4C,
     /// Four-sample gather with programmable offset.
@@ -420,11 +419,11 @@ pub enum Opcode {
     Ftod,
     // DX11 eval (203–206)
     /// Evaluate an input attribute at a snapped pixel offset.
-    Eval_snapped,
+    EvalSnapped,
     /// Evaluate an input attribute at a specific sample index.
-    Eval_sampleIndex,
+    EvalSampleIndex,
     /// Evaluate an input attribute at the pixel centroid.
-    Eval_centroid,
+    EvalCentroid,
     /// Declare the GS instance count.
     DclGsInstanceCount,
     // DX11 misc (207–208)
@@ -501,8 +500,8 @@ macro_rules! opcode_from_u32 {
             8 => Self::Continuec,
             9 => Self::Cut,
             10 => Self::Default,
-            11 => Self::Deriv_rtx,
-            12 => Self::Deriv_rty,
+            11 => Self::DerivRtx,
+            12 => Self::DerivRty,
             13 => Self::Discard,
             14 => Self::Div,
             15 => Self::Dp2,
@@ -554,10 +553,10 @@ macro_rules! opcode_from_u32 {
             61 => Self::Resinfo,
             62 => Self::Ret,
             63 => Self::Retc,
-            64 => Self::Round_ne,
-            65 => Self::Round_ni,
-            66 => Self::Round_pi,
-            67 => Self::Round_z,
+            64 => Self::RoundNe,
+            65 => Self::RoundNi,
+            66 => Self::RoundPi,
+            67 => Self::RoundZ,
             68 => Self::Rsq,
             69 => Self::Sample,
             70 => Self::SampleC,
@@ -617,10 +616,10 @@ macro_rules! opcode_from_u32 {
             120 => Self::InterfaceCall,
             // DX11 SM5 instructions (121-142)
             121 => Self::BufInfo,
-            122 => Self::Deriv_rtx_coarse,
-            123 => Self::Deriv_rtx_fine,
-            124 => Self::Deriv_rty_coarse,
-            125 => Self::Deriv_rty_fine,
+            122 => Self::DerivRtxCoarse,
+            123 => Self::DerivRtxFine,
+            124 => Self::DerivRtyCoarse,
+            125 => Self::DerivRtyFine,
             126 => Self::Gather4C,
             127 => Self::Gather4Po,
             128 => Self::Gather4PoC,
@@ -702,9 +701,9 @@ macro_rules! opcode_from_u32 {
             201 => Self::Dtof,
             202 => Self::Ftod,
             // DX11 eval + misc (203-208)
-            203 => Self::Eval_snapped,
-            204 => Self::Eval_sampleIndex,
-            205 => Self::Eval_centroid,
+            203 => Self::EvalSnapped,
+            204 => Self::EvalSampleIndex,
+            205 => Self::EvalCentroid,
             206 => Self::DclGsInstanceCount,
             207 => Self::Abort,
             208 => Self::DebugBreak,
@@ -755,8 +754,8 @@ macro_rules! opcode_to_u32 {
             Self::Continuec => 8,
             Self::Cut => 9,
             Self::Default => 10,
-            Self::Deriv_rtx => 11,
-            Self::Deriv_rty => 12,
+            Self::DerivRtx => 11,
+            Self::DerivRty => 12,
             Self::Discard => 13,
             Self::Div => 14,
             Self::Dp2 => 15,
@@ -808,10 +807,10 @@ macro_rules! opcode_to_u32 {
             Self::Resinfo => 61,
             Self::Ret => 62,
             Self::Retc => 63,
-            Self::Round_ne => 64,
-            Self::Round_ni => 65,
-            Self::Round_pi => 66,
-            Self::Round_z => 67,
+            Self::RoundNe => 64,
+            Self::RoundNi => 65,
+            Self::RoundPi => 66,
+            Self::RoundZ => 67,
             Self::Rsq => 68,
             Self::Sample => 69,
             Self::SampleC => 70,
@@ -864,10 +863,10 @@ macro_rules! opcode_to_u32 {
             Self::EmitThenCutStream => 119,
             Self::InterfaceCall => 120,
             Self::BufInfo => 121,
-            Self::Deriv_rtx_coarse => 122,
-            Self::Deriv_rtx_fine => 123,
-            Self::Deriv_rty_coarse => 124,
-            Self::Deriv_rty_fine => 125,
+            Self::DerivRtxCoarse => 122,
+            Self::DerivRtxFine => 123,
+            Self::DerivRtyCoarse => 124,
+            Self::DerivRtyFine => 125,
             Self::Gather4C => 126,
             Self::Gather4Po => 127,
             Self::Gather4PoC => 128,
@@ -945,9 +944,9 @@ macro_rules! opcode_to_u32 {
             Self::Dmovc => 200,
             Self::Dtof => 201,
             Self::Ftod => 202,
-            Self::Eval_snapped => 203,
-            Self::Eval_sampleIndex => 204,
-            Self::Eval_centroid => 205,
+            Self::EvalSnapped => 203,
+            Self::EvalSampleIndex => 204,
+            Self::EvalCentroid => 205,
             Self::DclGsInstanceCount => 206,
             Self::Abort => 207,
             Self::DebugBreak => 208,
@@ -994,8 +993,8 @@ macro_rules! opcode_name {
             Self::Continuec => "continuec",
             Self::Cut => "cut",
             Self::Default => "default",
-            Self::Deriv_rtx => "deriv_rtx",
-            Self::Deriv_rty => "deriv_rty",
+            Self::DerivRtx => "deriv_rtx",
+            Self::DerivRty => "deriv_rty",
             Self::Discard => "discard",
             Self::Div => "div",
             Self::Dp2 => "dp2",
@@ -1051,10 +1050,10 @@ macro_rules! opcode_name {
             Self::Resinfo => "resinfo",
             Self::Ret => "ret",
             Self::Retc => "retc",
-            Self::Round_ne => "round_ne",
-            Self::Round_ni => "round_ni",
-            Self::Round_pi => "round_pi",
-            Self::Round_z => "round_z",
+            Self::RoundNe => "round_ne",
+            Self::RoundNi => "round_ni",
+            Self::RoundPi => "round_pi",
+            Self::RoundZ => "round_z",
             Self::Rsq => "rsq",
             Self::Sample => "sample",
             Self::SampleC => "sample_c",
@@ -1149,9 +1148,9 @@ macro_rules! opcode_name {
             Self::ImmAtomicIMin => "imm_atomic_imin",
             Self::ImmAtomicUMax => "imm_atomic_umax",
             Self::ImmAtomicUMin => "imm_atomic_umin",
-            Self::Eval_snapped => "eval_snapped",
-            Self::Eval_sampleIndex => "eval_sample_index",
-            Self::Eval_centroid => "eval_centroid",
+            Self::EvalSnapped => "eval_snapped",
+            Self::EvalSampleIndex => "eval_sample_index",
+            Self::EvalCentroid => "eval_centroid",
             Self::Swapc => "swapc",
             Self::Uaddc => "uaddc",
             Self::Usubb => "usubb",
@@ -1166,10 +1165,10 @@ macro_rules! opcode_name {
             Self::F16tof32 => "f16tof32",
             Self::F32tof16 => "f32tof16",
             Self::Rcp => "rcp",
-            Self::Deriv_rtx_coarse => "deriv_rtx_coarse",
-            Self::Deriv_rtx_fine => "deriv_rtx_fine",
-            Self::Deriv_rty_coarse => "deriv_rty_coarse",
-            Self::Deriv_rty_fine => "deriv_rty_fine",
+            Self::DerivRtxCoarse => "deriv_rtx_coarse",
+            Self::DerivRtxFine => "deriv_rtx_fine",
+            Self::DerivRtyCoarse => "deriv_rty_coarse",
+            Self::DerivRtyFine => "deriv_rty_fine",
             Self::Gather4 => "gather4",
             Self::Gather4C => "gather4_c",
             Self::Gather4Po => "gather4_po",
@@ -1258,24 +1257,24 @@ impl Opcode {
             return None;
         }
         Some(match self.to_u32() {
-            2 | 7 | 9 | 10 | 18 | 19 | 20 | 21 | 22 | 23 | 48 | 58 | 62 | 92 | 93 | 94
-            | 104 | 105 | 106 | 113 | 114 | 115 | 116 | 144 | 145 | 146 | 147 | 148
-            | 149 | 150 | 151 | 152 | 153 | 154 | 155 | 190 | 206 | 207 | 208 => 0,
-            3 | 4 | 6 | 8 | 13 | 31 | 44 | 63 | 76 | 88 | 89 | 90 | 91 | 95 | 96
-            | 97 | 98 | 99 | 100 | 101 | 102 | 103 | 117 | 118 | 119 | 120 | 143 | 156
-            | 157 | 158 | 159 | 160 | 161 | 162 => 1,
-            5 | 11 | 12 | 25 | 26 | 27 | 28 | 40 | 43 | 47 | 54 | 59 | 64 | 65 | 66
-            | 67 | 68 | 75 | 86 | 111 | 121 | 122 | 123 | 124 | 125 | 129 | 130 | 131
-            | 134 | 135 | 136 | 137 | 141 | 178 | 179 | 199 | 201 | 202 | 205 | 212
-            | 214 | 215 | 216 | 217 | 234 => 2,
-            0 | 1 | 14 | 15 | 16 | 17 | 24 | 29 | 30 | 32 | 33 | 34 | 36 | 37 | 39
-            | 41 | 42 | 45 | 49 | 51 | 52 | 56 | 57 | 60 | 61 | 77 | 79 | 80 | 83
-            | 84 | 85 | 87 | 110 | 163 | 164 | 165 | 166 | 169 | 170 | 171 | 173
-            | 174 | 175 | 176 | 177 | 191 | 192 | 193 | 194 | 195 | 196 | 197 | 198
-            | 203 | 204 | 210 => 3,
-            35 | 38 | 46 | 50 | 55 | 69 | 78 | 81 | 82 | 108 | 109 | 132 | 133
-            | 138 | 139 | 167 | 168 | 172 | 180 | 181 | 182 | 183 | 184 | 186 | 187
-            | 188 | 189 | 200 | 211 | 213 | 223 | 225 | 226 => 4,
+            2 | 7 | 9 | 10 | 18 | 19 | 20 | 21 | 22 | 23 | 48 | 58 | 62 | 92 | 93 | 94 | 104
+            | 105 | 106 | 113 | 114 | 115 | 116 | 144 | 145 | 146 | 147 | 148 | 149 | 150 | 151
+            | 152 | 153 | 154 | 155 | 190 | 206 | 207 | 208 => 0,
+            3 | 4 | 6 | 8 | 13 | 31 | 44 | 63 | 76 | 88 | 89 | 90 | 91 | 95 | 96 | 97 | 98 | 99
+            | 100 | 101 | 102 | 103 | 117 | 118 | 119 | 120 | 143 | 156 | 157 | 158 | 159 | 160
+            | 161 | 162 => 1,
+            5 | 11 | 12 | 25 | 26 | 27 | 28 | 40 | 43 | 47 | 54 | 59 | 64 | 65 | 66 | 67 | 68
+            | 75 | 86 | 111 | 121 | 122 | 123 | 124 | 125 | 129 | 130 | 131 | 134 | 135 | 136
+            | 137 | 141 | 178 | 179 | 199 | 201 | 202 | 205 | 212 | 214 | 215 | 216 | 217 | 234 => {
+                2
+            }
+            0 | 1 | 14 | 15 | 16 | 17 | 24 | 29 | 30 | 32 | 33 | 34 | 36 | 37 | 39 | 41 | 42
+            | 45 | 49 | 51 | 52 | 56 | 57 | 60 | 61 | 77 | 79 | 80 | 83 | 84 | 85 | 87 | 110
+            | 163 | 164 | 165 | 166 | 169 | 170 | 171 | 173 | 174 | 175 | 176 | 177 | 191 | 192
+            | 193 | 194 | 195 | 196 | 197 | 198 | 203 | 204 | 210 => 3,
+            35 | 38 | 46 | 50 | 55 | 69 | 78 | 81 | 82 | 108 | 109 | 132 | 133 | 138 | 139
+            | 167 | 168 | 172 | 180 | 181 | 182 | 183 | 184 | 186 | 187 | 188 | 189 | 200 | 211
+            | 213 | 223 | 225 | 226 => 4,
             70 | 71 | 72 | 74 | 126 | 127 | 140 | 142 | 185 | 219 | 224 | 227 => 5,
             73 | 128 | 220 | 221 | 228 | 229 | 230 => 6,
             222 | 231 | 233 => 7,

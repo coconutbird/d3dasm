@@ -466,6 +466,13 @@ fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::
         InstructionKind::DclThreadGroup { x, y, z } => {
             write!(w, " {x} {y} {z}")?;
         }
+        _ => return write_resource_declaration(w, instr),
+    }
+    Ok(())
+}
+
+fn write_resource_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
+    match &instr.kind {
         InstructionKind::DclUavTyped {
             dimension,
             flags,
@@ -522,6 +529,13 @@ fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::
             write_op0(w, operands);
             write!(w, " stride={stride} count={count}")?;
         }
+        _ => return write_interface_declaration(w, instr),
+    }
+    Ok(())
+}
+
+fn write_interface_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
+    match &instr.kind {
         InstructionKind::DclFunctionBody { index } => {
             write!(w, " {index}")?;
         }

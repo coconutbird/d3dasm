@@ -286,12 +286,14 @@ impl fmt::Display for Shader<'_> {
             write!(f, "{d}")?;
         }
 
-        // Remaining chunks: PSV0, RDAT, debug data, private, library.
+        // Remaining chunks: validation/runtime/source/debug/private/library metadata.
         for chunk in self.chunks() {
             match chunk {
                 ChunkData::PipelineStateValidation(p) => write!(f, "{p}")?,
                 ChunkData::RuntimeData(r) => write!(f, "{r}")?,
                 ChunkData::DebugData(dd) => write!(f, "{dd}")?,
+                ChunkData::SourceInfo(si) => write!(f, "{si}")?,
+                ChunkData::ShaderPdbInfo(pi) => write!(f, "{pi}")?,
                 ChunkData::PrivateData(pd) => write!(f, "{pd}")?,
                 ChunkData::LibraryHeader(lh) => write!(f, "{lh}")?,
                 ChunkData::LibraryFunction(lf) => write!(f, "{lf}")?,
