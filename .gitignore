@@ -4,6 +4,7 @@
 # Proprietary shader data
 /shaders
 /shaders-pc
+/shader-raw
 
 # Generated disassembly output
 /terrain_d3dasm
