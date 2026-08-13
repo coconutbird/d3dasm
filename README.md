@@ -7,13 +7,23 @@ Parses DXBC containers, decodes SM4/SM5 shader bytecode into a fully typed inter
 ## Features
 
 - **Full SM4/SM5 bytecode round-trip** — Decode → IR → encode produces bit-identical output across all 217+ opcodes. Verified against 1,152 real-world shader chunks with zero failures.
-- **Typed IR with no raw bit hacks** — Every opcode field (GS primitives, topologies, component selection modes, sample counts, test conditions) is represented as a proper Rust enum. No raw bit buckets.
-- **18 chunk types parsed** — RDEF, ISGN/ISG1, OSGN/OSG1/OSG5, PCSG/PSG1, SHEX/SHDR, STAT, RTS0, SFI0, HASH/XHSH, ILDN, ILDB, PRIV, DXIL, PSV0, RDAT, LIBF, LFS0, LIBH. Unknown chunks are preserved for lossless container rebuilds.
+- **Typed published fields** — Opcode fields such as GS primitives, topologies, component selection modes, sample counts, and test conditions use explicit Rust types. Reserved extensions and unknown payloads remain raw so forward-compatible data is not discarded.
+- **Published chunk structures parsed** — RDEF, ISGN/ISG1, OSGN/OSG1/OSG5, PCSG/PSG1, SHEX/SHDR, STAT, RTS0, SFI0, HASH, ILDN, DXIL, PSV0, RDAT, VERS, SRCI, and PDBI. ILDB, PRIV, LIBF, LFS0, LIBH, and unknown FourCCs have no stable public payload contract and are preserved opaquely.
 - **Zero-copy reads, copy-on-write mutation** — Metadata strings and raw blobs borrow directly from the input buffer via `Cow<'a, T>`. Assigning `Cow::Owned(...)` transparently enables shader patching without touching the original data.
 - **Lazy chunk parsing** — Non-program chunks (RDEF, signatures, STAT, etc.) are parsed on first access via `OnceCell`. Callers that only need the shader program pay zero overhead for metadata.
 - **Container scanning** — Automatically finds DXBC containers in arbitrary byte streams (raw files, `fxb0` wrappers, custom game archives).
 - **`no_std` core** — The `dxbc` crate uses only `core` and `alloc`, no filesystem or I/O.
 - **All shader stages** — VS, PS, GS, HS, DS, CS.
+
+## Documentation
+
+- [`docs/d3dasm-grammar.md`](docs/d3dasm-grammar.md) — the full grammar of the
+  **current** `.d3dasm` text format (container document, RDEF-as-HLSL,
+  signatures, STAT, and the SHEX instruction body), with the known
+  inconsistencies a future parser must handle.
+- [`docs/d3dasm-desired-grammar.md`](docs/d3dasm-desired-grammar.md) — the
+  **target** redesign that resolves those inconsistencies into a consistent,
+  context-free grammar (a future `v2` of the format).
 
 ## Crates
 
@@ -36,7 +46,7 @@ let data = std::fs::read("shader.bin").unwrap();
 for shader in d3dasm::parse(&data) {
     // Typed access to parsed chunks.
     if let Some(program) = shader.program() {
-        println!("SM {}.{}", program.version_major, program.version_minor);
+        println!("SM {}.{}", program.major_version, program.minor_version);
     }
 
     // fxc.exe-compatible disassembly via Display.
@@ -47,7 +57,7 @@ for shader in d3dasm::parse(&data) {
 ### Lower-level access via `dxbc`
 
 ```rust
-let container = dxbc::DxbcContainer::parse(bytes).unwrap();
+let container = dxbc::scan_dxbc(bytes).into_iter().next().unwrap();
 for chunk in &container.chunks {
     match chunk.parse() {
         dxbc::ChunkData::Shader(program) => {
@@ -96,24 +106,41 @@ ret
 
 ```
 d3dasm/
-├── Cargo.toml                        # Workspace root (resolver = "3")
+├── Cargo.toml                        # Virtual workspace and shared policy
+├── Cargo.lock                        # Workspace-wide dependency lockfile
 ├── crates/
-│   ├── dxbc/                         # no_std DXBC library
-│   │   └── src/
-│   │       ├── container.rs          # DXBC container parser, writer, scanner
-│   │       ├── chunks/               # Per-chunk parsers (rdef, signature, stat, …)
-│   │       ├── shex/                 # SM4/SM5 bytecode
-│   │       │   ├── ir.rs             # Typed intermediate representation
-│   │       │   ├── decode.rs         # Bytes → IR
-│   │       │   ├── encode.rs         # IR → bytes
-│   │       │   ├── fmt.rs            # IR → disassembly text
-│   │       │   └── opcodes.rs        # Opcode enum (217+ opcodes)
-│   │       └── util.rs              # Shared helpers
+│   ├── dxbc/                         # no_std DXBC library package
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs                # Library target
+│   │   │   ├── container.rs          # Container parser, writer, scanner
+│   │   │   ├── chunks/               # Per-chunk parsers and writers
+│   │   │   └── shex/                 # SM4/SM5 IR, codec, and formatter
+│   │   └── fuzz/                     # cargo-fuzz workspace package
+│   │       ├── Cargo.toml
+│   │       └── fuzz_targets/
 │   ├── d3dasm/                       # High-level disassembly API
-│   │   └── src/lib.rs
+│   │   ├── Cargo.toml
+│   │   ├── src/lib.rs                # Library target
+│   │   └── tests/                    # Integration tests
 │   └── d3dasm-cli/                   # CLI binary
-│       └── src/main.rs
+│       ├── Cargo.toml
+│       ├── src/main.rs               # Binary target
+│       └── examples/                 # Example targets
+├── .github/workflows/ci.yml          # Workspace quality gates
+└── .pre-commit-config.yaml           # Matching local quality gates
 ```
+
+The root is a virtual workspace; every package uses Cargo's conventional
+`src/lib.rs`, `src/main.rs`, `tests/`, `examples/`, or `fuzz_targets/` target
+locations. The workspace topology is listed explicitly in `Cargo.toml`, with
+the fuzz package included in workspace checks but excluded from default builds.
+
+Shared package metadata and every dependency declaration live in the root
+`[workspace.package]` and `[workspace.dependencies]` tables. Member manifests
+inherit them with `workspace = true`. The same pattern applies to
+`[workspace.lints]`: every member enables `workspace = true`, and Clippy's
+`pedantic` group is denied without per-crate Clippy exceptions.
 
 ## Building
 
@@ -126,11 +153,25 @@ Requires Rust 1.85+ (edition 2024, `core::cell::OnceCell` stable since 1.70).
 ## Testing
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-targets --all-features --exclude dxbc-fuzz
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Round-trip verification across all test shaders:
+The fuzz harness is checked and linted with the workspace, but is excluded from
+`cargo test --all-targets` because libFuzzer supplies its entry point only when
+run through `cargo fuzz`.
+
+### Local shader corpora
+
+Shader binaries and proprietary corpora are intentionally not committed. Keep
+local inputs under `shader-raw/`, `shaders/`, or `shaders-pc/`; these directories
+are ignored by Git. Supply the files to the conformance tools explicitly:
 
 ```sh
-cargo run --release --example roundtrip -- shaders/shaders-pc/**/*.bin
+cargo run --release -p d3dasm-cli --example chunk_conformance -- <shader-files...>
+cargo run --release -p d3dasm-cli --example container_roundtrip -- <shader-files...>
 ```
+
+`chunk_conformance` verifies typed chunk parse/write identity.
+`container_roundtrip` verifies byte identity for each complete input file,
+including non-DXBC wrapper data.

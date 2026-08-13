@@ -26,6 +26,7 @@ pub use self::opcodes::*;
 ///
 /// This is the main entry point. It decodes the raw bytes into a structured
 /// IR ([`Program`]) and then formats it into text.
+#[must_use]
 pub fn disassemble(data: &[u8]) -> String {
     match self::decode::decode(data) {
         Ok(program) => self::fmt::format_program(&program),
@@ -39,7 +40,7 @@ mod tests {
 
     use super::*;
 
-    /// Helper: build a minimal SHEX chunk (ps_5_0) from a list of instruction token slices.
+    /// Helper: build a minimal SHEX chunk (`ps_5_0`) from a list of instruction token slices.
     /// Returns raw bytes suitable for `disassemble()`.
     fn build_shex(shader_type: u32, instructions: &[&[u32]]) -> Vec<u8> {
         let mut dwords: Vec<u32> = Vec::new();
@@ -51,7 +52,7 @@ mod tests {
             dwords.extend_from_slice(instr);
         }
         // Fill in length (total dwords including header)
-        dwords[1] = dwords.len() as u32;
+        dwords[1] = u32::try_from(dwords.len()).expect("test SHEX length fits in u32");
         // Convert to bytes
         dwords.iter().flat_map(|d| d.to_le_bytes()).collect()
     }
@@ -73,7 +74,7 @@ mod tests {
     /// For destinations: mask mode, e.g. r0.xyzw
     fn temp_dest(reg: u32, mask: u8) -> [u32; 2] {
         // num_components=2 (4-comp), sel_mode=0 (mask), op_type=0 (temp), index_dim=1 (1D)
-        let token = 0x00100002 | ((mask as u32) << 4);
+        let token = 0x0010_0002 | (u32::from(mask) << 4);
         [token, reg]
     }
 
@@ -81,14 +82,14 @@ mod tests {
     /// For sources: swizzle mode, e.g. r1.xyzw
     fn temp_src(reg: u32, swizzle: u32) -> [u32; 2] {
         // num_components=2 (4-comp), sel_mode=1 (swizzle), op_type=0 (temp), index_dim=1 (1D)
-        let token = 0x00100006 | (swizzle << 4);
+        let token = 0x0010_0006 | (swizzle << 4);
         [token, reg]
     }
 
     /// Helper: encode a scalar temp source, e.g. r0.x
     fn temp_src_scalar(reg: u32, component: u32) -> [u32; 2] {
         // num_components=2 (4-comp), sel_mode=2 (scalar), op_type=0 (temp), index_dim=1 (1D)
-        let token = 0x0010000A | (component << 4);
+        let token = 0x0010_000A | (component << 4);
         [token, reg]
     }
 
@@ -232,6 +233,16 @@ mod tests {
     }
 
     #[test]
+    fn dcl_global_flags_all_resources_bound() {
+        // D3D12 added ALL_RESOURCES_BOUND at token0 bit 19.
+        let tokens = [instr_token(106, 1) | (1 << 19)];
+        let data = build_ps(&[&tokens, &[instr_token(62, 1)]]);
+        let output = disassemble(&data);
+        assert!(output.contains("allResourcesBound"), "got: {output}");
+        assert_roundtrip(&data);
+    }
+
+    #[test]
     fn dcl_temps() {
         // opcode 104, length 2, followed by count=4
         let tokens = [instr_token(104, 2), 4];
@@ -277,9 +288,23 @@ mod tests {
             &[instr_token(62, 1)],                   // ret
         ]);
         let output = disassemble(&data);
-        assert!(output.contains("if"), "missing 'if' in: {output}");
+        // The conditional test suffix must be shown (fxc-compatible): bit 18
+        // clear ⇒ `if_z` (branch on zero), distinct from `if_nz`.
+        assert!(output.contains("if_z "), "missing 'if_z' in: {output}");
         assert!(output.contains("else"), "missing 'else' in: {output}");
         assert!(output.contains("endif"), "missing 'endif' in: {output}");
+
+        // bit 18 set ⇒ `if_nz` (branch on non-zero).
+        let nz = build_ps(&[
+            &[instr_token(31, 3) | (1 << 18), cond[0], cond[1]],
+            &[instr_token(21, 1)],
+            &[instr_token(62, 1)],
+        ]);
+        assert!(
+            disassemble(&nz).contains("if_nz "),
+            "missing 'if_nz' in: {}",
+            disassemble(&nz)
+        );
     }
 
     #[test]

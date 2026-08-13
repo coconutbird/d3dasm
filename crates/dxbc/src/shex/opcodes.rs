@@ -5,7 +5,6 @@
 /// Covers the full D3D10–D3D11.3 range. Unknown opcodes are preserved
 /// as `Unknown(u32)` for forward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
 pub enum Opcode {
     // D3D10 ALU / flow-control (0–87)
     /// Floating-point add: `dest = src0 + src1`.
@@ -31,9 +30,9 @@ pub enum Opcode {
     /// Switch-default label.
     Default,
     /// Partial derivative with respect to screen-space X.
-    Deriv_rtx,
+    DerivRtx,
     /// Partial derivative with respect to screen-space Y.
-    Deriv_rty,
+    DerivRty,
     /// Conditionally discard the current pixel.
     Discard,
     /// Floating-point divide: `dest = src0 / src1`.
@@ -137,13 +136,13 @@ pub enum Opcode {
     /// Conditional return.
     Retc,
     /// Round to nearest even.
-    Round_ne,
+    RoundNe,
     /// Round towards negative infinity (floor).
-    Round_ni,
+    RoundNi,
     /// Round towards positive infinity (ceil).
-    Round_pi,
+    RoundPi,
     /// Round towards zero (truncate).
-    Round_z,
+    RoundZ,
     /// Reciprocal square root: `dest = 1 / sqrt(src)`.
     Rsq,
     /// Sample a texture.
@@ -254,13 +253,13 @@ pub enum Opcode {
     /// Query buffer element count / stride.
     BufInfo,
     /// Coarse partial derivative with respect to X.
-    Deriv_rtx_coarse,
+    DerivRtxCoarse,
     /// Fine partial derivative with respect to X.
-    Deriv_rtx_fine,
+    DerivRtxFine,
     /// Coarse partial derivative with respect to Y.
-    Deriv_rty_coarse,
+    DerivRtyCoarse,
     /// Fine partial derivative with respect to Y.
-    Deriv_rty_fine,
+    DerivRtyFine,
     /// Four-sample gather with comparison.
     Gather4C,
     /// Four-sample gather with programmable offset.
@@ -420,11 +419,11 @@ pub enum Opcode {
     Ftod,
     // DX11 eval (203–206)
     /// Evaluate an input attribute at a snapped pixel offset.
-    Eval_snapped,
+    EvalSnapped,
     /// Evaluate an input attribute at a specific sample index.
-    Eval_sampleIndex,
+    EvalSampleIndex,
     /// Evaluate an input attribute at the pixel centroid.
-    Eval_centroid,
+    EvalCentroid,
     /// Declare the GS instance count.
     DclGsInstanceCount,
     // DX11 misc (207–208)
@@ -449,15 +448,46 @@ pub enum Opcode {
     Itod,
     /// Unsigned integer to double conversion.
     Utod,
+    // WDDM 1.3 tiled-resource status-feedback opcodes (219–234)
+    /// Gather four texels and return tiled-resource status.
+    Gather4Feedback,
+    /// Comparison gather and return tiled-resource status.
+    Gather4CFeedback,
+    /// Gather with programmable offsets and return tiled-resource status.
+    Gather4PoFeedback,
+    /// Comparison gather with programmable offsets and status.
+    Gather4PoCFeedback,
+    /// Resource load and tiled-resource status.
+    LdFeedback,
+    /// Multisample resource load and tiled-resource status.
+    LdMsFeedback,
+    /// Typed UAV load and tiled-resource status.
+    LdUavTypedFeedback,
+    /// Raw-buffer load and tiled-resource status.
+    LdRawFeedback,
+    /// Structured-buffer load and tiled-resource status.
+    LdStructuredFeedback,
+    /// Explicit-LOD sample and tiled-resource status.
+    SampleLFeedback,
+    /// Zero-LOD comparison sample and tiled-resource status.
+    SampleCLzFeedback,
+    /// Clamped sample and tiled-resource status.
+    SampleClampFeedback,
+    /// Bias-and-clamp sample and tiled-resource status.
+    SampleBClampFeedback,
+    /// Gradient-and-clamp sample and tiled-resource status.
+    SampleDClampFeedback,
+    /// Comparison-and-clamp sample and tiled-resource status.
+    SampleCClampFeedback,
+    /// Test whether a tiled-resource access was fully mapped.
+    CheckAccessFullyMapped,
     /// Unknown or unrecognised opcode (preserved for forward compatibility).
     Unknown(u32),
 }
 
-impl Opcode {
-    /// Converts a raw opcode value (bits 0–10 of the instruction token) to the
-    /// corresponding variant.
-    pub fn from_u32(v: u32) -> Self {
-        match v {
+macro_rules! opcode_from_u32 {
+    ($value:expr) => {
+        match $value {
             // D3D10 base opcodes (0-87)
             0 => Self::Add,
             1 => Self::And,
@@ -470,8 +500,8 @@ impl Opcode {
             8 => Self::Continuec,
             9 => Self::Cut,
             10 => Self::Default,
-            11 => Self::Deriv_rtx,
-            12 => Self::Deriv_rty,
+            11 => Self::DerivRtx,
+            12 => Self::DerivRty,
             13 => Self::Discard,
             14 => Self::Div,
             15 => Self::Dp2,
@@ -523,10 +553,10 @@ impl Opcode {
             61 => Self::Resinfo,
             62 => Self::Ret,
             63 => Self::Retc,
-            64 => Self::Round_ne,
-            65 => Self::Round_ni,
-            66 => Self::Round_pi,
-            67 => Self::Round_z,
+            64 => Self::RoundNe,
+            65 => Self::RoundNi,
+            66 => Self::RoundPi,
+            67 => Self::RoundZ,
             68 => Self::Rsq,
             69 => Self::Sample,
             70 => Self::SampleC,
@@ -586,10 +616,10 @@ impl Opcode {
             120 => Self::InterfaceCall,
             // DX11 SM5 instructions (121-142)
             121 => Self::BufInfo,
-            122 => Self::Deriv_rtx_coarse,
-            123 => Self::Deriv_rtx_fine,
-            124 => Self::Deriv_rty_coarse,
-            125 => Self::Deriv_rty_fine,
+            122 => Self::DerivRtxCoarse,
+            123 => Self::DerivRtxFine,
+            124 => Self::DerivRtyCoarse,
+            125 => Self::DerivRtyFine,
             126 => Self::Gather4C,
             127 => Self::Gather4Po,
             128 => Self::Gather4PoC,
@@ -671,9 +701,9 @@ impl Opcode {
             201 => Self::Dtof,
             202 => Self::Ftod,
             // DX11 eval + misc (203-208)
-            203 => Self::Eval_snapped,
-            204 => Self::Eval_sampleIndex,
-            205 => Self::Eval_centroid,
+            203 => Self::EvalSnapped,
+            204 => Self::EvalSampleIndex,
+            205 => Self::EvalCentroid,
             206 => Self::DclGsInstanceCount,
             207 => Self::Abort,
             208 => Self::DebugBreak,
@@ -687,13 +717,32 @@ impl Opcode {
             215 => Self::Dtou,
             216 => Self::Itod,
             217 => Self::Utod,
-            _ => Self::Unknown(v),
+            // 218 = RESERVED0 (end of D3D11.1)
+            // WDDM 1.3 feedback opcodes (219-234)
+            219 => Self::Gather4Feedback,
+            220 => Self::Gather4CFeedback,
+            221 => Self::Gather4PoFeedback,
+            222 => Self::Gather4PoCFeedback,
+            223 => Self::LdFeedback,
+            224 => Self::LdMsFeedback,
+            225 => Self::LdUavTypedFeedback,
+            226 => Self::LdRawFeedback,
+            227 => Self::LdStructuredFeedback,
+            228 => Self::SampleLFeedback,
+            229 => Self::SampleCLzFeedback,
+            230 => Self::SampleClampFeedback,
+            231 => Self::SampleBClampFeedback,
+            232 => Self::SampleDClampFeedback,
+            233 => Self::SampleCClampFeedback,
+            234 => Self::CheckAccessFullyMapped,
+            _ => Self::Unknown($value),
         }
-    }
+    };
+}
 
-    /// Converts the opcode back to its raw `u32` value.
-    pub fn to_u32(&self) -> u32 {
-        match self {
+macro_rules! opcode_to_u32 {
+    ($opcode:expr) => {
+        match $opcode {
             Self::Add => 0,
             Self::And => 1,
             Self::Break => 2,
@@ -705,8 +754,8 @@ impl Opcode {
             Self::Continuec => 8,
             Self::Cut => 9,
             Self::Default => 10,
-            Self::Deriv_rtx => 11,
-            Self::Deriv_rty => 12,
+            Self::DerivRtx => 11,
+            Self::DerivRty => 12,
             Self::Discard => 13,
             Self::Div => 14,
             Self::Dp2 => 15,
@@ -758,10 +807,10 @@ impl Opcode {
             Self::Resinfo => 61,
             Self::Ret => 62,
             Self::Retc => 63,
-            Self::Round_ne => 64,
-            Self::Round_ni => 65,
-            Self::Round_pi => 66,
-            Self::Round_z => 67,
+            Self::RoundNe => 64,
+            Self::RoundNi => 65,
+            Self::RoundPi => 66,
+            Self::RoundZ => 67,
             Self::Rsq => 68,
             Self::Sample => 69,
             Self::SampleC => 70,
@@ -814,10 +863,10 @@ impl Opcode {
             Self::EmitThenCutStream => 119,
             Self::InterfaceCall => 120,
             Self::BufInfo => 121,
-            Self::Deriv_rtx_coarse => 122,
-            Self::Deriv_rtx_fine => 123,
-            Self::Deriv_rty_coarse => 124,
-            Self::Deriv_rty_fine => 125,
+            Self::DerivRtxCoarse => 122,
+            Self::DerivRtxFine => 123,
+            Self::DerivRtyCoarse => 124,
+            Self::DerivRtyFine => 125,
             Self::Gather4C => 126,
             Self::Gather4Po => 127,
             Self::Gather4PoC => 128,
@@ -895,9 +944,9 @@ impl Opcode {
             Self::Dmovc => 200,
             Self::Dtof => 201,
             Self::Ftod => 202,
-            Self::Eval_snapped => 203,
-            Self::Eval_sampleIndex => 204,
-            Self::Eval_centroid => 205,
+            Self::EvalSnapped => 203,
+            Self::EvalSampleIndex => 204,
+            Self::EvalCentroid => 205,
             Self::DclGsInstanceCount => 206,
             Self::Abort => 207,
             Self::DebugBreak => 208,
@@ -909,13 +958,30 @@ impl Opcode {
             Self::Dtou => 215,
             Self::Itod => 216,
             Self::Utod => 217,
+            Self::Gather4Feedback => 219,
+            Self::Gather4CFeedback => 220,
+            Self::Gather4PoFeedback => 221,
+            Self::Gather4PoCFeedback => 222,
+            Self::LdFeedback => 223,
+            Self::LdMsFeedback => 224,
+            Self::LdUavTypedFeedback => 225,
+            Self::LdRawFeedback => 226,
+            Self::LdStructuredFeedback => 227,
+            Self::SampleLFeedback => 228,
+            Self::SampleCLzFeedback => 229,
+            Self::SampleClampFeedback => 230,
+            Self::SampleBClampFeedback => 231,
+            Self::SampleDClampFeedback => 232,
+            Self::SampleCClampFeedback => 233,
+            Self::CheckAccessFullyMapped => 234,
             Self::Unknown(v) => *v,
         }
-    }
+    };
+}
 
-    /// Returns the lowercase mnemonic used in disassembly output.
-    pub fn name(&self) -> &'static str {
-        match self {
+macro_rules! opcode_name {
+    ($opcode:expr) => {
+        match $opcode {
             Self::Add => "add",
             Self::And => "and",
             Self::Break => "break",
@@ -927,8 +993,8 @@ impl Opcode {
             Self::Continuec => "continuec",
             Self::Cut => "cut",
             Self::Default => "default",
-            Self::Deriv_rtx => "deriv_rtx",
-            Self::Deriv_rty => "deriv_rty",
+            Self::DerivRtx => "deriv_rtx",
+            Self::DerivRty => "deriv_rty",
             Self::Discard => "discard",
             Self::Div => "div",
             Self::Dp2 => "dp2",
@@ -984,10 +1050,10 @@ impl Opcode {
             Self::Resinfo => "resinfo",
             Self::Ret => "ret",
             Self::Retc => "retc",
-            Self::Round_ne => "round_ne",
-            Self::Round_ni => "round_ni",
-            Self::Round_pi => "round_pi",
-            Self::Round_z => "round_z",
+            Self::RoundNe => "round_ne",
+            Self::RoundNi => "round_ni",
+            Self::RoundPi => "round_pi",
+            Self::RoundZ => "round_z",
             Self::Rsq => "rsq",
             Self::Sample => "sample",
             Self::SampleC => "sample_c",
@@ -1082,9 +1148,9 @@ impl Opcode {
             Self::ImmAtomicIMin => "imm_atomic_imin",
             Self::ImmAtomicUMax => "imm_atomic_umax",
             Self::ImmAtomicUMin => "imm_atomic_umin",
-            Self::Eval_snapped => "eval_snapped",
-            Self::Eval_sampleIndex => "eval_sample_index",
-            Self::Eval_centroid => "eval_centroid",
+            Self::EvalSnapped => "eval_snapped",
+            Self::EvalSampleIndex => "eval_sample_index",
+            Self::EvalCentroid => "eval_centroid",
             Self::Swapc => "swapc",
             Self::Uaddc => "uaddc",
             Self::Usubb => "usubb",
@@ -1099,10 +1165,10 @@ impl Opcode {
             Self::F16tof32 => "f16tof32",
             Self::F32tof16 => "f32tof16",
             Self::Rcp => "rcp",
-            Self::Deriv_rtx_coarse => "deriv_rtx_coarse",
-            Self::Deriv_rtx_fine => "deriv_rtx_fine",
-            Self::Deriv_rty_coarse => "deriv_rty_coarse",
-            Self::Deriv_rty_fine => "deriv_rty_fine",
+            Self::DerivRtxCoarse => "deriv_rtx_coarse",
+            Self::DerivRtxFine => "deriv_rtx_fine",
+            Self::DerivRtyCoarse => "deriv_rty_coarse",
+            Self::DerivRtyFine => "deriv_rty_fine",
             Self::Gather4 => "gather4",
             Self::Gather4C => "gather4_c",
             Self::Gather4Po => "gather4_po",
@@ -1132,6 +1198,23 @@ impl Opcode {
             Self::Dtou => "dtou",
             Self::Itod => "itod",
             Self::Utod => "utod",
+            // WDDM 1.3 tiled-resource status feedback
+            Self::Gather4Feedback => "gather4_s",
+            Self::Gather4CFeedback => "gather4_c_s",
+            Self::Gather4PoFeedback => "gather4_po_s",
+            Self::Gather4PoCFeedback => "gather4_po_c_s",
+            Self::LdFeedback => "ld_s",
+            Self::LdMsFeedback => "ldms_s",
+            Self::LdUavTypedFeedback => "ld_uav_typed_s",
+            Self::LdRawFeedback => "ld_raw_s",
+            Self::LdStructuredFeedback => "ld_structured_s",
+            Self::SampleLFeedback => "sample_l_s",
+            Self::SampleCLzFeedback => "sample_c_lz_s",
+            Self::SampleClampFeedback => "sample_cl_s",
+            Self::SampleBClampFeedback => "sample_b_cl_s",
+            Self::SampleDClampFeedback => "sample_d_cl_s",
+            Self::SampleCClampFeedback => "sample_c_cl_s",
+            Self::CheckAccessFullyMapped => "check_access_fully_mapped",
             // Misc
             Self::Abort => "abort",
             Self::DebugBreak => "debug_break",
@@ -1140,6 +1223,64 @@ impl Opcode {
                 "unknown_op"
             }
         }
+    };
+}
+
+impl Opcode {
+    /// Converts a raw opcode value (bits 0–10 of the instruction token) to the
+    /// corresponding variant.
+    #[must_use]
+    pub fn from_u32(v: u32) -> Self {
+        opcode_from_u32!(v)
+    }
+
+    /// Converts the opcode back to its raw `u32` value.
+    #[must_use]
+    pub fn to_u32(&self) -> u32 {
+        opcode_to_u32!(self)
+    }
+
+    /// Returns the lowercase mnemonic used in disassembly output.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        opcode_name!(self)
+    }
+
+    /// Number of encoded operands required by this published opcode.
+    ///
+    /// Declaration opcodes can also carry non-operand payload dwords; this
+    /// count covers only `OperandToken0` sequences. Unknown/reserved opcodes
+    /// return `None` so callers can preserve them opaquely.
+    #[must_use]
+    pub fn expected_operand_count(&self) -> Option<usize> {
+        if matches!(self, Self::Unknown(_)) {
+            return None;
+        }
+        Some(match self.to_u32() {
+            2 | 7 | 9 | 10 | 18 | 19 | 20 | 21 | 22 | 23 | 48 | 58 | 62 | 92 | 93 | 94 | 104
+            | 105 | 106 | 113 | 114 | 115 | 116 | 144 | 145 | 146 | 147 | 148 | 149 | 150 | 151
+            | 152 | 153 | 154 | 155 | 190 | 206 | 207 | 208 => 0,
+            3 | 4 | 6 | 8 | 13 | 31 | 44 | 63 | 76 | 88 | 89 | 90 | 91 | 95 | 96 | 97 | 98 | 99
+            | 100 | 101 | 102 | 103 | 117 | 118 | 119 | 120 | 143 | 156 | 157 | 158 | 159 | 160
+            | 161 | 162 => 1,
+            5 | 11 | 12 | 25 | 26 | 27 | 28 | 40 | 43 | 47 | 54 | 59 | 64 | 65 | 66 | 67 | 68
+            | 75 | 86 | 111 | 121 | 122 | 123 | 124 | 125 | 129 | 130 | 131 | 134 | 135 | 136
+            | 137 | 141 | 178 | 179 | 199 | 201 | 202 | 205 | 212 | 214 | 215 | 216 | 217 | 234 => {
+                2
+            }
+            0 | 1 | 14 | 15 | 16 | 17 | 24 | 29 | 30 | 32 | 33 | 34 | 36 | 37 | 39 | 41 | 42
+            | 45 | 49 | 51 | 52 | 56 | 57 | 60 | 61 | 77 | 79 | 80 | 83 | 84 | 85 | 87 | 110
+            | 163 | 164 | 165 | 166 | 169 | 170 | 171 | 173 | 174 | 175 | 176 | 177 | 191 | 192
+            | 193 | 194 | 195 | 196 | 197 | 198 | 203 | 204 | 210 => 3,
+            35 | 38 | 46 | 50 | 55 | 69 | 78 | 81 | 82 | 108 | 109 | 132 | 133 | 138 | 139
+            | 167 | 168 | 172 | 180 | 181 | 182 | 183 | 184 | 186 | 187 | 188 | 189 | 200 | 211
+            | 213 | 223 | 225 | 226 => 4,
+            70 | 71 | 72 | 74 | 126 | 127 | 140 | 142 | 185 | 219 | 224 | 227 => 5,
+            73 | 128 | 220 | 221 | 228 | 229 | 230 => 6,
+            222 | 231 | 233 => 7,
+            232 => 8,
+            _ => return None,
+        })
     }
 }
 
@@ -1147,12 +1288,12 @@ impl Opcode {
 mod tests {
     use super::Opcode;
 
-    /// Verify every opcode value 0..=217 maps to a known variant (not Unknown).
+    /// Verify every published opcode value maps to a known variant (not Unknown).
     #[test]
     fn all_opcodes_are_known() {
-        for v in 0..=217u32 {
+        for v in 0..=234u32 {
             // Skip reserved slots
-            if v == 107 || v == 112 || v == 209 {
+            if matches!(v, 107 | 112 | 209 | 218) {
                 assert!(
                     matches!(Opcode::from_u32(v), Opcode::Unknown(_)),
                     "reserved opcode {v} should map to Unknown"
@@ -1164,14 +1305,15 @@ mod tests {
                 !matches!(op, Opcode::Unknown(_)),
                 "opcode {v} mapped to Unknown, expected a known variant"
             );
+            assert_eq!(op.to_u32(), v, "opcode {v} did not encode symmetrically");
         }
     }
 
     /// Verify every known opcode has a non-empty, non-"unknown_op" name.
     #[test]
     fn all_opcodes_have_names() {
-        for v in 0..=217u32 {
-            if v == 107 || v == 112 || v == 209 {
+        for v in 0..=234u32 {
+            if matches!(v, 107 | 112 | 209 | 218) {
                 continue;
             }
             let op = Opcode::from_u32(v);
@@ -1179,6 +1321,34 @@ mod tests {
             assert!(
                 !name.is_empty() && name != "unknown_op",
                 "opcode {v} ({op:?}) has bad name: {name:?}"
+            );
+        }
+    }
+
+    /// Operand arities from DXC's `g_InstructionInfo` table. A dash marks an
+    /// SDK-reserved opcode slot or `customdata`, whose payload is not an
+    /// operand-token sequence.
+    #[test]
+    fn all_operand_counts_match_dxc() {
+        const COUNTS: &str = concat!(
+            "33011210100221333300000032222331333433432332134",
+            "203433-2433023301222224555652134334433323111100",
+            "0111111111000-4432-0000111122222556222442222445",
+            "25100000000000011111113333443334333332244444544",
+            "440333333332422332000-34242222-5667454456667872",
+        );
+        assert_eq!(COUNTS.len(), 235);
+        for (value, expected) in COUNTS.bytes().enumerate() {
+            let opcode = Opcode::from_u32(u32::try_from(value).unwrap());
+            let expected = if expected == b'-' {
+                None
+            } else {
+                Some(usize::from(expected - b'0'))
+            };
+            assert_eq!(
+                opcode.expected_operand_count(),
+                expected,
+                "operand count for opcode {value} ({opcode:?})"
             );
         }
     }
@@ -1232,7 +1402,7 @@ mod tests {
         }
     }
 
-    /// Values beyond 217 should map to Unknown.
+    /// Reserved and out-of-range values should map to Unknown.
     #[test]
     fn unknown_opcodes() {
         for v in [218, 255, 500, 1000, u32::MAX] {

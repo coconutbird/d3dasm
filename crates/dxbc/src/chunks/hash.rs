@@ -1,86 +1,50 @@
-//! HASH / XHSH chunk parser — shader content hash.
+//! HASH chunk parser — DXIL shader content hash.
 
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
 
-/// Shader hash stored in a HASH or XHSH chunk.
+/// The published `DxilShaderHash` payload stored in a HASH chunk.
 #[derive(Debug, Clone)]
 pub struct ShaderHash {
-    /// Raw hash bytes (typically 16 bytes for MD5 in HASH, 8 bytes in XHSH).
+    /// HASH flags (`DxilShaderHash::Flags`).
+    pub flags: u32,
+    /// The 16-byte digest.
     pub bytes: [u8; 16],
-    /// Number of valid bytes in `bytes` (8 for XHSH, 16 for HASH).
-    pub len: usize,
-    /// FourCC that was used to parse this chunk (HASH or XHSH).
-    pub fourcc: [u8; 4],
 }
 
-/// Parse a HASH or XHSH chunk.
+/// Parse a HASH chunk.
 ///
-/// `fourcc` should be the original FourCC from the container so it is
-/// preserved correctly for round-trip serialization. HASH chunks contain
-/// a 4-byte flags field followed by a 16-byte MD5 digest. XHSH chunks
-/// contain an 8-byte hash with no flags prefix.
+/// The payload is exactly a four-byte flags field followed by a 16-byte
+/// digest, matching Microsoft's `DxilShaderHash` structure. No public
+/// Microsoft contract was found for `XHSH`, so that `FourCC` is deliberately
+/// left opaque by the container dispatcher.
+#[must_use]
 pub fn parse_hash(data: &[u8], fourcc: [u8; 4]) -> Option<ShaderHash> {
-    let mut bytes = [0u8; 16];
-    let is_xhsh = &fourcc == b"XHSH";
-
-    if is_xhsh {
-        // XHSH: 8-byte hash, no flags prefix
-        if data.len() >= 8 {
-            bytes[..8].copy_from_slice(&data[..8]);
-            Some(ShaderHash {
-                bytes,
-                len: 8,
-                fourcc,
-            })
-        } else {
-            None
-        }
-    } else if data.len() >= 20 {
-        // HASH chunk: 4 bytes flags + 16 bytes MD5
-        bytes.copy_from_slice(&data[4..20]);
-        Some(ShaderHash {
-            bytes,
-            len: 16,
-            fourcc,
-        })
-    } else if data.len() >= 16 {
-        // Could be a 16-byte hash without flags
-        bytes.copy_from_slice(&data[..16]);
-        Some(ShaderHash {
-            bytes,
-            len: 16,
-            fourcc,
-        })
-    } else {
+    if &fourcc != b"HASH" || data.len() != 20 {
         None
+    } else {
+        let flags = u32::from_le_bytes(data[..4].try_into().ok()?);
+        let bytes = data[4..20].try_into().ok()?;
+        Some(ShaderHash { flags, bytes })
     }
 }
 
 impl ChunkParser<'_> for ShaderHash {
     fn parse(data: &[u8]) -> Option<Self> {
-        // Default to HASH when called via the generic ChunkParser trait.
-        // Prefer calling parse_hash(data, fourcc) directly when the FourCC is known.
         parse_hash(data, *b"HASH")
     }
 }
 
 impl ChunkWriter for ShaderHash {
     fn fourcc(&self) -> [u8; 4] {
-        self.fourcc
+        *b"HASH"
     }
 
     fn write_payload(&self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::new();
-        if self.len == 16 {
-            // HASH: 4-byte flags (0) + 16-byte digest
-            buf.extend_from_slice(&0u32.to_le_bytes());
-            buf.extend_from_slice(&self.bytes[..16]);
-        } else {
-            // XHSH: 8-byte hash
-            buf.extend_from_slice(&self.bytes[..8]);
-        }
+        buf.extend_from_slice(&self.flags.to_le_bytes());
+        buf.extend_from_slice(&self.bytes);
         buf
     }
 }
@@ -88,10 +52,31 @@ impl ChunkWriter for ShaderHash {
 impl fmt::Display for ShaderHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "// Hash: ")?;
-        for i in 0..self.len {
-            write!(f, "{:02x}", self.bytes[i])?;
+        for byte in self.bytes {
+            write!(f, "{byte:02x}")?;
         }
 
+        if self.flags != 0 {
+            write!(f, " (flags=0x{:08X})", self.flags)?;
+        }
         writeln!(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_published_dxil_shader_hash_layout() {
+        let mut bytes = [0u8; 20];
+        bytes[..4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[4..].copy_from_slice(&[0x5a; 16]);
+
+        let parsed = parse_hash(&bytes, *b"HASH").expect("valid HASH");
+        assert_eq!(parsed.flags, 1);
+        assert_eq!(parsed.bytes, [0x5a; 16]);
+        assert_eq!(parsed.write_payload(), bytes);
+        assert!(parse_hash(&bytes[..8], *b"XHSH").is_none());
     }
 }

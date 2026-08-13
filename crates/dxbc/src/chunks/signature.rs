@@ -6,21 +6,31 @@ use core::fmt;
 
 use super::{ChunkWriter, WritableChunk};
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
+use crate::util::StringTableWriter;
 
-use crate::util::{StringTableWriter, read_cstring};
-
-/// A parsed signature chunk, preserving its original FourCC for round-tripping.
+/// A parsed signature chunk, preserving its original `FourCC` for round-tripping.
 ///
-/// Different FourCCs use different binary layouts (element strides, optional
-/// fields). Storing the FourCC ensures `ISG1` stays `ISG1` instead of
+/// Different `FourCCs` use different binary layouts (element strides, optional
+/// fields). Storing the `FourCC` ensures `ISG1` stays `ISG1` instead of
 /// collapsing to `ISGN` on write.
 #[derive(Debug)]
 pub struct Signature<'a> {
-    /// Original FourCC (e.g. `ISGN`, `ISG1`, `OSG5`, `OSGN`, `PCSG`, `PSG1`).
+    /// Original `FourCC` (e.g. `ISGN`, `ISG1`, `OSG5`, `OSGN`, `PCSG`, `PSG1`).
     pub fourcc: [u8; 4],
     /// Parsed signature elements.
     pub elements: Vec<SignatureElement<'a>>,
+    /// Opaque bytes after the last referenced semantic string.
+    ///
+    /// The format has no string-table length field. In practice these bytes
+    /// include compiler-specific DWORD padding and may also contain unreferenced
+    /// strings, so they must be retained verbatim.
+    pub trailing_data: Vec<u8>,
+    /// Original payload retained for a layout-preserving no-op rewrite.
+    #[doc(hidden)]
+    pub original_data: Option<Cow<'a, [u8]>>,
+    /// Canonical encoding of the semantic state at parse time.
+    #[doc(hidden)]
+    pub original_canonical: Option<Vec<u8>>,
 }
 
 impl fmt::Display for Signature<'_> {
@@ -39,7 +49,14 @@ impl ChunkWriter for Signature<'_> {
     }
 
     fn write_payload(&self) -> Vec<u8> {
-        write_signature(self.fourcc, &self.elements).data
+        let canonical =
+            write_signature_with_trailing(self.fourcc, &self.elements, &self.trailing_data).data;
+        if self.original_canonical.as_deref() == Some(canonical.as_slice()) {
+            if let Some(original) = &self.original_data {
+                return original.to_vec();
+            }
+        }
+        canonical
     }
 }
 
@@ -55,13 +72,15 @@ pub enum SignatureVersion {
 }
 
 impl SignatureVersion {
-    /// Derive the version from a FourCC string.
-    pub fn from_fourcc(fourcc: &str) -> Self {
-        match fourcc {
+    /// Derive the version from a `FourCC` string.
+    #[must_use]
+    pub fn from_fourcc(fourcc: &str) -> Option<Self> {
+        Some(match fourcc {
+            "ISGN" | "OSGN" | "PCSG" => Self::V0,
             "OSG5" => Self::V5,
             "ISG1" | "OSG1" | "PSG1" => Self::V1,
-            _ => Self::V0,
-        }
+            _ => return None,
+        })
     }
 
     fn stride(self) -> usize {
@@ -72,11 +91,15 @@ impl SignatureVersion {
         }
     }
 
-    fn has_stream(self) -> bool {
+    /// Whether this layout carries a per-element GS output `stream`.
+    #[must_use]
+    pub fn has_stream(self) -> bool {
         matches!(self, Self::V5 | Self::V1)
     }
 
-    fn has_min_precision(self) -> bool {
+    /// Whether this layout carries a per-element `min_precision` field.
+    #[must_use]
+    pub fn has_min_precision(self) -> bool {
         matches!(self, Self::V1)
     }
 }
@@ -105,7 +128,9 @@ pub enum MinPrecision {
 }
 
 impl MinPrecision {
-    fn from_u32(v: u32) -> Self {
+    /// Converts a raw `D3D_MIN_PRECISION` value to the corresponding variant.
+    #[must_use]
+    pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Default,
             1 => Self::Float16,
@@ -119,7 +144,9 @@ impl MinPrecision {
         }
     }
 
-    fn to_u32(self) -> u32 {
+    /// The raw `D3D_MIN_PRECISION` value for this variant.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
         match self {
             Self::Default => 0,
             Self::Float16 => 1,
@@ -145,12 +172,12 @@ impl fmt::Display for MinPrecision {
             Self::UInt16 => write!(f, " [min16u]"),
             Self::Any16 => write!(f, " [any16]"),
             Self::Any10 => write!(f, " [any10]"),
-            Self::Unknown(v) => write!(f, " [minprec={}]", v),
+            Self::Unknown(v) => write!(f, " [minprec={v}]"),
         }
     }
 }
 
-/// Component data type for signature elements (D3D_REGISTER_COMPONENT_TYPE).
+/// Component data type for signature elements (`D3D_REGISTER_COMPONENT_TYPE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ComponentType {
@@ -178,6 +205,7 @@ pub enum ComponentType {
 
 impl ComponentType {
     /// Converts a raw `D3D_REGISTER_COMPONENT_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Unknown,
@@ -195,6 +223,7 @@ impl ComponentType {
     }
 
     /// Returns the lowercase type name used in disassembly output.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
@@ -211,6 +240,192 @@ impl ComponentType {
     }
 }
 
+/// Signature system value (`D3D_NAME` / `DxilProgramSigSemantic`).
+///
+/// This wire enum is intentionally separate from SHEX's `D3D10_SB_NAME`:
+/// signature chunks use aggregate tessellation-factor values 11–16 and the
+/// pixel-output range 64–70, while SHEX uses per-edge values 11–22.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureSystemValue {
+    /// No system-value interpretation.
+    Undefined,
+    /// `SV_Position`.
+    Position,
+    /// `SV_ClipDistance`.
+    ClipDistance,
+    /// `SV_CullDistance`.
+    CullDistance,
+    /// `SV_RenderTargetArrayIndex`.
+    RenderTargetArrayIndex,
+    /// `SV_ViewportArrayIndex`.
+    ViewportArrayIndex,
+    /// `SV_VertexID`.
+    VertexId,
+    /// `SV_PrimitiveID`.
+    PrimitiveId,
+    /// `SV_InstanceID`.
+    InstanceId,
+    /// `SV_IsFrontFace`.
+    IsFrontFace,
+    /// `SV_SampleIndex`.
+    SampleIndex,
+    /// Quad-domain edge tessellation factors.
+    FinalQuadEdgeTessFactor,
+    /// Quad-domain inside tessellation factors.
+    FinalQuadInsideTessFactor,
+    /// Triangle-domain edge tessellation factors.
+    FinalTriEdgeTessFactor,
+    /// Triangle-domain inside tessellation factor.
+    FinalTriInsideTessFactor,
+    /// Isoline detail tessellation factor.
+    FinalLineDetailTessFactor,
+    /// Isoline density tessellation factor.
+    FinalLineDensityTessFactor,
+    /// `SV_Barycentrics`.
+    Barycentrics,
+    /// `SV_ShadingRate`.
+    ShadingRate,
+    /// `SV_CullPrimitive`.
+    CullPrimitive,
+    /// `SV_Target`.
+    Target,
+    /// `SV_Depth`.
+    Depth,
+    /// `SV_Coverage`.
+    Coverage,
+    /// `SV_DepthGreaterEqual`.
+    DepthGreaterEqual,
+    /// `SV_DepthLessEqual`.
+    DepthLessEqual,
+    /// `SV_StencilRef`.
+    StencilRef,
+    /// `SV_InnerCoverage`.
+    InnerCoverage,
+    /// Unrecognised raw system-value ID.
+    Unknown(u32),
+}
+
+impl SignatureSystemValue {
+    /// Decode a raw signature system-value ID.
+    #[must_use]
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => Self::Undefined,
+            1 => Self::Position,
+            2 => Self::ClipDistance,
+            3 => Self::CullDistance,
+            4 => Self::RenderTargetArrayIndex,
+            5 => Self::ViewportArrayIndex,
+            6 => Self::VertexId,
+            7 => Self::PrimitiveId,
+            8 => Self::InstanceId,
+            9 => Self::IsFrontFace,
+            10 => Self::SampleIndex,
+            11 => Self::FinalQuadEdgeTessFactor,
+            12 => Self::FinalQuadInsideTessFactor,
+            13 => Self::FinalTriEdgeTessFactor,
+            14 => Self::FinalTriInsideTessFactor,
+            15 => Self::FinalLineDetailTessFactor,
+            16 => Self::FinalLineDensityTessFactor,
+            23 => Self::Barycentrics,
+            24 => Self::ShadingRate,
+            25 => Self::CullPrimitive,
+            64 => Self::Target,
+            65 => Self::Depth,
+            66 => Self::Coverage,
+            67 => Self::DepthGreaterEqual,
+            68 => Self::DepthLessEqual,
+            69 => Self::StencilRef,
+            70 => Self::InnerCoverage,
+            value => Self::Unknown(value),
+        }
+    }
+
+    /// Encode this value to its raw signature system-value ID.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::Undefined => 0,
+            Self::Position => 1,
+            Self::ClipDistance => 2,
+            Self::CullDistance => 3,
+            Self::RenderTargetArrayIndex => 4,
+            Self::ViewportArrayIndex => 5,
+            Self::VertexId => 6,
+            Self::PrimitiveId => 7,
+            Self::InstanceId => 8,
+            Self::IsFrontFace => 9,
+            Self::SampleIndex => 10,
+            Self::FinalQuadEdgeTessFactor => 11,
+            Self::FinalQuadInsideTessFactor => 12,
+            Self::FinalTriEdgeTessFactor => 13,
+            Self::FinalTriInsideTessFactor => 14,
+            Self::FinalLineDetailTessFactor => 15,
+            Self::FinalLineDensityTessFactor => 16,
+            Self::Barycentrics => 23,
+            Self::ShadingRate => 24,
+            Self::CullPrimitive => 25,
+            Self::Target => 64,
+            Self::Depth => 65,
+            Self::Coverage => 66,
+            Self::DepthGreaterEqual => 67,
+            Self::DepthLessEqual => 68,
+            Self::StencilRef => 69,
+            Self::InnerCoverage => 70,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// Canonical editable name for a published value.
+    #[must_use]
+    pub fn name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Undefined => "undefined",
+            Self::Position => "position",
+            Self::ClipDistance => "clip_distance",
+            Self::CullDistance => "cull_distance",
+            Self::RenderTargetArrayIndex => "render_target_array_index",
+            Self::ViewportArrayIndex => "viewport_array_index",
+            Self::VertexId => "vertex_id",
+            Self::PrimitiveId => "primitive_id",
+            Self::InstanceId => "instance_id",
+            Self::IsFrontFace => "is_front_face",
+            Self::SampleIndex => "sample_index",
+            Self::FinalQuadEdgeTessFactor => "finalQuadEdgeTessFactor",
+            Self::FinalQuadInsideTessFactor => "finalQuadInsideTessFactor",
+            Self::FinalTriEdgeTessFactor => "finalTriEdgeTessFactor",
+            Self::FinalTriInsideTessFactor => "finalTriInsideTessFactor",
+            Self::FinalLineDetailTessFactor => "finalLineDetailTessFactor",
+            Self::FinalLineDensityTessFactor => "finalLineDensityTessFactor",
+            Self::Barycentrics => "barycentrics",
+            Self::ShadingRate => "shading_rate",
+            Self::CullPrimitive => "cull_primitive",
+            Self::Target => "target",
+            Self::Depth => "depth",
+            Self::Coverage => "coverage",
+            Self::DepthGreaterEqual => "depth_greater_equal",
+            Self::DepthLessEqual => "depth_less_equal",
+            Self::StencilRef => "stencil_ref",
+            Self::InnerCoverage => "inner_coverage",
+            Self::Unknown(_) => return None,
+        })
+    }
+
+    /// Parse a canonical published name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        const VALUES: &[u32] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 24, 25, 64, 65, 66, 67,
+            68, 69, 70,
+        ];
+        VALUES
+            .iter()
+            .copied()
+            .map(Self::from_u32)
+            .find(|value| value.name() == Some(name))
+    }
+}
+
 /// A parsed input or output signature element.
 #[derive(Debug)]
 pub struct SignatureElement<'a> {
@@ -218,8 +433,8 @@ pub struct SignatureElement<'a> {
     pub semantic_name: Cow<'a, str>,
     /// Semantic index (e.g. `0` for `TEXCOORD0`, `1` for `TEXCOORD1`).
     pub semantic_index: u32,
-    /// System-value semantic (`D3D_NAME` enum, 0 = none).
-    pub system_value: u32,
+    /// System-value semantic (`D3D_NAME`).
+    pub system_value: SignatureSystemValue,
     /// Component data type (`D3D_REGISTER_COMPONENT_TYPE` value).
     pub component_type: u32,
     /// Register number (`v#` for inputs, `o#` for outputs).
@@ -228,6 +443,12 @@ pub struct SignatureElement<'a> {
     pub mask: u8,
     /// Read/write mask — which components are actually read or written.
     pub rw_mask: u8,
+    /// Opaque two-byte alignment padding at the end of the base parameter.
+    ///
+    /// The Microsoft structure leaves these bytes unspecified. Compiler and
+    /// assembler output does not consistently zero them, so preserving the
+    /// value is required for byte-exact round trips.
+    pub padding: u16,
     /// GS output stream index (OSG5 / ISG1 / OSG1 / PSG1 only).
     pub stream: Option<u32>,
     /// Minimum precision hint (ISG1 / OSG1 / PSG1 only).
@@ -236,6 +457,7 @@ pub struct SignatureElement<'a> {
 
 impl SignatureElement<'_> {
     /// The component type name.
+    #[must_use]
     pub fn component_type_name(&self) -> &'static str {
         match ComponentType::from_u32(self.component_type) {
             Some(ct) => ct.name(),
@@ -244,6 +466,7 @@ impl SignatureElement<'_> {
     }
 
     /// Length in characters of the "name with index" string.
+    #[must_use]
     pub fn name_with_index_len(&self) -> usize {
         let base = self.semantic_name.len();
         if self.semantic_index > 0 {
@@ -254,6 +477,10 @@ impl SignatureElement<'_> {
     }
 
     /// Write the semantic name with index suffix directly to a formatter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if any write fails.
     pub fn fmt_name_with_index(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.semantic_name)?;
         if self.semantic_index > 0 {
@@ -263,6 +490,10 @@ impl SignatureElement<'_> {
     }
 
     /// Write the columns after the name: type and register.mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if any write fails.
     pub fn fmt_columns(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:>7} v{}.", self.component_type_name(), self.register)?;
         write_mask(f, self.mask)
@@ -274,14 +505,12 @@ impl fmt::Display for SignatureElement<'_> {
         // Use padding via a Display wrapper to avoid allocating a String.
         write!(f, "{:<24} ", DisplayNameWithIndex(self))?;
         self.fmt_columns(f)?;
-        if let Some(s) = self.stream
-            && s != 0
-        {
-            write!(f, " stream={}", s)?;
+        if let Some(s) = self.stream.filter(|stream| *stream != 0) {
+            write!(f, " stream={s}")?;
         }
 
         if let Some(mp) = self.min_precision {
-            write!(f, "{}", mp)?;
+            write!(f, "{mp}")?;
         }
 
         Ok(())
@@ -327,73 +556,172 @@ fn digit_count(mut n: u32) -> usize {
 /// - `"ISGN"` / `"OSGN"` / `"PCSG"` → 24 bytes (base)
 /// - `"OSG5"` → 28 bytes (adds `stream`)
 /// - `"ISG1"` / `"OSG1"` / `"PSG1"` → 32 bytes (adds `stream` + `min_precision`)
-pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Vec<SignatureElement<'a>> {
+#[must_use]
+pub fn parse_signature<'a>(fourcc: &str, data: &'a [u8]) -> Option<Vec<SignatureElement<'a>>> {
+    parse_signature_data(fourcc, data).map(|(elements, _)| elements)
+}
+
+/// Parse a complete signature chunk, including opaque trailing string-table
+/// data needed for a byte-exact rewrite.
+#[must_use]
+pub fn parse_signature_chunk(fourcc: [u8; 4], data: &[u8]) -> Option<Signature<'_>> {
+    let fourcc_str = core::str::from_utf8(&fourcc).ok()?;
+    let (elements, trailing_data) = parse_signature_data(fourcc_str, data)?;
+    let mut signature = Signature {
+        fourcc,
+        elements,
+        trailing_data,
+        original_data: None,
+        original_canonical: None,
+    };
+    signature.original_canonical = Some(
+        write_signature_with_trailing(
+            signature.fourcc,
+            &signature.elements,
+            &signature.trailing_data,
+        )
+        .data,
+    );
+    signature.original_data = Some(Cow::Borrowed(data));
+    Some(signature)
+}
+
+fn parse_signature_data<'a>(
+    fourcc: &str,
+    data: &'a [u8],
+) -> Option<(Vec<SignatureElement<'a>>, Vec<u8>)> {
     if data.len() < 8 {
-        return Vec::new();
+        return None;
     }
 
-    let ver = SignatureVersion::from_fourcc(fourcc);
+    let ver = SignatureVersion::from_fourcc(fourcc)?;
     let stride = ver.stride();
-    let mut c = SliceCursor::new(data);
-    let count = match c.read_u32_le() {
-        Ok(v) => v as usize,
-        Err(_) => return Vec::new(),
-    };
+    let count = usize::try_from(read_u32(data, 0)?).ok()?;
+    let parameter_offset = usize::try_from(read_u32(data, 4)?).ok()?;
+    if parameter_offset < 8 || parameter_offset % 4 != 0 {
+        return None;
+    }
+    let parameter_bytes = count.checked_mul(stride)?;
+    let parameters_end = parameter_offset.checked_add(parameter_bytes)?;
+    if parameters_end > data.len() {
+        return None;
+    }
+
     let mut elements = Vec::with_capacity(count);
+    let mut strings_end = parameters_end;
 
     for i in 0..count {
-        let base = 8 + i * stride;
-        if base + stride > data.len() {
-            break;
-        }
-
-        let _ = c.seek(SeekFrom::Start(base as u64));
+        let base = parameter_offset.checked_add(i.checked_mul(stride)?)?;
+        let mut field = base;
 
         let stream = if ver.has_stream() {
-            Some(c.read_u32_le().unwrap_or(0))
+            let value = read_u32(data, field)?;
+            field = field.checked_add(4)?;
+            if value > 3 {
+                return None;
+            }
+            Some(value)
         } else {
             None
         };
 
-        let name_offset = c.read_u32_le().unwrap_or(0) as usize;
-        let semantic_index = c.read_u32_le().unwrap_or(0);
-        let system_value = c.read_u32_le().unwrap_or(0);
-        let component_type = c.read_u32_le().unwrap_or(0);
-        let register = c.read_u32_le().unwrap_or(0);
-        let mask = c.read_u8_le().unwrap_or(0);
-        let rw_mask = c.read_u8_le().unwrap_or(0);
+        let name_offset = usize::try_from(read_u32(data, field)?).ok()?;
+        field = field.checked_add(4)?;
+        let semantic_index = read_u32(data, field)?;
+        field = field.checked_add(4)?;
+        let system_value = SignatureSystemValue::from_u32(read_u32(data, field)?);
+        field = field.checked_add(4)?;
+        let component_type = read_u32(data, field)?;
+        field = field.checked_add(4)?;
+        let register = read_u32(data, field)?;
+        field = field.checked_add(4)?;
+        let mask = *data.get(field)?;
+        let rw_mask = *data.get(field.checked_add(1)?)?;
+        let padding = u16::from_le_bytes(
+            data.get(field.checked_add(2)?..field.checked_add(4)?)?
+                .try_into()
+                .ok()?,
+        );
+        if mask & 0xf0 != 0 || rw_mask & 0xf0 != 0 {
+            return None;
+        }
+        field = field.checked_add(4)?;
 
         let min_precision = if ver.has_min_precision() {
-            // Skip 2 bytes padding after mask/rw_mask to reach min_precision at +24
-            let _ = c.seek(SeekFrom::Current(2));
-            Some(MinPrecision::from_u32(c.read_u32_le().unwrap_or(0)))
+            let value = MinPrecision::from_u32(read_u32(data, field)?);
+            Some(value)
         } else {
             None
         };
 
+        if name_offset < parameters_end {
+            return None;
+        }
+        let semantic_name = read_cstring_checked(data, name_offset)?;
+        strings_end = strings_end.max(
+            name_offset
+                .checked_add(semantic_name.len())?
+                .checked_add(1)?,
+        );
+
         elements.push(SignatureElement {
-            semantic_name: Cow::Borrowed(read_cstring(data, name_offset)),
+            semantic_name: Cow::Borrowed(semantic_name),
             semantic_index,
             system_value,
             component_type,
             register,
             mask,
             rw_mask,
+            padding,
             stream,
             min_precision,
         });
     }
 
-    elements
+    Some((elements, Vec::from(data.get(strings_end..)?)))
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
+}
+
+fn read_cstring_checked(data: &[u8], offset: usize) -> Option<&str> {
+    let tail = data.get(offset..)?;
+    let length = tail.iter().position(|&byte| byte == 0)?;
+    core::str::from_utf8(&tail[..length]).ok()
 }
 
 /// Serialize a signature chunk back to bytes.
 ///
 /// `fourcc` is the 4-byte chunk tag (e.g. `*b"ISGN"`, `*b"OSG1"`).
 /// Returns a `WritableChunk` ready for `build_dxbc`.
+///
+/// # Panics
+///
+/// Panics if the element count or resulting string-table offset exceeds a
+/// 32-bit signature field.
+#[must_use]
 pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> WritableChunk {
-    let fourcc_str = core::str::from_utf8(&fourcc).unwrap_or("ISGN");
-    let ver = SignatureVersion::from_fourcc(fourcc_str);
+    write_signature_with_trailing(fourcc, elements, &[])
+}
+
+/// Serialize a signature and append preserved bytes after its referenced
+/// semantic strings.
+///
+/// # Panics
+///
+/// Panics if the `fourcc` is not a supported ASCII signature tag, or if an
+/// element count, semantic-name offset, or serialized size exceeds its 32-bit
+/// wire field.
+#[must_use]
+pub fn write_signature_with_trailing(
+    fourcc: [u8; 4],
+    elements: &[SignatureElement<'_>],
+    trailing_data: &[u8],
+) -> WritableChunk {
+    let fourcc_str = core::str::from_utf8(&fourcc).expect("signature FourCC must be ASCII");
+    let ver = SignatureVersion::from_fourcc(fourcc_str).expect("unsupported signature FourCC");
     let stride = ver.stride();
     let w = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
 
@@ -411,7 +739,10 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
     let mut buf = Vec::with_capacity(total);
 
     // Header: count + 8 bytes (the second u32 is always 8 in real DXBC files)
-    w(&mut buf, elements.len() as u32);
+    w(
+        &mut buf,
+        u32::try_from(elements.len()).expect("signature element count exceeds u32"),
+    );
     w(&mut buf, 8);
 
     // Elements
@@ -422,21 +753,105 @@ pub fn write_signature(fourcc: [u8; 4], elements: &[SignatureElement<'_>]) -> Wr
 
         w(&mut buf, name_offsets[i]);
         w(&mut buf, elem.semantic_index);
-        w(&mut buf, elem.system_value);
+        w(&mut buf, elem.system_value.to_u32());
         w(&mut buf, elem.component_type);
         w(&mut buf, elem.register);
         buf.push(elem.mask);
         buf.push(elem.rw_mask);
+        buf.extend_from_slice(&elem.padding.to_le_bytes());
         if ver.has_min_precision() {
-            buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding
-            w(&mut buf, elem.min_precision.map_or(0, |mp| mp.to_u32()));
-        } else {
-            buf.extend_from_slice(&[0u8; 2]); // 2 bytes padding to fill stride
+            w(&mut buf, elem.min_precision.map_or(0, MinPrecision::to_u32));
         }
     }
 
     // String table
     buf.extend_from_slice(&strings.finish());
+    buf.extend_from_slice(trailing_data);
+
+    // New signatures use neutral zero padding. Parsed signatures supply their
+    // exact compiler-specific padding through `trailing_data` above.
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
 
     WritableChunk { fourcc, data: buf }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_system_values_match_the_container_enum() {
+        let cases = [
+            (11, SignatureSystemValue::FinalQuadEdgeTessFactor),
+            (16, SignatureSystemValue::FinalLineDensityTessFactor),
+            (23, SignatureSystemValue::Barycentrics),
+            (25, SignatureSystemValue::CullPrimitive),
+            (64, SignatureSystemValue::Target),
+            (70, SignatureSystemValue::InnerCoverage),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(SignatureSystemValue::from_u32(raw), expected);
+            assert_eq!(expected.to_u32(), raw);
+        }
+    }
+
+    #[test]
+    fn compiler_specific_string_padding_roundtrips() {
+        let element = SignatureElement {
+            semantic_name: Cow::Borrowed("A"),
+            semantic_index: 0,
+            system_value: SignatureSystemValue::Undefined,
+            component_type: 3,
+            register: 0,
+            mask: 0xf,
+            rw_mask: 0xf,
+            padding: 0,
+            stream: Some(0),
+            min_precision: Some(MinPrecision::Default),
+        };
+        let mut bytes = write_signature(*b"ISG1", &[element]).data;
+        let len = bytes.len();
+        bytes[len - 2..].copy_from_slice(&[0xab, 0xcd]);
+
+        let parsed = parse_signature_chunk(*b"ISG1", &bytes).expect("valid signature");
+        assert_eq!(parsed.trailing_data, [0xab, 0xcd]);
+        assert_eq!(parsed.write_payload(), bytes);
+    }
+
+    #[test]
+    fn accepted_parameter_offset_is_preserved_until_edited() {
+        let element = SignatureElement {
+            semantic_name: Cow::Borrowed("A"),
+            semantic_index: 0,
+            system_value: SignatureSystemValue::Undefined,
+            component_type: 3,
+            register: 0,
+            mask: 0xf,
+            rw_mask: 0xf,
+            padding: 0,
+            stream: None,
+            min_precision: None,
+        };
+        let canonical = write_signature(*b"ISGN", &[element]).data;
+        let mut noncanonical = canonical.clone();
+        noncanonical[4..8].copy_from_slice(&12u32.to_le_bytes());
+        noncanonical.splice(8..8, [0xde, 0xad, 0xbe, 0xef]);
+        noncanonical[12..16].copy_from_slice(&36u32.to_le_bytes());
+
+        let mut parsed =
+            parse_signature_chunk(*b"ISGN", &noncanonical).expect("valid offset-based signature");
+        assert_eq!(parsed.write_payload(), noncanonical);
+        parsed.elements[0].semantic_index = 1;
+        let edited = parsed.write_payload();
+        assert_ne!(edited, noncanonical);
+        assert_eq!(
+            parse_signature_chunk(*b"ISGN", &edited)
+                .expect("canonical edited signature")
+                .elements[0]
+                .semantic_index,
+            1
+        );
+    }
 }

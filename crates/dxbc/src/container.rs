@@ -1,11 +1,60 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{ReadLe, Seek, SeekFrom, SliceCursor};
-
 use crate::chunks::WritableChunk;
 
 const DXBC_MAGIC: &[u8; 4] = b"DXBC";
+const DXBC_HEADER_SIZE: usize = 0x20;
+const MAX_CONTAINER_SIZE: usize = 0x8000_0000;
+
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("DXBC size or offset exceeds u32")
+}
+
+/// The two 16-bit fields stored in a DXBC container header.
+///
+/// Microsoft containers currently use major version 1 and minor version 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerVersion {
+    /// Container format major version.
+    pub major: u16,
+    /// Container format minor version.
+    pub minor: u16,
+}
+
+impl ContainerVersion {
+    /// The version emitted by current DXBC/DXIL tooling.
+    pub const CURRENT: Self = Self { major: 1, minor: 0 };
+
+    /// Decode the little-endian packed `u32` used by older versions of this API.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        let bytes = raw.to_le_bytes();
+        Self {
+            major: u16::from_le_bytes([bytes[0], bytes[1]]),
+            minor: u16::from_le_bytes([bytes[2], bytes[3]]),
+        }
+    }
+
+    /// Return the exact packed representation stored in the header.
+    #[must_use]
+    pub fn to_raw(self) -> u32 {
+        u32::from(self.major) | (u32::from(self.minor) << 16)
+    }
+}
+
+impl From<u32> for ContainerVersion {
+    fn from(value: u32) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl fmt::Display for ContainerVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Preserve the historic `.dxbc version=<packed-u32>` text grammar.
+        write!(f, "{}", self.to_raw())
+    }
+}
 
 /// A parsed DXBC container with its chunk table.
 #[derive(Debug)]
@@ -14,6 +63,11 @@ pub struct DxbcContainer<'a> {
     pub offset_in_file: usize,
     /// Total size of the container in bytes (from the DXBC header).
     pub total_size: u32,
+    /// The 16-byte container header digest (bytes 4..20), preserved so the
+    /// container can be rebuilt byte-identically.
+    pub header_hash: [u8; 16],
+    /// Container format version (two 16-bit fields at header bytes 20..24).
+    pub version: ContainerVersion,
     /// Parsed chunk entries.
     pub chunks: Vec<DxbcChunk<'a>>,
 }
@@ -30,13 +84,15 @@ pub struct DxbcChunk<'a> {
 }
 
 impl<'a> DxbcChunk<'a> {
-    /// Returns the FourCC as a UTF-8 string, or `"????"` if it contains
+    /// Returns the `FourCC` as a UTF-8 string, or `"????"` if it contains
     /// invalid bytes.
+    #[must_use]
     pub fn fourcc_str(&self) -> &str {
         core::str::from_utf8(&self.fourcc).unwrap_or("????")
     }
 
     /// Parse the raw chunk payload into a typed [`ChunkData`](crate::chunks::ChunkData).
+    #[must_use]
     pub fn parse(&self) -> crate::chunks::ChunkData<'a> {
         crate::chunks::parse_chunk(self)
     }
@@ -55,19 +111,24 @@ impl fmt::Display for DxbcContainer<'_> {
 }
 
 /// Scan a byte slice for all DXBC containers and parse them.
-pub fn scan_dxbc<'a>(data: &'a [u8]) -> Vec<DxbcContainer<'a>> {
+#[must_use]
+pub fn scan_dxbc(data: &[u8]) -> Vec<DxbcContainer<'_>> {
     let mut results = Vec::new();
     let mut pos = 0;
     while pos + 4 <= data.len() {
-        if let Some(offset) = find_magic(data, pos)
-            && let Some(container) = parse_dxbc(data, offset)
-        {
+        let Some(offset) = find_magic(data, pos) else {
+            break;
+        };
+        if let Some(container) = parse_dxbc(data, offset) {
             let end = offset + container.total_size as usize;
             results.push(container);
             pos = end;
-            continue;
+        } else {
+            // A random payload may contain the ASCII bytes "DXBC". Keep
+            // searching instead of letting one malformed candidate hide a
+            // valid container later in the file.
+            pos = offset + DXBC_MAGIC.len();
         }
-        break;
     }
     results
 }
@@ -76,47 +137,92 @@ fn find_magic(data: &[u8], start: usize) -> Option<usize> {
     memchr::memmem::find(&data[start..], DXBC_MAGIC).map(|p| start + p)
 }
 
-fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
-    if offset + 0x20 > data.len() {
+fn parse_dxbc(data: &[u8], offset: usize) -> Option<DxbcContainer<'_>> {
+    let header_end = offset.checked_add(DXBC_HEADER_SIZE)?;
+    if header_end > data.len() || data.get(offset..offset + 4)? != DXBC_MAGIC {
         return None;
     }
 
-    let mut c = SliceCursor::new(data);
-    c.seek(SeekFrom::Start((offset + 0x18) as u64)).ok()?;
-    let total_size = c.read_u32_le().ok()?;
-    let chunk_count = c.read_u32_le().ok()? as usize;
-
-    if offset + total_size as usize > data.len() {
+    // Header: magic(4), hash(16), version major/minor(2+2), size(4), count(4).
+    let mut header_hash = [0u8; 16];
+    header_hash.copy_from_slice(&data[offset + 4..offset + 20]);
+    let major = u16::from_le_bytes(data[offset + 20..offset + 22].try_into().ok()?);
+    let minor = u16::from_le_bytes(data[offset + 22..offset + 24].try_into().ok()?);
+    let version = ContainerVersion { major, minor };
+    // `IsValidDxilContainer` rejects unknown major versions.
+    if version.major != ContainerVersion::CURRENT.major {
         return None;
     }
 
-    let mut chunks = Vec::with_capacity(chunk_count);
+    let total_size = u32::from_le_bytes(data[offset + 24..offset + 28].try_into().ok()?);
+    let total_size_usize = usize::try_from(total_size).ok()?;
+    if !(DXBC_HEADER_SIZE..=MAX_CONTAINER_SIZE).contains(&total_size_usize) {
+        return None;
+    }
+    let container_end = offset.checked_add(total_size_usize)?;
+    if container_end > data.len() {
+        return None;
+    }
+
+    let chunk_count = usize::try_from(u32::from_le_bytes(
+        data[offset + 28..offset + 32].try_into().ok()?,
+    ))
+    .ok()?;
+    let table_size = chunk_count.checked_mul(4)?;
+    let table_end_rel = DXBC_HEADER_SIZE.checked_add(table_size)?;
+    if table_end_rel > total_size_usize {
+        return None;
+    }
+
+    // Grow only after each untrusted table entry and chunk header has passed
+    // its bounds checks.
+    let mut chunks = Vec::new();
+    let mut expected_chunk_offset = table_end_rel;
     for i in 0..chunk_count {
-        // Read chunk offset from the offset table
-        c.seek(SeekFrom::Start((offset + 0x20 + i * 4) as u64))
-            .ok()?;
-        let chunk_offset_rel = c.read_u32_le().ok()? as usize;
-        let chunk_abs = offset + chunk_offset_rel;
-        if chunk_abs + 8 > data.len() {
-            break;
+        let entry_rel = DXBC_HEADER_SIZE.checked_add(i.checked_mul(4)?)?;
+        let entry_abs = offset.checked_add(entry_rel)?;
+        let chunk_offset_rel = usize::try_from(u32::from_le_bytes(
+            data[entry_abs..entry_abs + 4].try_into().ok()?,
+        ))
+        .ok()?;
+
+        // The canonical format is a contiguous sequence of parts immediately
+        // following the offset table. DXC's validator enforces this exactly.
+        if chunk_offset_rel != expected_chunk_offset {
+            return None;
+        }
+        let chunk_abs = offset.checked_add(chunk_offset_rel)?;
+        let chunk_header_end = chunk_abs.checked_add(8)?;
+        if chunk_header_end > container_end {
+            return None;
         }
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&data[chunk_abs..chunk_abs + 4]);
-        c.seek(SeekFrom::Start((chunk_abs + 4) as u64)).ok()?;
-        let chunk_size = c.read_u32_le().ok()? as usize;
-        let chunk_data_start = chunk_abs + 8;
-        let chunk_data_end = (chunk_data_start + chunk_size).min(data.len());
+        let chunk_size = u32::from_le_bytes(data[chunk_abs + 4..chunk_abs + 8].try_into().ok()?);
+        let chunk_size_usize = usize::try_from(chunk_size).ok()?;
+        let chunk_data_start = chunk_header_end;
+        let chunk_data_end = chunk_data_start.checked_add(chunk_size_usize)?;
+        if chunk_data_end > container_end {
+            return None;
+        }
 
         chunks.push(DxbcChunk {
             fourcc,
-            size: chunk_size as u32,
+            size: chunk_size,
             data: &data[chunk_data_start..chunk_data_end],
         });
+        expected_chunk_offset = chunk_data_end.checked_sub(offset)?;
+    }
+
+    if expected_chunk_offset != total_size_usize {
+        return None;
     }
 
     Some(DxbcContainer {
         offset_in_file: offset,
         total_size,
+        header_hash,
+        version,
         chunks,
     })
 }
@@ -124,34 +230,71 @@ fn parse_dxbc<'a>(data: &'a [u8], offset: usize) -> Option<DxbcContainer<'a>> {
 /// Build a DXBC container from a set of writable chunks.
 ///
 /// Produces a valid DXBC byte stream with the standard header layout:
-/// magic(4) + hash(16 zeros) + version(4) + total_size(4) + chunk_count(4)
+/// magic(4) + hash(16 zeros) + version(4) + `total_size(4)` + `chunk_count(4)`
 /// followed by the chunk offset table and chunk entries.
 ///
 /// The 16-byte hash field is left zeroed — computing the DXBC hash is a
-/// separate concern (typically only the GPU runtime validates it).
+/// separate concern (typically only the GPU runtime validates it). Use
+/// [`build_dxbc_with_header`] to preserve an existing hash/version for
+/// byte-identical reconstruction.
+#[must_use]
 pub fn build_dxbc(chunks: &[WritableChunk]) -> Vec<u8> {
-    let header_size = 0x20 + chunks.len() * 4;
-    let chunks_total: usize = chunks.iter().map(|c| 8 + c.data.len()).sum();
-    let total_size = header_size + chunks_total;
+    build_dxbc_with_header(chunks, ContainerVersion::CURRENT, &[0u8; 16])
+}
+
+/// Build a DXBC container, preserving the given format `version` and 16-byte
+/// header `hash`. The inverse of [`scan_dxbc`] for a single container: feeding
+/// a parsed container's chunks plus its `version`/`header_hash` reproduces the
+/// original bytes (for the standard contiguous chunk layout).
+///
+/// # Panics
+///
+/// Panics if the chunk table, a chunk payload, or the completed container
+/// cannot be represented by the 32-bit offsets and sizes used on the wire.
+#[must_use]
+pub fn build_dxbc_with_header(
+    chunks: &[WritableChunk],
+    version: impl Into<ContainerVersion>,
+    hash: &[u8; 16],
+) -> Vec<u8> {
+    let version = version.into();
+    let header_size = DXBC_HEADER_SIZE
+        .checked_add(
+            chunks
+                .len()
+                .checked_mul(4)
+                .expect("DXBC chunk table overflow"),
+        )
+        .expect("DXBC header size overflow");
+    let chunks_total = chunks.iter().fold(0usize, |total, chunk| {
+        total
+            .checked_add(8)
+            .and_then(|value| value.checked_add(chunk.data.len()))
+            .expect("DXBC chunk data size overflow")
+    });
+    let total_size = header_size
+        .checked_add(chunks_total)
+        .expect("DXBC container size overflow");
 
     let mut buf = Vec::with_capacity(total_size);
     buf.extend_from_slice(b"DXBC");
-    buf.extend_from_slice(&[0u8; 16]); // hash placeholder
-    buf.extend_from_slice(&1u32.to_le_bytes()); // version
-    buf.extend_from_slice(&(total_size as u32).to_le_bytes());
-    buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+    buf.extend_from_slice(hash);
+    buf.extend_from_slice(&version.major.to_le_bytes());
+    buf.extend_from_slice(&version.minor.to_le_bytes());
+    buf.extend_from_slice(&wire_u32(total_size).to_le_bytes());
+    buf.extend_from_slice(&wire_u32(chunks.len()).to_le_bytes());
 
     // Chunk offset table
     let mut offset = header_size;
     for c in chunks {
-        buf.extend_from_slice(&(offset as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(offset).to_le_bytes());
         offset += 8 + c.data.len();
     }
 
     // Chunk entries: fourcc(4) + size(4) + payload
     for c in chunks {
         buf.extend_from_slice(&c.fourcc);
-        buf.extend_from_slice(&(c.data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(c.data.len()).to_le_bytes());
         buf.extend_from_slice(&c.data);
     }
 
@@ -195,21 +338,21 @@ mod tests {
         // Version = 1
         buf.extend_from_slice(&1u32.to_le_bytes());
         // Total size
-        buf.extend_from_slice(&(total_size as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(total_size).to_le_bytes());
         // Chunk count
-        buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&wire_u32(chunks.len()).to_le_bytes());
 
         // Chunk offset table
         let mut offset = header_size;
         for &(_, data) in chunks {
-            buf.extend_from_slice(&(offset as u32).to_le_bytes());
+            buf.extend_from_slice(&wire_u32(offset).to_le_bytes());
             offset += 8 + data.len();
         }
 
         // Chunk data
         for (i, &(fourcc, data)) in chunks.iter().enumerate() {
             buf.extend_from_slice(fourcc);
-            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&wire_u32(data.len()).to_le_bytes());
             buf.extend_from_slice(data);
             let _ = i;
         }

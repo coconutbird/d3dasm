@@ -35,11 +35,16 @@
 //!   `fxc.exe`-compatible disassembly output.
 //! * **Encode** — `shex::encode` serialises a `Program` back to
 //!   bytes, enabling shader modification and round-trip workflows.
+//!
+//! The lossless `.d3dasm` *text* grammar (serialize/parse) lives in the
+//! `d3dasm` crate (`d3dasm::grammar`), built on this crate's IR.
 
 #![no_std]
 extern crate alloc;
 
-/// DXBC chunk parsers for every known chunk FourCC.
+/// DXBC container checksum (the modified-MD5 header digest).
+pub mod checksum;
+/// Typed parsers for recognized DXBC chunk FourCCs; unknown data stays opaque.
 pub mod chunks;
 /// DXBC container (header + chunk table) parser and writer.
 pub mod container;
@@ -50,6 +55,6 @@ pub mod util;
 
 // Re-export the most commonly used types at the crate root.
 pub use chunks::ChunkData;
-pub use container::{DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
+pub use container::{ContainerVersion, DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
 pub use shex::Program;
 pub use shex::disassemble;

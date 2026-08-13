@@ -4,9 +4,9 @@
 //! state against the shader's requirements. The format is versioned:
 //!   - v0: 24-byte runtime info (no signature data)
 //!   - v1: 36-byte runtime info + string table + semantic index table + sig elements + masks
-//!   - v2: 48-byte runtime info (adds NumThreads) + v2 resource bind info (24 bytes)
-//!   - v3: 52-byte runtime info (adds EntryFunctionName)
-//!   - v4: 56-byte runtime info (adds NumBytesGroupSharedMemory)
+//!   - v2: 48-byte runtime info (adds `NumThreads`) + v2 resource bind info (24 bytes)
+//!   - v3: 52-byte runtime info (adds `EntryFunctionName`)
+//!   - v4: 56-byte runtime info (adds `NumBytesGroupSharedMemory`)
 
 pub mod parse;
 pub mod types;
@@ -37,12 +37,12 @@ impl ChunkWriter for PipelineStateValidation {
 impl fmt::Display for PipelineStateValidation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ver = match self.info_size {
-            24 => "v0",
-            36 => "v1",
-            48 => "v2",
-            52 => "v3",
-            56 => "v4",
-            _ => "v?",
+            24..=35 => "v0+",
+            36..=47 => "v1+",
+            48..=51 => "v2+",
+            52..=55 => "v3+",
+            56.. => "v4+",
+            _ => "invalid",
         };
         let kind_name = if let Some(ref ri1) = self.runtime_info_1 {
             types::PSVShaderKind::from_u8(ri1.shader_stage).name()
@@ -53,7 +53,7 @@ impl fmt::Display for PipelineStateValidation {
                 types::ShaderStageInfo::Geometry { .. } => "GS",
                 types::ShaderStageInfo::Hull { .. } => "HS",
                 types::ShaderStageInfo::Domain { .. } => "DS",
-                types::ShaderStageInfo::Compute => "CS",
+                types::ShaderStageInfo::Compute { .. } => "CS",
                 types::ShaderStageInfo::Mesh { .. } => "MS",
                 types::ShaderStageInfo::Amplification { .. } => "AS",
                 types::ShaderStageInfo::Other { .. } => "Unknown",
@@ -67,8 +67,10 @@ impl fmt::Display for PipelineStateValidation {
             self.sig_output_elements.len(),
             self.sig_patch_const_or_prim_elements.len(),
         )?;
-        if let Some(ref ri1) = self.runtime_info_1
-            && ri1.uses_view_id != 0
+        if self
+            .runtime_info_1
+            .as_ref()
+            .is_some_and(|info| info.uses_view_id != 0)
         {
             writeln!(f, "//   uses ViewID")?;
         }

@@ -1,12 +1,11 @@
 //! SFI0 chunk parser — shader feature info flags.
 //!
-//! The SFI0 chunk is an 8-byte (two u32) bitmask that describes which
-//! optional GPU features the shader requires. The first u32 holds the
-//! primary feature flags; the second is reserved (must be zero in practice).
+//! The SFI0 chunk is one little-endian `u64` bitmask describing the shader's
+//! required and optional feature flags.
 
 use core::fmt;
 
-use nostdio::{ReadLe, SliceCursor};
+use nostdio::{Cursor, ReadLe};
 
 use super::{ChunkParser, ChunkWriter};
 
@@ -64,8 +63,22 @@ pub const DERIVS_IN_MESH_AMP_SHADERS: u64 = 0x0100_0000;
 pub const RESOURCE_DESC_HEAP_INDEXING: u64 = 0x0200_0000;
 /// Shader uses sampler descriptor heap indexing.
 pub const SAMPLER_DESC_HEAP_INDEXING: u64 = 0x0400_0000;
-/// Shader uses 64-bit atomics on descriptor heap resources.
-pub const ATOMIC_INT64_ON_DESC_HEAP: u64 = 0x0800_0000;
+/// Reserved experimental SM 6.9 feature bit.
+pub const RESERVED_EXPERIMENTAL: u64 = 0x0800_0000;
+/// Shader uses 64-bit atomics on heap resources.
+pub const ATOMIC_INT64_ON_HEAP_RESOURCE: u64 = 0x1000_0000;
+/// Shader uses advanced texture operations.
+pub const ADVANCED_TEXTURE_OPS: u64 = 0x2000_0000;
+/// Shader uses writable multisampled textures.
+pub const WRITEABLE_MSAA_TEXTURES: u64 = 0x4000_0000;
+/// Shader uses sample comparison with gradient or bias.
+pub const SAMPLE_CMP_GRADIENT_OR_BIAS: u64 = 0x8000_0000;
+/// Shader carries extended command information.
+pub const EXTENDED_COMMAND_INFO: u64 = 0x0000_0001_0000_0000;
+/// Optional call-graph flag: the shader or function uses derivatives.
+pub const USES_DERIVATIVES: u64 = 0x0000_0100_0000_0000;
+/// Optional call-graph flag: the shader or function requires a visible group.
+pub const REQUIRES_GROUP: u64 = 0x0000_0200_0000_0000;
 
 /// Parsed SFI0 chunk.
 #[derive(Debug, Clone, Copy, Default)]
@@ -75,18 +88,14 @@ pub struct ShaderFeatureInfo {
 }
 
 /// Parse an SFI0 chunk.
+#[must_use]
 pub fn parse_sfi0(data: &[u8]) -> Option<ShaderFeatureInfo> {
-    let mut c = SliceCursor::new(data);
-    let lo = if data.len() >= 4 {
-        c.read_u32_le().ok()? as u64
-    } else {
-        0
-    };
-    let hi = if data.len() >= 8 {
-        c.read_u32_le().ok()? as u64
-    } else {
-        0
-    };
+    if data.len() != 8 {
+        return None;
+    }
+    let mut c = Cursor::new(data);
+    let lo = u64::from(c.read_u32_le().ok()?);
+    let hi = u64::from(c.read_u32_le().ok()?);
     Some(ShaderFeatureInfo {
         flags: lo | (hi << 32),
     })
@@ -105,14 +114,14 @@ impl ChunkWriter for ShaderFeatureInfo {
 
     fn write_payload(&self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::with_capacity(8);
-        buf.extend_from_slice(&(self.flags as u32).to_le_bytes());
-        buf.extend_from_slice(&((self.flags >> 32) as u32).to_le_bytes());
+        buf.extend_from_slice(&self.flags.to_le_bytes());
         buf
     }
 }
 
 impl ShaderFeatureInfo {
     /// Returns true if the given flag bit is set.
+    #[must_use]
     pub fn has(&self, flag: u64) -> bool {
         self.flags & flag != 0
     }
@@ -156,7 +165,14 @@ const FLAG_NAMES: &[(u64, &str)] = &[
         "ResourceDescriptorHeapIndexing",
     ),
     (SAMPLER_DESC_HEAP_INDEXING, "SamplerDescriptorHeapIndexing"),
-    (ATOMIC_INT64_ON_DESC_HEAP, "AtomicInt64OnDescriptorHeap"),
+    (RESERVED_EXPERIMENTAL, "ReservedExperimental"),
+    (ATOMIC_INT64_ON_HEAP_RESOURCE, "AtomicInt64OnHeapResource"),
+    (ADVANCED_TEXTURE_OPS, "AdvancedTextureOps"),
+    (WRITEABLE_MSAA_TEXTURES, "WriteableMSAATextures"),
+    (SAMPLE_CMP_GRADIENT_OR_BIAS, "SampleCmpGradientOrBias"),
+    (EXTENDED_COMMAND_INFO, "ExtendedCommandInfo"),
+    (USES_DERIVATIVES, "UsesDerivatives"),
+    (REQUIRES_GROUP, "RequiresGroup"),
 ];
 
 impl fmt::Display for ShaderFeatureInfo {

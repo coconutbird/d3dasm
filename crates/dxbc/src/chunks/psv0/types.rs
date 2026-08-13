@@ -44,6 +44,7 @@ pub enum PSVShaderKind {
 
 impl PSVShaderKind {
     /// Converts a raw `u8` shader stage value to the corresponding variant.
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Pixel,
@@ -67,6 +68,7 @@ impl PSVShaderKind {
     }
 
     /// Returns the short display name (e.g. `"PS"`, `"VS"`, `"CS"`).
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Pixel => "PS",
@@ -90,13 +92,15 @@ impl PSVShaderKind {
     }
 }
 
-/// Shader-kind-specific data from the PSVRuntimeInfo union.
+/// Shader-kind-specific data from the `PSVRuntimeInfo` union.
 #[derive(Debug, Clone)]
 pub enum ShaderStageInfo {
     /// Vertex shader stage info.
     Vertex {
-        /// Whether the shader writes `SV_Position`.
-        output_position_present: bool,
+        /// Raw `char` indicating whether the shader writes `SV_Position`.
+        output_position_present: u8,
+        /// C-struct/union padding following the one-byte field.
+        padding: [u8; 15],
     },
     /// Hull shader stage info.
     Hull {
@@ -113,10 +117,14 @@ pub enum ShaderStageInfo {
     Domain {
         /// Number of input control points.
         input_control_point_count: u32,
-        /// Whether the shader writes `SV_Position`.
-        output_position_present: bool,
+        /// Raw `char` indicating whether the shader writes `SV_Position`.
+        output_position_present: u8,
+        /// C-struct padding before `tessellator_domain`.
+        field_padding: [u8; 3],
         /// Tessellator domain (tri/quad/isoline).
         tessellator_domain: u32,
+        /// Tail padding caused by the enclosing 16-byte union.
+        union_padding: [u8; 4],
     },
     /// Geometry shader stage info.
     Geometry {
@@ -126,15 +134,19 @@ pub enum ShaderStageInfo {
         output_topology: u32,
         /// Bitmask of active output streams.
         output_stream_mask: u32,
-        /// Whether the shader writes `SV_Position`.
-        output_position_present: bool,
+        /// Raw `char` indicating whether the shader writes `SV_Position`.
+        output_position_present: u8,
+        /// C-struct padding following the one-byte field.
+        padding: [u8; 3],
     },
     /// Pixel shader stage info.
     Pixel {
-        /// Whether the shader writes depth.
-        depth_output: bool,
-        /// Whether the shader uses sample-frequency execution.
-        sample_frequency: bool,
+        /// Raw `char` indicating whether the shader writes depth.
+        depth_output: u8,
+        /// Raw `char` indicating sample-frequency execution.
+        sample_frequency: u8,
+        /// C-struct/union padding following the two one-byte fields.
+        padding: [u8; 14],
     },
     /// Mesh shader stage info.
     Mesh {
@@ -153,9 +165,14 @@ pub enum ShaderStageInfo {
     Amplification {
         /// Payload size in bytes for the amplification/mesh handshake.
         payload_size_in_bytes: u32,
+        /// Tail padding caused by the enclosing 16-byte union.
+        padding: [u8; 12],
     },
-    /// Compute shader (no extra fields).
-    Compute,
+    /// Compute shader (the union has no compute-specific member).
+    Compute {
+        /// Uninterpreted 16-byte union contents.
+        raw: [u8; 16],
+    },
     /// Unrecognised shader kind — raw bytes preserved.
     Other {
         /// Raw 16-byte stage info block.
@@ -166,7 +183,7 @@ pub enum ShaderStageInfo {
 /// PSV resource binding (v0: 16 bytes, v2+: 24 bytes).
 #[derive(Debug, Clone)]
 pub struct PSVResourceBindInfo {
-    /// Resource type (`D3D_SHADER_INPUT_TYPE` value).
+    /// Resource type (`PSVResourceType`, not `D3D_SHADER_INPUT_TYPE`).
     pub res_type: u32,
     /// Register space.
     pub space: u32,
@@ -178,9 +195,11 @@ pub struct PSVResourceBindInfo {
     pub res_kind: Option<u32>,
     /// Resource flags (v2+ only).
     pub res_flags: Option<u32>,
+    /// Bytes added after the latest known size-tagged structure.
+    pub extra: Vec<u8>,
 }
 
-/// PSV signature element (12 bytes, PSVSignatureElement0).
+/// PSV signature element (16 bytes, `PSVSignatureElement0`).
 #[derive(Debug, Clone)]
 pub struct PSVSignatureElement {
     /// Offset into the string table for the semantic name.
@@ -203,17 +222,19 @@ pub struct PSVSignatureElement {
     pub dynamic_mask_and_stream: u8,
     /// Reserved byte (must be zero).
     pub reserved: u8,
+    /// Bytes added after the latest known size-tagged structure.
+    pub extra: Vec<u8>,
 }
 
-/// v1+ fields from PSVRuntimeInfo1.
+/// v1+ fields from `PSVRuntimeInfo1`.
 #[derive(Debug, Clone, Default)]
 pub struct PSVRuntimeInfo1 {
     /// Shader stage (`PSVShaderKind` as `u8`).
     pub shader_stage: u8,
     /// Non-zero if the shader uses `SV_ViewID`.
     pub uses_view_id: u8,
-    /// GS max vertex count or HS/DS max tess factor (union).
-    pub max_vert_or_patch_prim: u16,
+    /// Versioned union: GS max vertices, HS/DS patch vectors, or MS metadata.
+    pub stage_union: PSVRuntimeInfo1Union,
     /// Number of input signature elements.
     pub sig_input_elements: u8,
     /// Number of output signature elements.
@@ -226,7 +247,51 @@ pub struct PSVRuntimeInfo1 {
     pub sig_output_vectors: [u8; 4],
 }
 
-/// v2+ fields from PSVRuntimeInfo2.
+/// The 16-bit union stored in `PSVRuntimeInfo1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PSVRuntimeInfo1Union {
+    /// Geometry-shader maximum vertex count.
+    MaxVertexCount(u16),
+    /// Hull/domain patch-constant vector count and its union padding byte.
+    PatchConstantVectors {
+        /// Patch-constant signature vector count.
+        vectors: u8,
+        /// The second byte of the 16-bit union, without an interpretation.
+        padding: u8,
+    },
+    /// Mesh primitive signature vector count and mesh output topology.
+    Mesh {
+        /// Primitive signature vector count.
+        signature_primitive_vectors: u8,
+        /// Mesh output topology.
+        output_topology: u8,
+    },
+    /// Reserved value for stages without a defined interpretation.
+    Reserved(u16),
+}
+
+impl Default for PSVRuntimeInfo1Union {
+    fn default() -> Self {
+        Self::Reserved(0)
+    }
+}
+
+impl PSVRuntimeInfo1 {
+    /// Patch-constant or primitive vector count used by dependency tables.
+    #[must_use]
+    pub const fn patch_constant_or_primitive_vectors(&self) -> u8 {
+        match self.stage_union {
+            PSVRuntimeInfo1Union::PatchConstantVectors { vectors, .. } => vectors,
+            PSVRuntimeInfo1Union::Mesh {
+                signature_primitive_vectors,
+                ..
+            } => signature_primitive_vectors,
+            _ => 0,
+        }
+    }
+}
+
+/// v2+ fields from `PSVRuntimeInfo2`.
 #[derive(Debug, Clone, Default)]
 pub struct PSVRuntimeInfo2 {
     /// Compute/mesh/amplification thread group X dimension.
@@ -256,6 +321,8 @@ pub struct PipelineStateValidation {
     pub entry_function_name: Option<u32>,
     /// v4: group shared memory bytes.
     pub num_bytes_group_shared_memory: Option<u32>,
+    /// Bytes following the newest known runtime-info prefix.
+    pub runtime_info_extra: Vec<u8>,
     /// Size of resource bind info structs (0 if no resources).
     pub resource_bind_info_size: u32,
     /// Resource bindings.
@@ -272,9 +339,9 @@ pub struct PipelineStateValidation {
     pub sig_output_elements: Vec<PSVSignatureElement>,
     /// Patch constant or primitive signature elements.
     pub sig_patch_const_or_prim_elements: Vec<PSVSignatureElement>,
-    /// ViewID output masks per stream (up to 4, each a `Vec<u32>`).
+    /// `ViewID` output masks per stream (up to 4, each a `Vec<u32>`).
     pub view_id_output_masks: Vec<Vec<u32>>,
-    /// ViewID patch constant / primitive output mask (HS/MS only).
+    /// `ViewID` patch constant / primitive output mask (HS/MS only).
     pub view_id_pc_or_prim_output_mask: Vec<u32>,
     /// Input-to-output dependency tables per stream.
     pub input_to_output_tables: Vec<Vec<u32>>,

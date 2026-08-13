@@ -15,12 +15,13 @@ repos:
     hooks:
       - id: fmt
       - id: cargo-check
+        args: ["--workspace", "--all-targets", "--all-features"]
 
   - repo: local
     hooks:
       - id: clippy
         name: clippy
-        entry: cargo clippy --all-targets --workspace -- -D warnings
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

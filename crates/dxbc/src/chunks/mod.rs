@@ -1,4 +1,4 @@
-//! Chunk parsers for every known DXBC chunk type.
+//! Typed parsers for recognized DXBC chunk types.
 //!
 //! Each sub-module handles one (or a family of related) chunk FourCCs.
 //! [`DxbcChunk::parse`](crate::container::DxbcChunk::parse) dispatches on the
@@ -12,6 +12,7 @@ pub mod ildn;
 pub mod lfs0;
 pub mod libf;
 pub mod libh;
+pub mod pdbi;
 pub mod priv_;
 pub mod psv0;
 pub mod rdat;
@@ -19,7 +20,9 @@ pub mod rdef;
 pub mod rts0;
 pub mod sfi0;
 pub mod signature;
+pub mod srci;
 pub mod stat;
+pub mod vers;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -43,7 +46,7 @@ pub trait ChunkParser<'a>: Sized + fmt::Debug + fmt::Display {
 /// A chunk payload serialized to bytes, ready for container assembly.
 #[derive(Debug, Clone)]
 pub struct WritableChunk {
-    /// FourCC identifying this chunk type.
+    /// `FourCC` identifying this chunk type.
     pub fourcc: [u8; 4],
     /// Serialized chunk payload (everything after the 8-byte fourcc+size header).
     pub data: Vec<u8>,
@@ -54,7 +57,7 @@ pub struct WritableChunk {
 /// Not all chunk types implement this — only those with fully understood
 /// binary layouts. Implement incrementally as needed.
 pub trait ChunkWriter {
-    /// The FourCC code to use when writing this chunk.
+    /// The `FourCC` code to use when writing this chunk.
     fn fourcc(&self) -> [u8; 4];
 
     /// Serialize the chunk payload (everything after the 8-byte fourcc+size header).
@@ -79,6 +82,7 @@ pub use ildn::DebugName;
 pub use lfs0::LibraryFunctionSignatures;
 pub use libf::LibraryFunction;
 pub use libh::LibraryHeader;
+pub use pdbi::ShaderPdbInfo;
 pub use priv_::PrivateData;
 pub use psv0::PipelineStateValidation;
 pub use rdat::RuntimeData;
@@ -86,7 +90,9 @@ pub use rdef::ResourceDef;
 pub use rts0::RootSignature;
 pub use sfi0::ShaderFeatureInfo;
 pub use signature::{Signature, SignatureElement};
+pub use srci::SourceInfo;
 pub use stat::ShaderStats;
+pub use vers::CompilerVersion;
 
 /// Parsed payload for any known DXBC chunk.
 ///
@@ -113,20 +119,28 @@ pub enum ChunkData<'a> {
     RootSignature(rts0::RootSignature),
     /// SFI0 — shader feature info flags.
     FeatureInfo(sfi0::ShaderFeatureInfo),
-    /// HASH / XHSH — shader hash.
+    /// HASH — published DXIL shader hash.
     Hash(hash::ShaderHash),
     /// ILDN — debug name.
     DebugName(ildn::DebugName<'a>),
     /// ILDB — embedded debug data blob.
     DebugData(ildb::DebugData<'a>),
+    /// SRCI — embedded source names, contents, and compiler arguments.
+    SourceInfo(srci::SourceInfo<'a>),
+    /// PDBI — compressed or uncompressed RDAT-formatted PDB metadata.
+    ShaderPdbInfo(pdbi::ShaderPdbInfo<'a>),
     /// PRIV — private / tool-specific data.
     PrivateData(priv_::PrivateData<'a>),
     /// DXIL — SM6.0+ shader bytecode (LLVM IR).
     Dxil(dxil::DxilData<'a>),
+    /// STAT — SM6 reflection data encoded as a DXIL program.
+    DxilReflection(dxil::DxilData<'a>),
     /// PSV0 — pipeline state validation.
     PipelineStateValidation(alloc::boxed::Box<psv0::PipelineStateValidation>),
     /// RDAT — runtime data tables.
     RuntimeData(rdat::RuntimeData),
+    /// VERS — compiler version metadata.
+    CompilerVersion(vers::CompilerVersion<'a>),
     /// LIBF — library function table.
     LibraryFunction(libf::LibraryFunction),
     /// LFS0 — library function signatures.
@@ -135,7 +149,7 @@ pub enum ChunkData<'a> {
     LibraryHeader(libh::LibraryHeader),
     /// Unrecognised chunk — preserved so nothing is silently dropped.
     Unknown {
-        /// FourCC identifier of the unknown chunk.
+        /// `FourCC` identifier of the unknown chunk.
         fourcc: [u8; 4],
         /// Raw chunk data.
         data: &'a [u8],
@@ -156,6 +170,7 @@ macro_rules! try_parse {
 }
 
 /// Parse a raw [`DxbcChunk`] into a typed [`ChunkData`].
+#[must_use]
 pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
     let d = chunk.data;
     let cc = chunk.fourcc;
@@ -167,18 +182,27 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
                 data: d,
             },
         },
-        cc_str @ ("ISGN" | "ISG1") => ChunkData::InputSignature(signature::Signature {
-            fourcc: cc,
-            elements: signature::parse_signature(cc_str, d),
-        }),
-        cc_str @ ("OSGN" | "OSG1" | "OSG5") => ChunkData::OutputSignature(signature::Signature {
-            fourcc: cc,
-            elements: signature::parse_signature(cc_str, d),
-        }),
-        cc_str @ ("PCSG" | "PSG1") => ChunkData::PatchConstantSignature(signature::Signature {
-            fourcc: cc,
-            elements: signature::parse_signature(cc_str, d),
-        }),
+        "ISGN" | "ISG1" => match signature::parse_signature_chunk(cc, d) {
+            Some(signature) => ChunkData::InputSignature(signature),
+            None => ChunkData::Unknown {
+                fourcc: cc,
+                data: d,
+            },
+        },
+        "OSGN" | "OSG1" | "OSG5" => match signature::parse_signature_chunk(cc, d) {
+            Some(signature) => ChunkData::OutputSignature(signature),
+            None => ChunkData::Unknown {
+                fourcc: cc,
+                data: d,
+            },
+        },
+        "PCSG" | "PSG1" => match signature::parse_signature_chunk(cc, d) {
+            Some(signature) => ChunkData::PatchConstantSignature(signature),
+            None => ChunkData::Unknown {
+                fourcc: cc,
+                data: d,
+            },
+        },
         "SHEX" | "SHDR" => match crate::shex::decode_with_fourcc(d, cc) {
             Ok(prog) => ChunkData::Shader(prog),
             Err(_) => ChunkData::Unknown {
@@ -188,19 +212,24 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
         },
 
         "RTS0" => try_parse!(d, cc, RootSignature, rts0::RootSignature),
-        "STAT" => try_parse!(d, cc, Stats, stat::ShaderStats),
+        "STAT" => match dxil::parse_dxil_with_fourcc(d, cc) {
+            Some(program) => ChunkData::DxilReflection(program),
+            None => try_parse!(d, cc, Stats, stat::ShaderStats),
+        },
         "SFI0" => try_parse!(d, cc, FeatureInfo, sfi0::ShaderFeatureInfo),
-        "HASH" | "XHSH" => match hash::parse_hash(d, cc) {
+        "HASH" => match hash::parse_hash(d, cc) {
             Some(h) => ChunkData::Hash(h),
             None => ChunkData::Unknown {
                 fourcc: cc,
                 data: d,
             },
         },
-        "ILDN" => try_parse!(d, cc, DebugName, ildn::DebugName),
-        "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData),
-        "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData),
-        "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData),
+        "ILDN" => try_parse!(d, cc, DebugName, ildn::DebugName<'_>),
+        "ILDB" => try_parse!(d, cc, DebugData, ildb::DebugData<'_>),
+        "SRCI" => try_parse!(d, cc, SourceInfo, srci::SourceInfo<'_>),
+        "PDBI" => try_parse!(d, cc, ShaderPdbInfo, pdbi::ShaderPdbInfo<'_>),
+        "PRIV" => try_parse!(d, cc, PrivateData, priv_::PrivateData<'_>),
+        "DXIL" => try_parse!(d, cc, Dxil, dxil::DxilData<'_>),
         "PSV0" => match <psv0::PipelineStateValidation as ChunkParser<'_>>::parse(d) {
             Some(v) => ChunkData::PipelineStateValidation(alloc::boxed::Box::new(v)),
             None => ChunkData::Unknown {
@@ -209,6 +238,7 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
             },
         },
         "RDAT" => try_parse!(d, cc, RuntimeData, rdat::RuntimeData),
+        "VERS" => try_parse!(d, cc, CompilerVersion, vers::CompilerVersion<'_>),
         "LIBF" => try_parse!(d, cc, LibraryFunction, libf::LibraryFunction),
         "LFS0" => try_parse!(
             d,
@@ -227,6 +257,7 @@ pub fn parse_chunk<'a>(chunk: &DxbcChunk<'a>) -> ChunkData<'a> {
 
 impl ChunkData<'_> {
     /// Serialize this chunk back to binary.
+    #[must_use]
     pub fn to_writable(&self) -> Option<WritableChunk> {
         match self {
             ChunkData::Stats(s) => Some(s.to_writable()),
@@ -234,14 +265,17 @@ impl ChunkData<'_> {
             ChunkData::Hash(h) => Some(h.to_writable()),
             ChunkData::DebugName(dn) => Some(dn.to_writable()),
             ChunkData::RootSignature(rs) => Some(rs.to_writable()),
-            ChunkData::InputSignature(sig) => Some(sig.to_writable()),
-            ChunkData::OutputSignature(sig) => Some(sig.to_writable()),
-            ChunkData::PatchConstantSignature(sig) => Some(sig.to_writable()),
+            ChunkData::InputSignature(sig)
+            | ChunkData::OutputSignature(sig)
+            | ChunkData::PatchConstantSignature(sig) => Some(sig.to_writable()),
             ChunkData::DebugData(dd) => Some(dd.to_writable()),
+            ChunkData::SourceInfo(si) => Some(si.to_writable()),
+            ChunkData::ShaderPdbInfo(pi) => Some(pi.to_writable()),
             ChunkData::PrivateData(pd) => Some(pd.to_writable()),
-            ChunkData::Dxil(d) => Some(d.to_writable()),
+            ChunkData::Dxil(d) | ChunkData::DxilReflection(d) => Some(d.to_writable()),
             ChunkData::PipelineStateValidation(p) => Some(p.to_writable()),
             ChunkData::RuntimeData(r) => Some(r.to_writable()),
+            ChunkData::CompilerVersion(v) => Some(v.to_writable()),
             ChunkData::LibraryFunction(lf) => Some(lf.to_writable()),
             ChunkData::LibraryFunctionSignatures(ls) => Some(ls.to_writable()),
             ChunkData::LibraryHeader(lh) => Some(lh.to_writable()),

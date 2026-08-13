@@ -3,10 +3,8 @@
 //! The RDAT chunk carries extended resource and function information for
 //! DXIL-based shaders. The binary format is a "table of parts":
 //!
-//!   - **Versioned** (v1.0+): `RuntimeDataHeader { version, part_count }`,
+//!   - `RuntimeDataHeader { version, part_count }`,
 //!     followed by a `u32` offsets array, then each part at its offset.
-//!   - **Legacy** (pre-release): just `u32 part_count` followed by sequential
-//!     parts.
 //!
 //! Each part has a `RuntimeDataPartHeader { type, size }` followed by data.
 //! Record-based parts (Resource, Function, Subobject, etc.) start with a
@@ -40,12 +38,18 @@ impl ChunkWriter for RuntimeData {
 
 impl fmt::Display for RuntimeData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ver = if self.version >= types::RDAT_VERSION_10 {
-            "v1.0"
-        } else {
-            "legacy"
-        };
-        writeln!(f, "// Runtime Data ({ver}): {} part(s)", self.parts.len())?;
+        match self.version {
+            types::RuntimeDataVersion::V1_0 => {
+                writeln!(f, "// Runtime Data (v1.0): {} part(s)", self.parts.len())?;
+            }
+            types::RuntimeDataVersion::Newer(raw) => {
+                writeln!(
+                    f,
+                    "// Runtime Data (0x{raw:08X}): {} part(s)",
+                    self.parts.len()
+                )?;
+            }
+        }
         for (i, part) in self.parts.iter().enumerate() {
             match part {
                 types::RdatPart::StringBuffer(buf) => {
@@ -63,8 +67,7 @@ impl fmt::Display for RuntimeData {
                     records,
                 } => {
                     let name = types::PartType::from_u32(*part_type)
-                        .map(|pt| pt.name())
-                        .unwrap_or("Unknown");
+                        .map_or("Unknown", types::PartType::name);
                     writeln!(
                         f,
                         "//   [{i}] {name} ({} records, stride {})",

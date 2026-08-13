@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use smallvec::SmallVec;
 
@@ -20,7 +21,7 @@ pub type SmallU32Vec = SmallVec<[u32; 8]>;
 pub type FlagNames = SmallVec<[&'static str; 8]>;
 
 /// A decoded SM4/SM5 shader program.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     /// Shader stage name (`"vs"`, `"ps"`, `"gs"`, `"hs"`, `"ds"`, or `"cs"`).
     pub shader_type: &'static str,
@@ -32,7 +33,7 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
     /// Warnings encountered during decoding (malformed tokens, truncated data, etc.).
     pub warnings: Vec<String>,
-    /// Original FourCC (`SHEX` or `SHDR`) for round-trip serialization.
+    /// Original `FourCC` (`SHEX` or `SHDR`) for round-trip serialization.
     pub fourcc: [u8; 4],
 }
 
@@ -53,7 +54,10 @@ pub struct Instruction {
     /// Each bit corresponds to a component (x=0, y=1, z=2, w=3) that
     /// requires IEEE-compliant results.
     pub precise_mask: u8,
-    /// `resinfo` return type: 0 = float, 1 = rcpFloat, 2 = uint (token0 bits 11–12).
+    /// Instruction return type from token0 bits 11–12.
+    ///
+    /// For `resinfo`: 0 = float, 1 = reciprocal-float, 2 = uint. For
+    /// `sample_info`: 0 = float, 1 = uint.
     pub resinfo_return_type: Option<u32>,
     /// Sync flags for the `sync` opcode (token0 bits 11–14).
     ///
@@ -83,6 +87,14 @@ pub enum InstructionKind {
     Generic {
         /// Instruction operands (destination first, then sources).
         operands: Operands,
+        /// Opaque DWORDs inside the declared instruction length after the
+        /// opcode's specified operands.
+        ///
+        /// Microsoft's parsers advance to the declared instruction end after
+        /// decoding the published operand count. Some FXC output relies on
+        /// that behavior (notably `samplepos` padding), so these tokens must
+        /// not be mistaken for additional operands or discarded.
+        trailing_tokens: SmallU32Vec,
     },
     /// `dcl_globalFlags` — shader-wide capability flags.
     DclGlobalFlags {
@@ -93,15 +105,15 @@ pub enum InstructionKind {
     DclInput {
         /// PS interpolation mode (e.g. `"linear"`, `"constant"`), if applicable.
         interpolation: Option<&'static str>,
-        /// System value semantic (e.g. `"position"`, `"undefined"`), if present.
-        system_value: Option<&'static str>,
+        /// System value semantic, if present.
+        system_value: Option<SystemValue>,
         /// Input register operands.
         operands: Operands,
     },
     /// `dcl_output` / `dcl_output_sgv` — output register declaration.
     DclOutput {
         /// System value semantic, if present.
-        system_value: Option<&'static str>,
+        system_value: Option<SystemValue>,
         /// Output register operands.
         operands: Operands,
     },
@@ -116,6 +128,8 @@ pub enum InstructionKind {
         return_type: [ReturnType; 4],
         /// Resource register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_sampler` — sampler state declaration.
     DclSampler {
@@ -123,6 +137,8 @@ pub enum InstructionKind {
         mode: &'static str,
         /// Sampler register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_constantbuffer` — constant-buffer binding.
     DclConstantBuffer {
@@ -130,6 +146,10 @@ pub enum InstructionKind {
         access: &'static str,
         /// Constant-buffer register operands.
         operands: Operands,
+        /// Constant-buffer size in 16-byte vectors.
+        size: u32,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_temps` — number of temporary registers.
     DclTemps {
@@ -200,6 +220,11 @@ pub enum InstructionKind {
         /// Number of phase instances.
         count: u32,
     },
+    /// `dcl_hs_join_phase_instance_count` — HS join-phase instance count.
+    DclHsJoinPhaseInstanceCount {
+        /// Number of phase instances.
+        count: u32,
+    },
     /// `dcl_thread_group` — compute shader thread group dimensions.
     DclThreadGroup {
         /// Thread group X dimension.
@@ -219,6 +244,8 @@ pub enum InstructionKind {
         return_type: [ReturnType; 4],
         /// UAV register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_uav_raw` — raw (byte-address) UAV declaration.
     DclUavRaw {
@@ -226,6 +253,8 @@ pub enum InstructionKind {
         flags: u32,
         /// UAV register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_uav_structured` — structured UAV declaration.
     DclUavStructured {
@@ -235,11 +264,15 @@ pub enum InstructionKind {
         stride: u32,
         /// UAV register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_resource_raw` — raw (byte-address) SRV declaration.
     DclResourceRaw {
         /// SRV register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
     },
     /// `dcl_resource_structured` — structured SRV declaration.
     DclResourceStructured {
@@ -247,6 +280,24 @@ pub enum InstructionKind {
         stride: u32,
         /// SRV register operands.
         operands: Operands,
+        /// Register space (SM5.1+; zero for earlier shader models).
+        space: u32,
+    },
+    /// `dcl_tgsm_raw` — raw thread-group shared-memory declaration.
+    DclThreadGroupSharedMemoryRaw {
+        /// TGSM register operand.
+        operands: Operands,
+        /// Allocation size in bytes (a multiple of four).
+        byte_count: u32,
+    },
+    /// `dcl_tgsm_structured` — structured thread-group shared-memory declaration.
+    DclThreadGroupSharedMemoryStructured {
+        /// TGSM register operand.
+        operands: Operands,
+        /// Structure stride in bytes.
+        stride: u32,
+        /// Number of structures in the allocation.
+        count: u32,
     },
     /// `dcl_function_body` — declares a function body slot.
     DclFunctionBody {
@@ -262,12 +313,23 @@ pub enum InstructionKind {
     },
     /// `dcl_interface` — declares a class interface binding.
     DclInterface {
+        /// Whether this interface array is dynamically indexed.
+        dynamically_indexed: bool,
         /// Interface index.
         interface_index: u32,
-        /// Number of call sites using this interface.
-        num_call_sites: u32,
+        /// Expected number of entries in each referenced function table.
+        expected_table_size: u32,
+        /// Number of interfaces in the declared array.
+        array_length: u16,
         /// Function table indices for each type implementing the interface.
         table_indices: SmallU32Vec,
+    },
+    /// `interface_call` — dispatch through a class-interface table.
+    InterfaceCall {
+        /// Function slot within the selected function table.
+        function_index: u32,
+        /// Interface operand selecting the table and array element.
+        operands: Operands,
     },
     /// `dcl_index_range` — declares an indexable register range.
     DclIndexRange {
@@ -282,9 +344,16 @@ pub enum InstructionKind {
     CustomData {
         /// Custom data sub-type (ICB, comment, opaque, etc.).
         subtype: CustomDataType,
-        /// ICB values as four-component float vectors.
+        /// ICB values as four-component float vectors (used for
+        /// [`CustomDataType::ImmediateConstantBuffer`]).
         values: Vec<[f32; 4]>,
-        /// Total dword count of the custom data block (including header).
+        /// Raw payload dwords following the two-dword header, preserved for
+        /// non-ICB subtypes (comment/debuginfo/opaque/other) so the block
+        /// re-encodes byte-identically. Empty for ICB (see `values`).
+        raw: Vec<u32>,
+        /// Total dword count of the custom data block (including the
+        /// two-dword header). Equals `2 + values.len() * 4` for ICB, or
+        /// `2 + raw.len()` otherwise.
         raw_dword_count: usize,
     },
 }
@@ -295,6 +364,7 @@ impl Instruction {
     /// Most instruction kinds carry operands; declarations that encode
     /// everything in the token itself (e.g. `dcl_temps`) return an empty
     /// slice.
+    #[must_use]
     pub fn operands(&self) -> &[Operand] {
         self.kind.operands()
     }
@@ -303,9 +373,10 @@ impl Instruction {
 impl InstructionKind {
     /// Returns the operands embedded in this variant, or an empty slice
     /// if the variant has none.
+    #[must_use]
     pub fn operands(&self) -> &[Operand] {
         match self {
-            Self::Generic { operands }
+            Self::Generic { operands, .. }
             | Self::DclInput { operands, .. }
             | Self::DclOutput { operands, .. }
             | Self::DclResource { operands, .. }
@@ -314,8 +385,11 @@ impl InstructionKind {
             | Self::DclUavTyped { operands, .. }
             | Self::DclUavRaw { operands, .. }
             | Self::DclUavStructured { operands, .. }
-            | Self::DclResourceRaw { operands }
+            | Self::DclResourceRaw { operands, .. }
             | Self::DclResourceStructured { operands, .. }
+            | Self::DclThreadGroupSharedMemoryRaw { operands, .. }
+            | Self::DclThreadGroupSharedMemoryStructured { operands, .. }
+            | Self::InterfaceCall { operands, .. }
             | Self::DclIndexRange { operands, .. } => operands,
             _ => &[],
         }
@@ -362,20 +436,21 @@ pub enum GsPrimitive {
 
 impl GsPrimitive {
     /// Decode from the raw 6-bit field stored in token0 bits 11–16.
+    #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {
-            0 => Self::Undefined,
             1 => Self::Point,
             2 => Self::Line,
             3 => Self::Triangle,
             6 => Self::LineAdj,
             7 => Self::TriangleAdj,
-            8..=39 => Self::ControlPointPatch((v - 7) as u8),
-            _ => Self::Undefined,
+            8..=39 => Self::ControlPointPatch((v - 7).to_le_bytes()[0]),
+            _ => Self::Undefined, // Zero and unrecognized values.
         }
     }
 
     /// Encode back to the raw 6-bit integer for token0.
+    #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::Undefined => 0,
@@ -384,11 +459,12 @@ impl GsPrimitive {
             Self::Triangle => 3,
             Self::LineAdj => 6,
             Self::TriangleAdj => 7,
-            Self::ControlPointPatch(n) => n as u32 + 7,
+            Self::ControlPointPatch(n) => u32::from(n) + 7,
         }
     }
 
     /// Returns the disassembly name for this primitive.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -432,7 +508,8 @@ pub enum GsOutputTopology {
 }
 
 impl GsOutputTopology {
-    /// Decode from the raw 3-bit field stored in token0 bits 11–13.
+    /// Decode from the raw 6-bit field stored in token0 bits 11–16.
+    #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {
             1 => Self::PointList,
@@ -449,6 +526,7 @@ impl GsOutputTopology {
     }
 
     /// Encode back to the raw integer for token0.
+    #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::Undefined => 0,
@@ -465,6 +543,7 @@ impl GsOutputTopology {
     }
 
     /// Returns the disassembly name for this topology.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -492,6 +571,10 @@ pub struct Operand {
     pub negate: bool,
     /// Source modifier: absolute value.
     pub abs: bool,
+    /// Minimum arithmetic precision requested by the shader bytecode.
+    pub min_precision: MinPrecision,
+    /// Whether resource indexing through this operand is non-uniform across a wave.
+    pub non_uniform: bool,
     /// Register index levels (immediate, relative, or both).
     pub indices: Indices,
     /// Inline immediate values (for `Immediate32` / `Immediate64` operands).
@@ -509,16 +592,17 @@ pub enum ComponentSelect {
     ZeroComponent,
     /// One component / scalar (`num_components = 1`). No selection bits.
     OneComponent,
-    /// Four-component write mask (`num_components = 2`, sel_mode = 0).
+    /// Four-component write mask (`num_components = 2`, `sel_mode` = 0).
     Mask(u8),
-    /// Four-component swizzle (`num_components = 2`, sel_mode = 1).
+    /// Four-component swizzle (`num_components = 2`, `sel_mode` = 1).
     Swizzle([u8; 4]),
-    /// Four-component single select (`num_components = 2`, sel_mode = 2).
+    /// Four-component single select (`num_components = 2`, `sel_mode` = 2).
     Scalar(u8),
 }
 
 impl ComponentSelect {
     /// Returns the raw `num_components` value (bits 0–1 of operand token).
+    #[must_use]
     pub fn num_components(&self) -> u32 {
         match self {
             Self::ZeroComponent => 0,
@@ -613,6 +697,10 @@ pub enum RegisterType {
     OutputDepthLE,
     /// GPU cycle counter.
     CycleCounter,
+    /// Pixel shader stencil-reference output (`oStencilRef`).
+    OutputStencilRef,
+    /// Pixel shader inner-coverage input (`vInnerCoverage`).
+    InnerCoverage,
     /// Unrecognised register type (raw value preserved).
     Unknown(u32),
 }
@@ -628,6 +716,54 @@ pub enum OperandIndex {
     Relative(Box<Operand>),
     /// Base immediate offset plus a relative operand.
     RelativePlusImm(u32, Box<Operand>),
+    /// 64-bit base immediate offset plus a relative operand.
+    RelativePlusImm64(u64, Box<Operand>),
+}
+
+/// Minimum-precision modifier encoded in an extended operand token.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MinPrecision {
+    /// Use the shader model's default precision.
+    #[default]
+    Default,
+    /// At least IEEE binary16 precision.
+    Float16,
+    /// At least 10-bit (2.8 fixed-point-like) floating-point precision.
+    Float2_8,
+    /// At least signed 16-bit integer precision.
+    Sint16,
+    /// At least unsigned 16-bit integer precision.
+    Uint16,
+    /// Reserved value, preserved for lossless decoding.
+    Reserved(u8),
+}
+
+impl MinPrecision {
+    /// Converts the three-bit wire value into a typed modifier.
+    #[must_use]
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => Self::Default,
+            1 => Self::Float16,
+            2 => Self::Float2_8,
+            4 => Self::Sint16,
+            5 => Self::Uint16,
+            value => Self::Reserved(value.to_le_bytes()[0]),
+        }
+    }
+
+    /// Converts this modifier back to its three-bit wire value.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::Default => 0,
+            Self::Float16 => 1,
+            Self::Float2_8 => 2,
+            Self::Sint16 => 4,
+            Self::Uint16 => 5,
+            Self::Reserved(value) => u32::from(value) & 0x7,
+        }
+    }
 }
 
 /// Resource return type for SRV / UAV declarations.
@@ -655,8 +791,193 @@ pub enum ReturnType {
     Unknown(u32),
 }
 
+/// Declaration system value (`D3D10_SB_NAME` / `D3D11_SB_NAME`).
+///
+/// D3D12 added the final three published values. Unknown values retain their
+/// raw token so decoding and re-encoding remains lossless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemValue {
+    /// No system-value interpretation.
+    Undefined,
+    /// `SV_Position`.
+    Position,
+    /// `SV_ClipDistance`.
+    ClipDistance,
+    /// `SV_CullDistance`.
+    CullDistance,
+    /// `SV_RenderTargetArrayIndex`.
+    RenderTargetArrayIndex,
+    /// `SV_ViewportArrayIndex`.
+    ViewportArrayIndex,
+    /// `SV_VertexID`.
+    VertexId,
+    /// `SV_PrimitiveID`.
+    PrimitiveId,
+    /// `SV_InstanceID`.
+    InstanceId,
+    /// `SV_IsFrontFace`.
+    IsFrontFace,
+    /// `SV_SampleIndex`.
+    SampleIndex,
+    /// Quad edge U=0 tessellation factor.
+    FinalQuadUeq0EdgeTessFactor,
+    /// Quad edge V=0 tessellation factor.
+    FinalQuadVeq0EdgeTessFactor,
+    /// Quad edge U=1 tessellation factor.
+    FinalQuadUeq1EdgeTessFactor,
+    /// Quad edge V=1 tessellation factor.
+    FinalQuadVeq1EdgeTessFactor,
+    /// Quad inside U tessellation factor.
+    FinalQuadUInsideTessFactor,
+    /// Quad inside V tessellation factor.
+    FinalQuadVInsideTessFactor,
+    /// Triangle edge U=0 tessellation factor.
+    FinalTriUeq0EdgeTessFactor,
+    /// Triangle edge V=0 tessellation factor.
+    FinalTriVeq0EdgeTessFactor,
+    /// Triangle edge W=0 tessellation factor.
+    FinalTriWeq0EdgeTessFactor,
+    /// Triangle inside tessellation factor.
+    FinalTriInsideTessFactor,
+    /// Isoline detail tessellation factor.
+    FinalLineDetailTessFactor,
+    /// Isoline density tessellation factor.
+    FinalLineDensityTessFactor,
+    /// `SV_Barycentrics`.
+    Barycentrics,
+    /// `SV_ShadingRate`.
+    ShadingRate,
+    /// `SV_CullPrimitive`.
+    CullPrimitive,
+    /// Unrecognised raw name token.
+    Unknown(u32),
+}
+
+impl SystemValue {
+    /// Decode the low 16 bits of a name token.
+    #[must_use]
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => Self::Undefined,
+            1 => Self::Position,
+            2 => Self::ClipDistance,
+            3 => Self::CullDistance,
+            4 => Self::RenderTargetArrayIndex,
+            5 => Self::ViewportArrayIndex,
+            6 => Self::VertexId,
+            7 => Self::PrimitiveId,
+            8 => Self::InstanceId,
+            9 => Self::IsFrontFace,
+            10 => Self::SampleIndex,
+            11 => Self::FinalQuadUeq0EdgeTessFactor,
+            12 => Self::FinalQuadVeq0EdgeTessFactor,
+            13 => Self::FinalQuadUeq1EdgeTessFactor,
+            14 => Self::FinalQuadVeq1EdgeTessFactor,
+            15 => Self::FinalQuadUInsideTessFactor,
+            16 => Self::FinalQuadVInsideTessFactor,
+            17 => Self::FinalTriUeq0EdgeTessFactor,
+            18 => Self::FinalTriVeq0EdgeTessFactor,
+            19 => Self::FinalTriWeq0EdgeTessFactor,
+            20 => Self::FinalTriInsideTessFactor,
+            21 => Self::FinalLineDetailTessFactor,
+            22 => Self::FinalLineDensityTessFactor,
+            23 => Self::Barycentrics,
+            24 => Self::ShadingRate,
+            25 => Self::CullPrimitive,
+            value => Self::Unknown(value),
+        }
+    }
+
+    /// Encode this value to its raw name-token value.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::Undefined => 0,
+            Self::Position => 1,
+            Self::ClipDistance => 2,
+            Self::CullDistance => 3,
+            Self::RenderTargetArrayIndex => 4,
+            Self::ViewportArrayIndex => 5,
+            Self::VertexId => 6,
+            Self::PrimitiveId => 7,
+            Self::InstanceId => 8,
+            Self::IsFrontFace => 9,
+            Self::SampleIndex => 10,
+            Self::FinalQuadUeq0EdgeTessFactor => 11,
+            Self::FinalQuadVeq0EdgeTessFactor => 12,
+            Self::FinalQuadUeq1EdgeTessFactor => 13,
+            Self::FinalQuadVeq1EdgeTessFactor => 14,
+            Self::FinalQuadUInsideTessFactor => 15,
+            Self::FinalQuadVInsideTessFactor => 16,
+            Self::FinalTriUeq0EdgeTessFactor => 17,
+            Self::FinalTriVeq0EdgeTessFactor => 18,
+            Self::FinalTriWeq0EdgeTessFactor => 19,
+            Self::FinalTriInsideTessFactor => 20,
+            Self::FinalLineDetailTessFactor => 21,
+            Self::FinalLineDensityTessFactor => 22,
+            Self::Barycentrics => 23,
+            Self::ShadingRate => 24,
+            Self::CullPrimitive => 25,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// Canonical text name for a published value.
+    #[must_use]
+    pub fn name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Undefined => "undefined",
+            Self::Position => "position",
+            Self::ClipDistance => "clip_distance",
+            Self::CullDistance => "cull_distance",
+            Self::RenderTargetArrayIndex => "render_target_array_index",
+            Self::ViewportArrayIndex => "viewport_array_index",
+            Self::VertexId => "vertex_id",
+            Self::PrimitiveId => "primitive_id",
+            Self::InstanceId => "instance_id",
+            Self::IsFrontFace => "is_front_face",
+            Self::SampleIndex => "sample_index",
+            Self::FinalQuadUeq0EdgeTessFactor => "finalQuadUeq0EdgeTessFactor",
+            Self::FinalQuadVeq0EdgeTessFactor => "finalQuadVeq0EdgeTessFactor",
+            Self::FinalQuadUeq1EdgeTessFactor => "finalQuadUeq1EdgeTessFactor",
+            Self::FinalQuadVeq1EdgeTessFactor => "finalQuadVeq1EdgeTessFactor",
+            Self::FinalQuadUInsideTessFactor => "finalQuadUInsideTessFactor",
+            Self::FinalQuadVInsideTessFactor => "finalQuadVInsideTessFactor",
+            Self::FinalTriUeq0EdgeTessFactor => "finalTriUeq0EdgeTessFactor",
+            Self::FinalTriVeq0EdgeTessFactor => "finalTriVeq0EdgeTessFactor",
+            Self::FinalTriWeq0EdgeTessFactor => "finalTriWeq0EdgeTessFactor",
+            Self::FinalTriInsideTessFactor => "finalTriInsideTessFactor",
+            Self::FinalLineDetailTessFactor => "finalLineDetailTessFactor",
+            Self::FinalLineDensityTessFactor => "finalLineDensityTessFactor",
+            Self::Barycentrics => "barycentrics",
+            Self::ShadingRate => "shading_rate",
+            Self::CullPrimitive => "cull_primitive",
+            Self::Unknown(_) => return None,
+        })
+    }
+
+    /// Parse a canonical published text name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        (0..=25)
+            .map(Self::from_u32)
+            .find(|value| value.name() == Some(name))
+    }
+}
+
+impl fmt::Display for SystemValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(name) = self.name() {
+            f.write_str(name)
+        } else {
+            write!(f, "0x{:08x}", self.to_u32())
+        }
+    }
+}
+
 impl RegisterType {
     /// Converts a raw `D3D10_SB_OPERAND_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Temp,
@@ -700,11 +1021,14 @@ impl RegisterType {
             38 => Self::OutputDepthGE,
             39 => Self::OutputDepthLE,
             40 => Self::CycleCounter,
+            41 => Self::OutputStencilRef,
+            42 => Self::InnerCoverage,
             v => Self::Unknown(v),
         }
     }
 
     /// Converts back to the raw `D3D10_SB_OPERAND_TYPE` value.
+    #[must_use]
     pub fn to_u32(&self) -> u32 {
         match self {
             Self::Temp => 0,
@@ -748,11 +1072,14 @@ impl RegisterType {
             Self::OutputDepthGE => 38,
             Self::OutputDepthLE => 39,
             Self::CycleCounter => 40,
+            Self::OutputStencilRef => 41,
+            Self::InnerCoverage => 42,
             Self::Unknown(v) => *v,
         }
     }
 
     /// Returns the disassembly prefix string for this register type (e.g. `"r"`, `"v"`, `"cb"`).
+    #[must_use]
     pub fn prefix(&self) -> &'static str {
         match self {
             Self::Temp => "r",
@@ -796,6 +1123,8 @@ impl RegisterType {
             Self::OutputDepthGE => "oDepthGE",
             Self::OutputDepthLE => "oDepthLE",
             Self::CycleCounter => "vCycleCounter",
+            Self::OutputStencilRef => "oStencilRef",
+            Self::InnerCoverage => "vInnerCoverage",
             Self::Unknown(_) => "?reg",
         }
     }
@@ -803,6 +1132,7 @@ impl RegisterType {
 
 impl ReturnType {
     /// Converts a raw `D3D10_SB_RESOURCE_RETURN_TYPE` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             1 => Self::Unorm,
@@ -819,6 +1149,7 @@ impl ReturnType {
     }
 
     /// Converts back to the raw `D3D10_SB_RESOURCE_RETURN_TYPE` value.
+    #[must_use]
     pub fn to_u32(&self) -> u32 {
         match self {
             Self::Unorm => 1,
@@ -835,6 +1166,7 @@ impl ReturnType {
     }
 
     /// Returns the lowercase name used in disassembly output.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unorm => "unorm",
@@ -853,6 +1185,7 @@ impl ReturnType {
 
 impl CustomDataType {
     /// Converts a raw `D3D10_SB_CUSTOMDATA_CLASS` value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Comment,
@@ -864,42 +1197,24 @@ impl CustomDataType {
     }
 }
 
-/// Decode a system value name from its encoded D3D10_SB_NAME / D3D11_SB_NAME value.
+/// Decode a system value name from its encoded `D3D10_SB_NAME` / `D3D11_SB_NAME` value.
+#[must_use]
 pub fn system_value_name(val: u32) -> &'static str {
-    match val {
-        0 => "undefined",
-        1 => "position",
-        2 => "clip_distance",
-        3 => "cull_distance",
-        4 => "render_target_array_index",
-        5 => "viewport_array_index",
-        6 => "vertex_id",
-        7 => "primitive_id",
-        8 => "instance_id",
-        9 => "is_front_face",
-        10 => "sample_index",
-        // Quad tessellation factors (4 edges + 2 inside)
-        11 => "finalQuadUeq0EdgeTessFactor",
-        12 => "finalQuadVeq0EdgeTessFactor",
-        13 => "finalQuadUeq1EdgeTessFactor",
-        14 => "finalQuadVeq1EdgeTessFactor",
-        15 => "finalQuadUInsideTessFactor",
-        16 => "finalQuadVInsideTessFactor",
-        // Triangle tessellation factors (3 edges + 1 inside)
-        17 => "finalTriUeq0EdgeTessFactor",
-        18 => "finalTriVeq0EdgeTessFactor",
-        19 => "finalTriWeq0EdgeTessFactor",
-        20 => "finalTriInsideTessFactor",
-        // Line tessellation factors
-        21 => "finalLineDetailTessFactor",
-        22 => "finalLineDensityTessFactor",
-        23 => "target",
-        24 => "depth",
-        25 => "coverage",
-        26 => "depth_greater_equal",
-        27 => "depth_less_equal",
-        64 => "stencil_ref",
-        65 => "inner_coverage",
-        _ => "unknown_sv",
+    SystemValue::from_u32(val).name().unwrap_or("unknown_sv")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SystemValue;
+
+    #[test]
+    fn d3d12_declaration_system_values_match_the_token_spec() {
+        assert_eq!(SystemValue::from_u32(23), SystemValue::Barycentrics);
+        assert_eq!(SystemValue::from_u32(24), SystemValue::ShadingRate);
+        assert_eq!(SystemValue::from_u32(25), SystemValue::CullPrimitive);
+        for raw in 0..=25 {
+            assert_eq!(SystemValue::from_u32(raw).to_u32(), raw);
+        }
+        assert_eq!(SystemValue::from_u32(64), SystemValue::Unknown(64));
     }
 }

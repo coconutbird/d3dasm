@@ -1,10 +1,8 @@
 //! LIBH chunk parser — library header.
 //!
-//! The LIBH chunk appears alongside LIBF and LFS0 in D3D11 shader
-//! library containers.  It stores top-level metadata for the library
-//! (creator info, version, etc.).
-//!
-//! The internal binary format is undocumented — we expose the raw size.
+//! The LIBH chunk appears alongside LIBF and LFS0 in D3D11 shader library
+//! containers. Its internal binary format has no published Microsoft
+//! contract, so the payload remains opaque rather than exposing guessed fields.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -21,6 +19,7 @@ pub struct LibraryHeader {
 }
 
 /// Parse a LIBH chunk.
+#[must_use]
 pub fn parse_libh(data: &[u8]) -> Option<LibraryHeader> {
     Some(LibraryHeader {
         size: data.len(),

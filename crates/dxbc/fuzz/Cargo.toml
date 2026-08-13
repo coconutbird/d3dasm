@@ -1,0 +1,29 @@
+[package]
+name = "dxbc-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys.workspace = true
+arbitrary.workspace = true
+smallvec.workspace = true
+dxbc.workspace = true
+
+# The `.d3dasm` text grammar (serialize/assemble) lives in d3dasm; the fuzzer
+# exercises it against dxbc's encode/decode.
+d3dasm.workspace = true
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

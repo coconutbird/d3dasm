@@ -2,8 +2,36 @@
 
 use alloc::vec::Vec;
 
-/// RDAT version constant (0x10 = version 1.0).
-pub const RDAT_VERSION_10: u32 = 0x10;
+/// Runtime-data container version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDataVersion {
+    /// Initial versioned RDAT layout.
+    V1_0,
+    /// A newer additive RDAT version accepted by DXC's reader.
+    Newer(u32),
+}
+
+impl RuntimeDataVersion {
+    /// Decode an RDAT version. DXC rejects versions older than 1.0 and accepts
+    /// newer values additively.
+    #[must_use]
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0x10 => Some(Self::V1_0),
+            0x11.. => Some(Self::Newer(value)),
+            _ => None,
+        }
+    }
+
+    /// Encode the raw version value.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::V1_0 => 0x10,
+            Self::Newer(value) => value,
+        }
+    }
+}
 
 /// Known RDAT part types from `RuntimeDataPartType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,10 +61,37 @@ pub enum PartType {
     IONodeTable = 10,
     /// Work-graph node shader info table.
     NodeShaderInfoTable = 11,
+    /// Reserved mesh-node preview record table.
+    ReservedMeshNodesPreviewInfoTable = 12,
+    /// Experimental signature element table.
+    SignatureElementTable = 13,
+    /// Experimental vertex-shader info table.
+    VSInfoTable = 14,
+    /// Experimental pixel-shader info table.
+    PSInfoTable = 15,
+    /// Experimental hull-shader info table.
+    HSInfoTable = 16,
+    /// Experimental domain-shader info table.
+    DSInfoTable = 17,
+    /// Experimental geometry-shader info table.
+    GSInfoTable = 18,
+    /// Experimental compute-shader info table.
+    CSInfoTable = 19,
+    /// Experimental mesh-shader info table.
+    MSInfoTable = 20,
+    /// Experimental amplification-shader info table.
+    ASInfoTable = 21,
+    /// Grouped PDB information table.
+    DxilPdbInfoTable = 0x0001_0001,
+    /// Grouped PDB source table.
+    DxilPdbInfoSourceTable = 0x0001_0002,
+    /// Grouped PDB library table.
+    DxilPdbInfoLibraryTable = 0x0001_0003,
 }
 
 impl PartType {
     /// Converts a raw `u32` part type value to the corresponding variant.
+    #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
             0 => Self::Invalid,
@@ -51,12 +106,26 @@ impl PartType {
             9 => Self::NodeShaderFuncAttribTable,
             10 => Self::IONodeTable,
             11 => Self::NodeShaderInfoTable,
+            12 => Self::ReservedMeshNodesPreviewInfoTable,
+            13 => Self::SignatureElementTable,
+            14 => Self::VSInfoTable,
+            15 => Self::PSInfoTable,
+            16 => Self::HSInfoTable,
+            17 => Self::DSInfoTable,
+            18 => Self::GSInfoTable,
+            19 => Self::CSInfoTable,
+            20 => Self::MSInfoTable,
+            21 => Self::ASInfoTable,
+            0x0001_0001 => Self::DxilPdbInfoTable,
+            0x0001_0002 => Self::DxilPdbInfoSourceTable,
+            0x0001_0003 => Self::DxilPdbInfoLibraryTable,
             _ => return None,
         })
     }
 
     /// Whether this part type uses the record-table layout
-    /// (RuntimeDataTableHeader { count, stride } followed by records).
+    /// (`RuntimeDataTableHeader` { count, stride } followed by records).
+    #[must_use]
     pub fn is_record_table(self) -> bool {
         matches!(
             self,
@@ -68,10 +137,24 @@ impl PartType {
                 | Self::NodeShaderFuncAttribTable
                 | Self::IONodeTable
                 | Self::NodeShaderInfoTable
+                | Self::ReservedMeshNodesPreviewInfoTable
+                | Self::SignatureElementTable
+                | Self::VSInfoTable
+                | Self::PSInfoTable
+                | Self::HSInfoTable
+                | Self::DSInfoTable
+                | Self::GSInfoTable
+                | Self::CSInfoTable
+                | Self::MSInfoTable
+                | Self::ASInfoTable
+                | Self::DxilPdbInfoTable
+                | Self::DxilPdbInfoSourceTable
+                | Self::DxilPdbInfoLibraryTable
         )
     }
 
     /// Returns the display name string for this part type.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Invalid => "Invalid",
@@ -86,6 +169,19 @@ impl PartType {
             Self::NodeShaderFuncAttribTable => "NodeShaderFuncAttribTable",
             Self::IONodeTable => "IONodeTable",
             Self::NodeShaderInfoTable => "NodeShaderInfoTable",
+            Self::ReservedMeshNodesPreviewInfoTable => "ReservedMeshNodesPreviewInfoTable",
+            Self::SignatureElementTable => "SignatureElementTable",
+            Self::VSInfoTable => "VSInfoTable",
+            Self::PSInfoTable => "PSInfoTable",
+            Self::HSInfoTable => "HSInfoTable",
+            Self::DSInfoTable => "DSInfoTable",
+            Self::GSInfoTable => "GSInfoTable",
+            Self::CSInfoTable => "CSInfoTable",
+            Self::MSInfoTable => "MSInfoTable",
+            Self::ASInfoTable => "ASInfoTable",
+            Self::DxilPdbInfoTable => "DxilPdbInfoTable",
+            Self::DxilPdbInfoSourceTable => "DxilPdbInfoSourceTable",
+            Self::DxilPdbInfoLibraryTable => "DxilPdbInfoLibraryTable",
         }
     }
 }
@@ -122,8 +218,14 @@ pub enum RdatPart {
 /// Fully parsed RDAT (Runtime Data) chunk.
 #[derive(Debug, Clone)]
 pub struct RuntimeData {
-    /// RDAT version (typically 0x10).
-    pub version: u32,
+    /// RDAT layout version.
+    pub version: RuntimeDataVersion,
     /// Parsed parts in order.
     pub parts: Vec<RdatPart>,
+    /// Original payload retained for a layout-preserving no-op rewrite.
+    #[doc(hidden)]
+    pub original_data: Option<Vec<u8>>,
+    /// Canonical encoding of the semantic state at parse time.
+    #[doc(hidden)]
+    pub original_canonical: Option<Vec<u8>>,
 }
