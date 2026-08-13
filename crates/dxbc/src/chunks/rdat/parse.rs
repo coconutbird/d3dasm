@@ -1,143 +1,178 @@
-//! RDAT chunk parser.
-//!
-//! Binary layout:
-//!   `RuntimeDataHeader` { u32 version, u32 `part_count` }
-//!   u32 offsets\[`part_count`\]   (relative to header start)
-//!   For each part at offset:
-//!     `RuntimeDataPartHeader` { u32 type, u32 size }
-//!     byte data[ALIGN4(size)]
-//!   For record tables, data starts with:
-//!     `RuntimeDataTableHeader` { u32 `record_count`, u32 `record_stride` }
-//!     byte records[`record_count` * `record_stride`]
+//! Strict parser for the versioned RDAT runtime-reflection layout.
 
 use alloc::vec::Vec;
-use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
 
-use super::types::{PartType, RDAT_VERSION_10, RdatPart, RuntimeData};
+use super::types::{PartType, RdatPart, RuntimeData, RuntimeDataVersion};
 
-fn is_record_table(part_type: u32) -> bool {
-    match PartType::from_u32(part_type) {
-        Some(pt) => pt.is_record_table(),
-        // Unknown part types in the record-table range (future extensions).
-        None => matches!(part_type, 13..=21),
-    }
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
 }
 
-/// Parse an RDAT chunk from raw bytes.
+/// Parse an RDAT payload.
 #[must_use]
 pub fn parse_rdat(data: &[u8]) -> Option<RuntimeData> {
-    if data.len() < 8 {
+    if data.len() < 8 || data.len() % 4 != 0 {
         return None;
     }
-    let mut c = Cursor::new(data);
-
-    let first_u32 = c.read_u32_le().ok()?;
-
-    // Detect version: if first u32 >= 0x10, it's a versioned header.
-    // Pre-release RDAT started directly with part_count (small number).
-    let (version, part_count) = if first_u32 >= RDAT_VERSION_10 {
-        let pc = c.read_u32_le().ok()? as usize;
-        (first_u32, pc)
-    } else {
-        // Legacy: first u32 is part_count, no version field.
-        (0u32, first_u32 as usize)
-    };
-
-    // Read offsets array.
-    let mut offsets = Vec::with_capacity(part_count);
-    for _ in 0..part_count {
-        offsets.push(c.read_u32_le().ok()?);
+    let version = RuntimeDataVersion::from_u32(read_u32(data, 0)?)?;
+    let part_count = usize::try_from(read_u32(data, 4)?).ok()?;
+    let offsets_size = part_count.checked_mul(4)?;
+    let header_end = 8usize.checked_add(offsets_size)?;
+    if header_end > data.len() {
+        return None;
     }
 
-    // Header base: where offsets are relative to.
-    // For versioned: offsets are relative to start of RuntimeDataHeader (byte 0).
-    // For legacy: offsets don't exist — parts follow sequentially.
-    let header_base = if version >= RDAT_VERSION_10 {
-        0usize
-    } else {
-        4usize
-    };
+    let mut offsets = Vec::with_capacity(part_count);
+    for index in 0..part_count {
+        let entry = 8usize.checked_add(index.checked_mul(4)?)?;
+        let offset = usize::try_from(read_u32(data, entry)?).ok()?;
+        if offset < header_end || offset % 4 != 0 || offset.checked_add(8)? > data.len() {
+            return None;
+        }
+        offsets.push(offset);
+    }
 
     let mut parts = Vec::with_capacity(part_count);
-
-    for offset_entry in offsets.iter().take(part_count) {
-        let part_offset = if version >= RDAT_VERSION_10 {
-            header_base.checked_add(usize::try_from(*offset_entry).ok()?)?
-        } else {
-            usize::try_from(c.position()).ok()?
-        };
-
-        if part_offset.checked_add(8)? > data.len() {
-            break;
+    let mut previous_end = header_end;
+    for part_offset in offsets {
+        // DXC's CheckedReader advances monotonically through offsets in table
+        // order. Gaps are allowed, overlaps and backwards offsets are not.
+        if part_offset < previous_end {
+            return None;
         }
-        c.seek(SeekFrom::Start(u64::try_from(part_offset).ok()?))
-            .ok()?;
-
-        let part_type = c.read_u32_le().ok()?;
-        let part_size = usize::try_from(c.read_u32_le().ok()?).ok()?;
-        let part_data_start = usize::try_from(c.position()).ok()?;
+        let part_type_value = read_u32(data, part_offset)?;
+        let part_type = PartType::from_u32(part_type_value);
+        if part_type == Some(PartType::Invalid) {
+            return None;
+        }
+        let part_size = usize::try_from(read_u32(data, part_offset + 4)?).ok()?;
+        if part_size % 4 != 0 {
+            return None;
+        }
+        let part_data_start = part_offset.checked_add(8)?;
         let part_data_end = part_data_start.checked_add(part_size)?;
-
         if part_data_end > data.len() {
-            break;
+            return None;
         }
-
+        previous_end = part_data_end;
         let part_data = &data[part_data_start..part_data_end];
-        let known = PartType::from_u32(part_type);
-        let part = match known {
-            Some(PartType::StringBuffer) => RdatPart::StringBuffer(Vec::from(part_data)),
-            Some(PartType::IndexArrays) => {
-                let count = part_size / 4;
-                let mut indices = Vec::with_capacity(count);
-                for j in 0..count {
-                    let off = part_data_start + j * 4;
-                    let v = u32::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                        data[off + 2],
-                        data[off + 3],
-                    ]);
-                    indices.push(v);
+
+        let part = match part_type {
+            Some(PartType::StringBuffer) => {
+                if !part_data.is_empty() && part_data.last() != Some(&0) {
+                    return None;
                 }
-                RdatPart::IndexArrays(indices)
+                RdatPart::StringBuffer(Vec::from(part_data))
+            }
+            Some(PartType::IndexArrays) => {
+                let mut values = Vec::with_capacity(part_data.len() / 4);
+                for bytes in part_data.chunks_exact(4) {
+                    values.push(u32::from_le_bytes(bytes.try_into().ok()?));
+                }
+                RdatPart::IndexArrays(values)
             }
             Some(PartType::RawBytes) => RdatPart::RawBytes(Vec::from(part_data)),
-            Some(pt) if pt.is_record_table() => parse_record_table(part_data, part_type)?,
-            _ if is_record_table(part_type) => parse_record_table(part_data, part_type)?,
+            Some(kind) if kind.is_record_table() => parse_record_table(part_data, part_type_value)?,
             _ => RdatPart::Unknown {
-                part_type,
+                part_type: part_type_value,
                 data: Vec::from(part_data),
             },
         };
-
         parts.push(part);
     }
 
-    Some(RuntimeData { version, parts })
+    let mut runtime = RuntimeData {
+        version,
+        parts,
+        original_data: None,
+        original_canonical: None,
+    };
+    runtime.original_canonical = Some(super::write::write_rdat_canonical(&runtime));
+    runtime.original_data = Some(data.to_vec());
+    Some(runtime)
 }
 
 fn parse_record_table(data: &[u8], part_type: u32) -> Option<RdatPart> {
     if data.len() < 8 {
         return None;
     }
-    let record_count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    let record_stride = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let stride = record_stride as usize;
-
-    let table_data = &data[8..];
-    let mut records = Vec::with_capacity(record_count);
-    for i in 0..record_count {
-        let start = i * stride;
-        let end = start + stride;
-        if end > table_data.len() {
-            break;
-        }
-        records.push(Vec::from(&table_data[start..end]));
+    let record_count = usize::try_from(read_u32(data, 0)?).ok()?;
+    let record_stride = read_u32(data, 4)?;
+    let stride = usize::try_from(record_stride).ok()?;
+    if stride == 0 || stride % 4 != 0 {
+        return None;
+    }
+    let records_size = record_count.checked_mul(stride)?;
+    if 8usize.checked_add(records_size)? != data.len() {
+        return None;
     }
 
+    let mut records = Vec::with_capacity(record_count);
+    for record in data[8..].chunks_exact(stride) {
+        records.push(Vec::from(record));
+    }
     Some(RdatPart::RecordTable {
         part_type,
         record_stride,
         records,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunks::ChunkWriter;
+
+    #[test]
+    fn rejects_prerelease_and_unaligned_parts() {
+        assert!(parse_rdat(&[1, 0, 0, 0, 0, 0, 0, 0]).is_none());
+        let runtime = RuntimeData {
+            version: RuntimeDataVersion::V1_0,
+            parts: alloc::vec![RdatPart::RawBytes(alloc::vec![1, 2, 3])],
+            original_data: None,
+            original_canonical: None,
+        };
+        let bytes = runtime.write_payload();
+        assert_eq!(read_u32(&bytes, 16), Some(4));
+        assert_eq!(parse_rdat(&bytes).expect("aligned RDAT").parts.len(), 1);
+    }
+
+    #[test]
+    fn accepts_additive_versions_and_non_utf8_string_bytes() {
+        let runtime = RuntimeData {
+            version: RuntimeDataVersion::Newer(0x11),
+            parts: alloc::vec![RdatPart::StringBuffer(alloc::vec![0xff, 0])],
+            original_data: None,
+            original_canonical: None,
+        };
+        let bytes = runtime.write_payload();
+        let parsed = parse_rdat(&bytes).expect("additive RDAT version");
+        assert_eq!(parsed.version, RuntimeDataVersion::Newer(0x11));
+        assert_eq!(parsed.write_payload(), bytes);
+    }
+
+    #[test]
+    fn valid_noncanonical_offsets_are_preserved_until_edited() {
+        let runtime = RuntimeData {
+            version: RuntimeDataVersion::V1_0,
+            parts: alloc::vec![RdatPart::RawBytes(alloc::vec![1, 2, 3, 4])],
+            original_data: None,
+            original_canonical: None,
+        };
+        let canonical = runtime.write_payload();
+        let mut noncanonical = canonical.clone();
+        noncanonical[8..12].copy_from_slice(&16u32.to_le_bytes());
+        noncanonical.splice(12..12, [0xde, 0xad, 0xbe, 0xef]);
+
+        let mut parsed = parse_rdat(&noncanonical).expect("valid offset-based RDAT");
+        assert_eq!(parsed.write_payload(), noncanonical);
+        let RdatPart::RawBytes(data) = &mut parsed.parts[0] else {
+            panic!("raw bytes expected");
+        };
+        data[0] = 9;
+        let edited = parsed.write_payload();
+        assert_ne!(edited, noncanonical);
+        assert_eq!(parse_rdat(&edited).expect("canonical edited RDAT").parts.len(), 1);
+    }
 }

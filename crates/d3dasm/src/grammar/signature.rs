@@ -13,11 +13,13 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use dxbc::chunks::signature::{
-    ComponentType, MinPrecision, Signature, SignatureElement, SignatureVersion,
+    ComponentType, MinPrecision, Signature, SignatureElement, SignatureSystemValue,
+    SignatureVersion,
 };
-use dxbc::shex::{system_value_name, system_value_to_u32};
 
-const SIGNATURE_FIELDS: &[&str] = &["idx", "reg", "type", "mask", "rw", "sv", "stream", "prec"];
+const SIGNATURE_FIELDS: &[&str] = &[
+    "idx", "reg", "type", "mask", "rw", "sv", "stream", "prec", "pad",
+];
 
 /// Component type `D3D_REGISTER_COMPONENT_TYPE` → editable name (or number).
 fn comp_type_to_str(v: u32) -> String {
@@ -87,26 +89,18 @@ fn mask_from(s: &str) -> Option<u8> {
 }
 
 /// System value `D3D_NAME` → editable name (or number for unrecognised values).
-fn sysval_to_str(v: u32) -> String {
-    let n = system_value_name(v);
-    if n == "unknown_sv" {
-        format!("{v}")
-    } else {
-        String::from(n)
-    }
+fn sysval_to_str(value: SignatureSystemValue) -> String {
+    value
+        .name()
+        .map_or_else(|| format!("{}", value.to_u32()), String::from)
 }
 
 /// Parse a system value: a known name or a raw number. Unknown names error.
-fn sysval_from(s: &str) -> Option<u32> {
+fn sysval_from(s: &str) -> Option<SignatureSystemValue> {
     if let Ok(n) = s.parse::<u32>() {
-        return Some(n);
+        return Some(SignatureSystemValue::from_u32(n));
     }
-    let v = system_value_to_u32(s);
-    if v == 0 && s != "undefined" {
-        None // unrecognised name — surface a loud error rather than silently 0
-    } else {
-        Some(v)
-    }
+    SignatureSystemValue::from_name(s)
 }
 
 /// Minimum precision → editable name (or number).
@@ -144,7 +138,9 @@ fn minprec_from(s: &str) -> Option<u32> {
 #[must_use]
 pub fn signature_to_text(sig: &Signature<'_>) -> String {
     let fourcc_str = core::str::from_utf8(&sig.fourcc).unwrap_or("ISGN");
-    let ver = SignatureVersion::from_fourcc(fourcc_str);
+    let Some(ver) = SignatureVersion::from_fourcc(fourcc_str) else {
+        return String::new();
+    };
     let mut out = String::new();
     for e in &sig.elements {
         let name = if e.semantic_name.is_empty() {
@@ -161,7 +157,7 @@ pub fn signature_to_text(sig: &Signature<'_>) -> String {
             mask_to_str(e.mask),
             mask_to_str(e.rw_mask),
         );
-        if e.system_value != 0 {
+        if e.system_value != SignatureSystemValue::Undefined {
             let _ = write!(out, " sv={}", sysval_to_str(e.system_value));
         }
         if let (true, Some(s)) = (ver.has_stream(), e.stream.filter(|stream| *stream != 0)) {
@@ -173,9 +169,33 @@ pub fn signature_to_text(sig: &Signature<'_>) -> String {
         ) {
             let _ = write!(out, " prec={}", minprec_to_str(mp.to_u32()));
         }
+        if e.padding != 0 {
+            let _ = write!(out, " pad=0x{:04x}", e.padding);
+        }
+        out.push('\n');
+    }
+    if !sig.trailing_data.is_empty() {
+        out.push_str("tail=");
+        for byte in &sig.trailing_data {
+            let _ = write!(out, "{byte:02x}");
+        }
         out.push('\n');
     }
     out
+}
+
+fn parse_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 || !value.is_ascii() {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = core::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
+        .collect()
 }
 
 /// Parse the editable text form produced by [`signature_to_text`]. Accepts both
@@ -183,11 +203,19 @@ pub fn signature_to_text(sig: &Signature<'_>) -> String {
 #[must_use]
 pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'static>> {
     let fourcc_str = core::str::from_utf8(&fourcc).unwrap_or("ISGN");
-    let ver = SignatureVersion::from_fourcc(fourcc_str);
+    let ver = SignatureVersion::from_fourcc(fourcc_str)?;
     let mut elements = Vec::new();
+    let mut trailing_data = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("tail=") {
+            if trailing_data.is_some() {
+                return None;
+            }
+            trailing_data = Some(parse_hex_bytes(value)?);
             continue;
         }
         let mut f = line.split_whitespace();
@@ -213,7 +241,7 @@ pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'sta
         let rw_mask = mask_from(m.get("rw")?)?;
         let system_value = match m.get("sv") {
             Some(s) => sysval_from(s)?,
-            None => 0,
+            None => SignatureSystemValue::Undefined,
         };
         let stream = if ver.has_stream() {
             Some(match m.get("stream") {
@@ -231,6 +259,10 @@ pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'sta
         } else {
             None
         };
+        let padding = match m.get("pad") {
+            Some(value) => u16::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()?,
+            None => 0,
+        };
         elements.push(SignatureElement {
             semantic_name,
             semantic_index,
@@ -239,9 +271,16 @@ pub fn signature_from_text(fourcc: [u8; 4], text: &str) -> Option<Signature<'sta
             register,
             mask,
             rw_mask,
+            padding,
             stream,
             min_precision,
         });
     }
-    Some(Signature { fourcc, elements })
+    Some(Signature {
+        fourcc,
+        elements,
+        trailing_data: trailing_data.unwrap_or_default(),
+        original_data: None,
+        original_canonical: None,
+    })
 }

@@ -6,10 +6,10 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use dxbc::chunks::stat::ShaderStats;
+use dxbc::chunks::stat::{ShaderStats, ShaderStatsLayout};
 
 /// Named `(key, value)` view of every STAT counter, in payload order.
-fn stat_fields(s: &ShaderStats) -> [(&'static str, u32); 33] {
+fn stat_fields(s: &ShaderStats) -> [(&'static str, u32); 36] {
     [
         ("instructions", s.instruction_count),
         ("temps", s.temp_register_count),
@@ -33,14 +33,17 @@ fn stat_fields(s: &ShaderStats) -> [(&'static str, u32); 33] {
         ("movs", s.mov_instruction_count),
         ("movcs", s.movc_instruction_count),
         ("conversions", s.conversion_instruction_count),
-        ("gs_input_prim", s.gs_input_primitive),
+        ("bitwise", s.bitwise_instruction_count),
+        ("input_prim", s.input_primitive),
         ("gs_output_topo", s.gs_output_topology),
         ("gs_max_verts", s.gs_max_output_vertex_count),
+        ("tex_gather", s.texture_gather_instructions),
+        ("tex_calc_lod", s.texture_calculate_lod_instructions),
         ("gs_instances", s.gs_instance_count),
-        ("hs_control_points", s.hs_control_points),
+        ("control_points", s.control_points),
         ("hs_output_prim", s.hs_output_primitive),
         ("hs_partitioning", s.hs_partitioning),
-        ("ds_domain", s.ds_tessellator_domain),
+        ("ds_domain", s.tessellator_domain),
         ("barriers", s.barrier_instructions),
         ("interlocked", s.interlocked_instructions),
         ("tex_store", s.texture_store_instructions),
@@ -72,14 +75,17 @@ fn set_field(s: &mut ShaderStats, key: &str, v: u32) -> bool {
         "movs" => s.mov_instruction_count = v,
         "movcs" => s.movc_instruction_count = v,
         "conversions" => s.conversion_instruction_count = v,
-        "gs_input_prim" => s.gs_input_primitive = v,
+        "bitwise" => s.bitwise_instruction_count = v,
+        "input_prim" => s.input_primitive = v,
         "gs_output_topo" => s.gs_output_topology = v,
         "gs_max_verts" => s.gs_max_output_vertex_count = v,
+        "tex_gather" => s.texture_gather_instructions = v,
+        "tex_calc_lod" => s.texture_calculate_lod_instructions = v,
         "gs_instances" => s.gs_instance_count = v,
-        "hs_control_points" => s.hs_control_points = v,
+        "control_points" => s.control_points = v,
         "hs_output_prim" => s.hs_output_primitive = v,
         "hs_partitioning" => s.hs_partitioning = v,
-        "ds_domain" => s.ds_tessellator_domain = v,
+        "ds_domain" => s.tessellator_domain = v,
         "barriers" => s.barrier_instructions = v,
         "interlocked" => s.interlocked_instructions = v,
         "tex_store" => s.texture_store_instructions = v,
@@ -88,12 +94,11 @@ fn set_field(s: &mut ShaderStats, key: &str, v: u32) -> bool {
     true
 }
 
-/// Serialize STAT to editable `key=value` lines (plus `size` and `reserved`,
-/// needed to reproduce the exact byte length).
+/// Serialize STAT to editable `key=value` lines, including its fixed layout size.
 #[must_use]
 pub fn stat_to_text(s: &ShaderStats) -> String {
     let mut o = String::new();
-    let _ = writeln!(o, "size={}", s.raw_size);
+    let _ = writeln!(o, "size={}", s.raw_size());
     let _ = writeln!(
         o,
         "sample_frequency={}",
@@ -102,11 +107,6 @@ pub fn stat_to_text(s: &ShaderStats) -> String {
         } else {
             "false"
         }
-    );
-    let _ = writeln!(
-        o,
-        "reserved={},{},{},{}",
-        s.reserved[0], s.reserved[1], s.reserved[2], s.reserved[3]
     );
     for (k, v) in stat_fields(s) {
         let _ = writeln!(o, "{k}={v}");
@@ -127,14 +127,14 @@ pub fn stat_from_text(text: &str) -> Option<ShaderStats> {
         let (key, val) = line.split_once('=')?;
         let (key, val) = (key.trim(), val.trim());
         match key {
-            "size" => s.raw_size = val.parse().ok()?,
-            "sample_frequency" => s.is_sample_frequency = parse_bool(val)?,
-            "reserved" => {
-                let mut it = val.split(',');
-                for slot in &mut s.reserved {
-                    *slot = it.next()?.trim().parse().ok()?;
-                }
+            "size" => {
+                s.layout = match val.parse().ok()? {
+                    116 => ShaderStatsLayout::Legacy116,
+                    148 => ShaderStatsLayout::Extended148,
+                    _ => return None,
+                };
             }
+            "sample_frequency" => s.is_sample_frequency = parse_bool(val)?,
             other => {
                 let v = val.parse().ok()?;
                 if !set_field(&mut s, other, v) {

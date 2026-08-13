@@ -11,8 +11,8 @@ use core::fmt::Write;
 use super::{AXES, DIMENSIONS, name_of};
 use dxbc::shex::{
     ComponentSelect, CustomDataType, GsPrimitive, Immediates, Indices, Instruction,
-    InstructionKind, Opcode, Operand, OperandIndex, Operands, Program, RegisterType, ReturnType,
-    SmallU32Vec,
+    InstructionKind, MinPrecision, Opcode, Operand, OperandIndex, Operands, Program, RegisterType,
+    ReturnType, SmallU32Vec,
 };
 use dxbc::shex::{ImmediateType, opcode_imm_type};
 
@@ -54,13 +54,25 @@ fn write_program(w: &mut String, p: &Program) -> core::fmt::Result {
 
 fn write_instruction(w: &mut String, instr: &Instruction) -> core::fmt::Result {
     match &instr.kind {
-        InstructionKind::Generic { operands } => {
+        InstructionKind::Generic {
+            operands,
+            trailing_tokens,
+        } => {
             write_mnemonic(w, instr.opcode);
             write_modifiers(w, instr);
             let imm_type = opcode_imm_type(instr.opcode);
             for op in operands {
                 w.push(' ');
                 write_operand(w, op, imm_type);
+            }
+            if !trailing_tokens.is_empty() {
+                w.push_str(" trailing=");
+                for (i, token) in trailing_tokens.iter().enumerate() {
+                    if i > 0 {
+                        w.push(',');
+                    }
+                    write!(w, "0x{token:08x}")?;
+                }
             }
             Ok(())
         }
@@ -221,6 +233,19 @@ fn write_operand(w: &mut String, op: &Operand, imm_type: ImmediateType) {
     if op.abs {
         w.push('|');
     }
+    match op.min_precision {
+        MinPrecision::Default => {}
+        MinPrecision::Float16 => w.push_str("@min16f"),
+        MinPrecision::Float2_8 => w.push_str("@min2_8f"),
+        MinPrecision::Sint16 => w.push_str("@min16i"),
+        MinPrecision::Uint16 => w.push_str("@min16u"),
+        MinPrecision::Reserved(value) => {
+            let _ = write!(w, "@minprec{}", value & 0x7);
+        }
+    }
+    if op.non_uniform {
+        w.push_str("@nonuniform");
+    }
 }
 
 fn write_immediates(w: &mut String, sigil: char, values: &Immediates, imm_type: ImmediateType) {
@@ -292,6 +317,10 @@ fn write_index(w: &mut String, idx: &OperandIndex) {
         OperandIndex::RelativePlusImm(imm, sub) => {
             write_operand(w, sub, ImmediateType::Uint);
             let _ = write!(w, "+{imm}");
+        }
+        OperandIndex::RelativePlusImm64(imm, sub) => {
+            write_operand(w, sub, ImmediateType::Uint);
+            let _ = write!(w, "+{imm}L");
         }
     }
 }
@@ -369,20 +398,31 @@ fn write_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
             sample_count,
             return_type,
             operands,
+            space,
         } => {
             write_op0(w, operands);
             write!(w, " dim={dimension} rt=")?;
             write_return_types(w, return_type);
             // Always emitted so the declaration is self-describing.
             write!(w, " samples={sample_count}")?;
+            write!(w, " space={space}")?;
         }
-        InstructionKind::DclSampler { mode, operands } => {
+        InstructionKind::DclSampler {
+            mode,
+            operands,
+            space,
+        } => {
             write_op0(w, operands);
-            write!(w, " mode={mode}")?;
+            write!(w, " mode={mode} space={space}")?;
         }
-        InstructionKind::DclConstantBuffer { access, operands } => {
+        InstructionKind::DclConstantBuffer {
+            access,
+            operands,
+            size,
+            space,
+        } => {
             write_op0(w, operands);
-            write!(w, " access={access}")?;
+            write!(w, " access={access} size={size} space={space}")?;
         }
         _ => write_special_declaration(w, instr)?,
     }
@@ -396,7 +436,8 @@ fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::
         | InstructionKind::DclGsInstanceCount { count }
         | InstructionKind::DclOutputControlPointCount { count }
         | InstructionKind::DclInputControlPointCount { count }
-        | InstructionKind::DclHsForkPhaseInstanceCount { count } => {
+        | InstructionKind::DclHsForkPhaseInstanceCount { count }
+        | InstructionKind::DclHsJoinPhaseInstanceCount { count } => {
             write!(w, " {count}")?;
         }
         InstructionKind::DclIndexableTemp {
@@ -430,30 +471,56 @@ fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::
             flags,
             return_type,
             operands,
+            space,
         } => {
             write_op0(w, operands);
             write!(w, " dim={dimension} rt=")?;
             write_return_types(w, return_type);
-            write!(w, " flags=0x{flags:x}")?;
+            write!(w, " flags=0x{flags:x} space={space}")?;
         }
-        InstructionKind::DclUavRaw { flags, operands } => {
+        InstructionKind::DclUavRaw {
+            flags,
+            operands,
+            space,
+        } => {
             write_op0(w, operands);
-            write!(w, " flags=0x{flags:x}")?;
+            write!(w, " flags=0x{flags:x} space={space}")?;
         }
         InstructionKind::DclUavStructured {
             flags,
             stride,
             operands,
+            space,
         } => {
             write_op0(w, operands);
-            write!(w, " stride={stride} flags=0x{flags:x}")?;
+            write!(w, " stride={stride} flags=0x{flags:x} space={space}")?;
         }
-        InstructionKind::DclResourceRaw { operands } => {
+        InstructionKind::DclResourceRaw { operands, space } => {
             write_op0(w, operands);
+            write!(w, " space={space}")?;
         }
-        InstructionKind::DclResourceStructured { stride, operands } => {
+        InstructionKind::DclResourceStructured {
+            stride,
+            operands,
+            space,
+        } => {
             write_op0(w, operands);
-            write!(w, " stride={stride}")?;
+            write!(w, " stride={stride} space={space}")?;
+        }
+        InstructionKind::DclThreadGroupSharedMemoryRaw {
+            operands,
+            byte_count,
+        } => {
+            write_op0(w, operands);
+            write!(w, " bytes={byte_count}")?;
+        }
+        InstructionKind::DclThreadGroupSharedMemoryStructured {
+            operands,
+            stride,
+            count,
+        } => {
+            write_op0(w, operands);
+            write!(w, " stride={stride} count={count}")?;
         }
         InstructionKind::DclFunctionBody { index } => {
             write!(w, " {index}")?;
@@ -466,12 +533,25 @@ fn write_special_declaration(w: &mut String, instr: &Instruction) -> core::fmt::
             write_u32_list(w, body_indices);
         }
         InstructionKind::DclInterface {
+            dynamically_indexed,
             interface_index,
-            num_call_sites,
+            expected_table_size,
+            array_length,
             table_indices,
         } => {
-            write!(w, " {interface_index} {num_call_sites} ")?;
+            write!(
+                w,
+                " {interface_index} {expected_table_size} {array_length} {} ",
+                u8::from(*dynamically_indexed)
+            )?;
             write_u32_list(w, table_indices);
+        }
+        InstructionKind::InterfaceCall {
+            function_index,
+            operands,
+        } => {
+            write!(w, " {function_index}")?;
+            write_op0(w, operands);
         }
         InstructionKind::DclIndexRange { operands, count } => {
             write_op0(w, operands);

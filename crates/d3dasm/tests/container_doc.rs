@@ -19,6 +19,7 @@ fn ret_program() -> Vec<u8> {
         resource_return_type: None,
         kind: InstructionKind::Generic {
             operands: dxbc::shex::Operands::new(),
+            trailing_tokens: dxbc::shex::SmallU32Vec::new(),
         },
     };
     let program = Program {

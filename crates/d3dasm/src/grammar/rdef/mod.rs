@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use dxbc::chunks::rdef::{
-    CBufferDef, CBufferVariable, MemberDesc, ResourceBinding, ResourceDef, TypeDesc,
+    CBufferDef, CBufferVariable, MemberDesc, Rd11Header, ResourceBinding, ResourceDef, TypeDesc,
 };
 
 /// Serialize an RDEF to a flat, editable `key=value` text form. Returns `None`
@@ -56,9 +56,9 @@ pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
     let _ = writeln!(o, "version=0x{:08x}", rd.target_version);
     let _ = writeln!(o, "flags=0x{:x}", rd.compile_flags);
     let _ = writeln!(o, "creator={}", rd.creator);
-    if let Some(rd11) = &rd.rd11_extra {
+    if let Some(rd11) = rd.rd11 {
         let _ = write!(o, "rd11=");
-        for (i, x) in rd11.iter().enumerate() {
+        for (i, x) in rd11.to_words().iter().enumerate() {
             let _ = write!(o, "{}{x:x}", if i == 0 { "" } else { "," });
         }
         let _ = writeln!(o);
@@ -66,7 +66,7 @@ pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
     for b in &rd.bindings {
         let _ = writeln!(
             o,
-            "binding {} input={} return={} dim={} samples={} slot={} count={} flags={:x}",
+            "binding {} input={} return={} dim={} samples={} slot={} count={} flags={:x} space={} id={}",
             b.name,
             b.input_type,
             b.return_type,
@@ -74,7 +74,9 @@ pub fn rdef_to_text(rd: &ResourceDef<'_>) -> Option<String> {
             b.num_samples,
             b.bind_point,
             b.bind_count,
-            b.flags
+            b.flags,
+            b.space,
+            b.id
         );
     }
     for cb in &rd.constant_buffers {
@@ -210,6 +212,12 @@ fn parse_flat_record(resource_def: &mut ResourceDef<'static>, line: &str) -> Opt
             bind_point: parse_decimal(&fields, "slot")?,
             bind_count: parse_decimal(&fields, "count")?,
             flags: parse_hex_field(&fields, "flags")?,
+            space: fields
+                .get("space")
+                .map_or(Some(0), |value| value.parse().ok())?,
+            id: fields
+                .get("id")
+                .map_or(Some(0), |value| value.parse().ok())?,
         }),
         "cbuffer" => resource_def.constant_buffers.push(CBufferDef {
             name: Cow::Owned(String::from(name)),
@@ -271,7 +279,9 @@ pub fn rdef_from_text(text: &str) -> Option<ResourceDef<'static>> {
         creator: Cow::Owned(String::new()),
         target_version: 0,
         compile_flags: 0,
-        rd11_extra: None,
+        rd11: None,
+        original_data: None,
+        original_canonical: None,
     };
 
     for line in text.lines() {
@@ -300,7 +310,7 @@ pub fn rdef_from_text(text: &str) -> Option<ResourceDef<'static>> {
             for slot in &mut a {
                 *slot = u32::from_str_radix(it.next()?.trim(), 16).ok()?;
             }
-            rd.rd11_extra = Some(a);
+            rd.rd11 = Some(Rd11Header::from_words(a));
             continue;
         }
 

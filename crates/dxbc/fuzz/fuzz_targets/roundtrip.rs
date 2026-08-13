@@ -7,7 +7,7 @@
 //!
 //! Run with:  cargo +nightly fuzz run roundtrip
 
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 
 use arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
@@ -15,8 +15,8 @@ use smallvec::SmallVec;
 
 use d3dasm::{assemble, serialize};
 use dxbc::shex::{
-    ComponentSelect, Immediates, Indices, Instruction, InstructionKind, Opcode, Operand,
-    OperandIndex, Operands, Program, RegisterType, decode, encode,
+    ComponentSelect, Immediates, Indices, Instruction, InstructionKind, MinPrecision, Opcode,
+    Operand, OperandIndex, Operands, Program, RegisterType, decode, encode,
 };
 
 const FUZZ_OPCODES: &[Opcode] = &[
@@ -70,6 +70,8 @@ fn gen_simple_operand(u: &mut Unstructured<'_>) -> R<Operand> {
         components: ComponentSelect::Scalar(u.int_in_range(0u8..=3)?),
         negate: u.arbitrary()?,
         abs: false,
+        min_precision: MinPrecision::Default,
+        non_uniform: false,
         indices,
         immediate_values: SmallVec::new(),
     })
@@ -105,6 +107,8 @@ fn gen_operand(u: &mut Unstructured<'_>) -> R<Operand> {
             components: comp,
             negate: u.arbitrary()?,
             abs: u.arbitrary()?,
+            min_precision: MinPrecision::Default,
+            non_uniform: false,
             indices: SmallVec::new(),
             immediate_values: values,
         });
@@ -130,6 +134,8 @@ fn gen_operand(u: &mut Unstructured<'_>) -> R<Operand> {
         components: gen_components(u)?,
         negate: u.arbitrary()?,
         abs: u.arbitrary()?,
+        min_precision: MinPrecision::Default,
+        non_uniform: false,
         indices,
         immediate_values: SmallVec::new(),
     })
@@ -158,7 +164,10 @@ fn gen_instruction(u: &mut Unstructured<'_>) -> R<Instruction> {
         tex_offsets: None,
         resource_dim: None,
         resource_return_type: None,
-        kind: InstructionKind::Generic { operands },
+        kind: InstructionKind::Generic {
+            operands,
+            trailing_tokens: SmallVec::new(),
+        },
     };
     if u.int_in_range(0u8..=3)? == 0 {
         i.resinfo_return_type = Some(u.int_in_range(0u32..=2)?);

@@ -449,6 +449,39 @@ pub enum Opcode {
     Itod,
     /// Unsigned integer to double conversion.
     Utod,
+    // WDDM 1.3 tiled-resource status-feedback opcodes (219–234)
+    /// Gather four texels and return tiled-resource status.
+    Gather4Feedback,
+    /// Comparison gather and return tiled-resource status.
+    Gather4CFeedback,
+    /// Gather with programmable offsets and return tiled-resource status.
+    Gather4PoFeedback,
+    /// Comparison gather with programmable offsets and status.
+    Gather4PoCFeedback,
+    /// Resource load and tiled-resource status.
+    LdFeedback,
+    /// Multisample resource load and tiled-resource status.
+    LdMsFeedback,
+    /// Typed UAV load and tiled-resource status.
+    LdUavTypedFeedback,
+    /// Raw-buffer load and tiled-resource status.
+    LdRawFeedback,
+    /// Structured-buffer load and tiled-resource status.
+    LdStructuredFeedback,
+    /// Explicit-LOD sample and tiled-resource status.
+    SampleLFeedback,
+    /// Zero-LOD comparison sample and tiled-resource status.
+    SampleCLzFeedback,
+    /// Clamped sample and tiled-resource status.
+    SampleClampFeedback,
+    /// Bias-and-clamp sample and tiled-resource status.
+    SampleBClampFeedback,
+    /// Gradient-and-clamp sample and tiled-resource status.
+    SampleDClampFeedback,
+    /// Comparison-and-clamp sample and tiled-resource status.
+    SampleCClampFeedback,
+    /// Test whether a tiled-resource access was fully mapped.
+    CheckAccessFullyMapped,
     /// Unknown or unrecognised opcode (preserved for forward compatibility).
     Unknown(u32),
 }
@@ -685,6 +718,24 @@ macro_rules! opcode_from_u32 {
             215 => Self::Dtou,
             216 => Self::Itod,
             217 => Self::Utod,
+            // 218 = RESERVED0 (end of D3D11.1)
+            // WDDM 1.3 feedback opcodes (219-234)
+            219 => Self::Gather4Feedback,
+            220 => Self::Gather4CFeedback,
+            221 => Self::Gather4PoFeedback,
+            222 => Self::Gather4PoCFeedback,
+            223 => Self::LdFeedback,
+            224 => Self::LdMsFeedback,
+            225 => Self::LdUavTypedFeedback,
+            226 => Self::LdRawFeedback,
+            227 => Self::LdStructuredFeedback,
+            228 => Self::SampleLFeedback,
+            229 => Self::SampleCLzFeedback,
+            230 => Self::SampleClampFeedback,
+            231 => Self::SampleBClampFeedback,
+            232 => Self::SampleDClampFeedback,
+            233 => Self::SampleCClampFeedback,
+            234 => Self::CheckAccessFullyMapped,
             _ => Self::Unknown($value),
         }
     };
@@ -908,6 +959,22 @@ macro_rules! opcode_to_u32 {
             Self::Dtou => 215,
             Self::Itod => 216,
             Self::Utod => 217,
+            Self::Gather4Feedback => 219,
+            Self::Gather4CFeedback => 220,
+            Self::Gather4PoFeedback => 221,
+            Self::Gather4PoCFeedback => 222,
+            Self::LdFeedback => 223,
+            Self::LdMsFeedback => 224,
+            Self::LdUavTypedFeedback => 225,
+            Self::LdRawFeedback => 226,
+            Self::LdStructuredFeedback => 227,
+            Self::SampleLFeedback => 228,
+            Self::SampleCLzFeedback => 229,
+            Self::SampleClampFeedback => 230,
+            Self::SampleBClampFeedback => 231,
+            Self::SampleDClampFeedback => 232,
+            Self::SampleCClampFeedback => 233,
+            Self::CheckAccessFullyMapped => 234,
             Self::Unknown(v) => *v,
         }
     };
@@ -1132,6 +1199,23 @@ macro_rules! opcode_name {
             Self::Dtou => "dtou",
             Self::Itod => "itod",
             Self::Utod => "utod",
+            // WDDM 1.3 tiled-resource status feedback
+            Self::Gather4Feedback => "gather4_s",
+            Self::Gather4CFeedback => "gather4_c_s",
+            Self::Gather4PoFeedback => "gather4_po_s",
+            Self::Gather4PoCFeedback => "gather4_po_c_s",
+            Self::LdFeedback => "ld_s",
+            Self::LdMsFeedback => "ldms_s",
+            Self::LdUavTypedFeedback => "ld_uav_typed_s",
+            Self::LdRawFeedback => "ld_raw_s",
+            Self::LdStructuredFeedback => "ld_structured_s",
+            Self::SampleLFeedback => "sample_l_s",
+            Self::SampleCLzFeedback => "sample_c_lz_s",
+            Self::SampleClampFeedback => "sample_cl_s",
+            Self::SampleBClampFeedback => "sample_b_cl_s",
+            Self::SampleDClampFeedback => "sample_d_cl_s",
+            Self::SampleCClampFeedback => "sample_c_cl_s",
+            Self::CheckAccessFullyMapped => "check_access_fully_mapped",
             // Misc
             Self::Abort => "abort",
             Self::DebugBreak => "debug_break",
@@ -1162,18 +1246,55 @@ impl Opcode {
     pub fn name(&self) -> &'static str {
         opcode_name!(self)
     }
+
+    /// Number of encoded operands required by this published opcode.
+    ///
+    /// Declaration opcodes can also carry non-operand payload dwords; this
+    /// count covers only `OperandToken0` sequences. Unknown/reserved opcodes
+    /// return `None` so callers can preserve them opaquely.
+    #[must_use]
+    pub fn expected_operand_count(&self) -> Option<usize> {
+        if matches!(self, Self::Unknown(_)) {
+            return None;
+        }
+        Some(match self.to_u32() {
+            2 | 7 | 9 | 10 | 18 | 19 | 20 | 21 | 22 | 23 | 48 | 58 | 62 | 92 | 93 | 94
+            | 104 | 105 | 106 | 113 | 114 | 115 | 116 | 144 | 145 | 146 | 147 | 148
+            | 149 | 150 | 151 | 152 | 153 | 154 | 155 | 190 | 206 | 207 | 208 => 0,
+            3 | 4 | 6 | 8 | 13 | 31 | 44 | 63 | 76 | 88 | 89 | 90 | 91 | 95 | 96
+            | 97 | 98 | 99 | 100 | 101 | 102 | 103 | 117 | 118 | 119 | 120 | 143 | 156
+            | 157 | 158 | 159 | 160 | 161 | 162 => 1,
+            5 | 11 | 12 | 25 | 26 | 27 | 28 | 40 | 43 | 47 | 54 | 59 | 64 | 65 | 66
+            | 67 | 68 | 75 | 86 | 111 | 121 | 122 | 123 | 124 | 125 | 129 | 130 | 131
+            | 134 | 135 | 136 | 137 | 141 | 178 | 179 | 199 | 201 | 202 | 205 | 212
+            | 214 | 215 | 216 | 217 | 234 => 2,
+            0 | 1 | 14 | 15 | 16 | 17 | 24 | 29 | 30 | 32 | 33 | 34 | 36 | 37 | 39
+            | 41 | 42 | 45 | 49 | 51 | 52 | 56 | 57 | 60 | 61 | 77 | 79 | 80 | 83
+            | 84 | 85 | 87 | 110 | 163 | 164 | 165 | 166 | 169 | 170 | 171 | 173
+            | 174 | 175 | 176 | 177 | 191 | 192 | 193 | 194 | 195 | 196 | 197 | 198
+            | 203 | 204 | 210 => 3,
+            35 | 38 | 46 | 50 | 55 | 69 | 78 | 81 | 82 | 108 | 109 | 132 | 133
+            | 138 | 139 | 167 | 168 | 172 | 180 | 181 | 182 | 183 | 184 | 186 | 187
+            | 188 | 189 | 200 | 211 | 213 | 223 | 225 | 226 => 4,
+            70 | 71 | 72 | 74 | 126 | 127 | 140 | 142 | 185 | 219 | 224 | 227 => 5,
+            73 | 128 | 220 | 221 | 228 | 229 | 230 => 6,
+            222 | 231 | 233 => 7,
+            232 => 8,
+            _ => return None,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Opcode;
 
-    /// Verify every opcode value 0..=217 maps to a known variant (not Unknown).
+    /// Verify every published opcode value maps to a known variant (not Unknown).
     #[test]
     fn all_opcodes_are_known() {
-        for v in 0..=217u32 {
+        for v in 0..=234u32 {
             // Skip reserved slots
-            if v == 107 || v == 112 || v == 209 {
+            if matches!(v, 107 | 112 | 209 | 218) {
                 assert!(
                     matches!(Opcode::from_u32(v), Opcode::Unknown(_)),
                     "reserved opcode {v} should map to Unknown"
@@ -1185,14 +1306,15 @@ mod tests {
                 !matches!(op, Opcode::Unknown(_)),
                 "opcode {v} mapped to Unknown, expected a known variant"
             );
+            assert_eq!(op.to_u32(), v, "opcode {v} did not encode symmetrically");
         }
     }
 
     /// Verify every known opcode has a non-empty, non-"unknown_op" name.
     #[test]
     fn all_opcodes_have_names() {
-        for v in 0..=217u32 {
-            if v == 107 || v == 112 || v == 209 {
+        for v in 0..=234u32 {
+            if matches!(v, 107 | 112 | 209 | 218) {
                 continue;
             }
             let op = Opcode::from_u32(v);
@@ -1200,6 +1322,34 @@ mod tests {
             assert!(
                 !name.is_empty() && name != "unknown_op",
                 "opcode {v} ({op:?}) has bad name: {name:?}"
+            );
+        }
+    }
+
+    /// Operand arities from DXC's `g_InstructionInfo` table. A dash marks an
+    /// SDK-reserved opcode slot or `customdata`, whose payload is not an
+    /// operand-token sequence.
+    #[test]
+    fn all_operand_counts_match_dxc() {
+        const COUNTS: &str = concat!(
+            "33011210100221333300000032222331333433432332134",
+            "203433-2433023301222224555652134334433323111100",
+            "0111111111000-4432-0000111122222556222442222445",
+            "25100000000000011111113333443334333332244444544",
+            "440333333332422332000-34242222-5667454456667872",
+        );
+        assert_eq!(COUNTS.len(), 235);
+        for (value, expected) in COUNTS.bytes().enumerate() {
+            let opcode = Opcode::from_u32(u32::try_from(value).unwrap());
+            let expected = if expected == b'-' {
+                None
+            } else {
+                Some(usize::from(expected - b'0'))
+            };
+            assert_eq!(
+                opcode.expected_operand_count(),
+                expected,
+                "operand count for opcode {value} ({opcode:?})"
             );
         }
     }
@@ -1253,7 +1403,7 @@ mod tests {
         }
     }
 
-    /// Values beyond 217 should map to Unknown.
+    /// Reserved and out-of-range values should map to Unknown.
     #[test]
     fn unknown_opcodes() {
         for v in [218, 255, 500, 1000, u32::MAX] {

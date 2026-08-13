@@ -37,12 +37,12 @@ impl ChunkWriter for PipelineStateValidation {
 impl fmt::Display for PipelineStateValidation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ver = match self.info_size {
-            24 => "v0",
-            36 => "v1",
-            48 => "v2",
-            52 => "v3",
-            56 => "v4",
-            _ => "v?",
+            24..=35 => "v0+",
+            36..=47 => "v1+",
+            48..=51 => "v2+",
+            52..=55 => "v3+",
+            56.. => "v4+",
+            _ => "invalid",
         };
         let kind_name = if let Some(ref ri1) = self.runtime_info_1 {
             types::PSVShaderKind::from_u8(ri1.shader_stage).name()
@@ -53,7 +53,7 @@ impl fmt::Display for PipelineStateValidation {
                 types::ShaderStageInfo::Geometry { .. } => "GS",
                 types::ShaderStageInfo::Hull { .. } => "HS",
                 types::ShaderStageInfo::Domain { .. } => "DS",
-                types::ShaderStageInfo::Compute => "CS",
+                types::ShaderStageInfo::Compute { .. } => "CS",
                 types::ShaderStageInfo::Mesh { .. } => "MS",
                 types::ShaderStageInfo::Amplification { .. } => "AS",
                 types::ShaderStageInfo::Other { .. } => "Unknown",

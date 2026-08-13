@@ -170,6 +170,8 @@ fn parse_binding(line: &str) -> Option<ResourceBinding<'static>> {
         bind_point: slot,
         bind_count,
         flags,
+        space: m.get("space").map_or(Some(0), |value| value.parse().ok())?,
+        id: m.get("id").map_or(Some(0), |value| value.parse().ok())?,
     })
 }
 
@@ -410,7 +412,9 @@ impl HlslParser {
                 creator: Cow::Owned(String::new()),
                 target_version: 0,
                 compile_flags: 0,
-                rd11_extra: None,
+                rd11: None,
+                original_data: None,
+                original_canonical: None,
             },
             structs: BTreeMap::new(),
             block: None,
@@ -486,7 +490,7 @@ impl HlslParser {
             for slot in &mut extra {
                 *slot = u32::from_str_radix(values.next()?.trim(), 16).ok()?;
             }
-            self.resource_def.rd11_extra = Some(extra);
+            self.resource_def.rd11 = Some(dxbc::chunks::rdef::Rd11Header::from_words(extra));
         } else {
             return Some(false);
         }
@@ -568,6 +572,12 @@ impl HlslParser {
                 flags: fields
                     .get("flags")
                     .map_or(Some(0), |value| bind_flags_from(value))?,
+                space: fields
+                    .get("space")
+                    .map_or(Some(0), |value| value.parse().ok())?,
+                id: fields
+                    .get("id")
+                    .map_or(Some(0), |value| value.parse().ok())?,
             });
         }
         self.resource_def.constant_buffers.push(CBufferDef {

@@ -17,8 +17,8 @@ use super::{
 };
 use dxbc::shex::{
     ComponentSelect, CustomDataType, FlagNames, GsOutputTopology, GsPrimitive, Immediates, Indices,
-    Instruction, InstructionKind, Opcode, Operand, OperandIndex, Operands, Program, RegisterType,
-    ReturnType, SmallU32Vec,
+    Instruction, InstructionKind, MinPrecision, Opcode, Operand, OperandIndex, Operands, Program,
+    RegisterType, ReturnType, SmallU32Vec, SystemValue,
 };
 
 /// Error produced while parsing `.d3dasm` text.
@@ -134,6 +134,7 @@ fn parse_instruction(line: &str) -> Result<Instruction, AsmError> {
         resource_return_type: None,
         kind: InstructionKind::Generic {
             operands: SmallVec::new(),
+            trailing_tokens: SmallVec::new(),
         },
     };
     apply_modifiers(&mut instr, modifiers)?;
@@ -147,7 +148,7 @@ fn parse_instruction(line: &str) -> Result<Instruction, AsmError> {
 /// and the trailing modifier string (empty or starting with '_').
 fn opcode_from_mnemonic(mnemonic: &str) -> Result<(Opcode, &str), AsmError> {
     let mut best: Option<(Opcode, usize)> = None;
-    for v in 0..=217u32 {
+    for v in 0..=234u32 {
         let op = Opcode::from_u32(v);
         let name = op.name();
         if mnemonic.starts_with(name) && best.is_none_or(|(_, len)| name.len() > len) {
@@ -245,6 +246,7 @@ fn parse_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmErro
         CustomData, DclConstantBuffer, DclGlobalFlags, DclIndexRange, DclInput, DclInputPs,
         DclInputPsSgv, DclInputPsSiv, DclInputSgv, DclInputSiv, DclOutput, DclOutputSgv,
         DclOutputSiv, DclResource, DclResourceRaw, DclResourceStructured, DclSampler,
+        DclThreadGroupSharedMemoryRaw, DclThreadGroupSharedMemoryStructured,
         DclUnorderedAccessViewRaw, DclUnorderedAccessViewStructured, DclUnorderedAccessViewTyped,
     };
     match op {
@@ -259,21 +261,48 @@ fn parse_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmErro
         DclUnorderedAccessViewRaw => {
             let op0 = parse_leading_operand(c)?;
             let flags = parse_tag_hex(c, "flags")?;
+            let space = parse_tag_dec(c, "space")?;
             Ok(InstructionKind::DclUavRaw {
                 flags,
                 operands: one(op0),
+                space,
             })
         }
         DclUnorderedAccessViewStructured => parse_dcl_uav_structured(c),
-        DclResourceRaw => Ok(InstructionKind::DclResourceRaw {
-            operands: one(parse_leading_operand(c)?),
-        }),
+        DclResourceRaw => {
+            let operand = parse_leading_operand(c)?;
+            let space = parse_tag_dec(c, "space")?;
+            Ok(InstructionKind::DclResourceRaw {
+                operands: one(operand),
+                space,
+            })
+        }
         DclResourceStructured => {
             let op0 = parse_leading_operand(c)?;
             let stride = parse_tag_dec(c, "stride")?;
+            let space = parse_tag_dec(c, "space")?;
             Ok(InstructionKind::DclResourceStructured {
                 stride,
                 operands: one(op0),
+                space,
+            })
+        }
+        DclThreadGroupSharedMemoryRaw => {
+            let operand = parse_leading_operand(c)?;
+            let byte_count = parse_tag_dec(c, "bytes")?;
+            Ok(InstructionKind::DclThreadGroupSharedMemoryRaw {
+                operands: one(operand),
+                byte_count,
+            })
+        }
+        DclThreadGroupSharedMemoryStructured => {
+            let operand = parse_leading_operand(c)?;
+            let stride = parse_tag_dec(c, "stride")?;
+            let count = parse_tag_dec(c, "count")?;
+            Ok(InstructionKind::DclThreadGroupSharedMemoryStructured {
+                operands: one(operand),
+                stride,
+                count,
             })
         }
         DclIndexRange => {
@@ -288,17 +317,23 @@ fn parse_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmErro
         DclSampler => {
             let op0 = parse_leading_operand(c)?;
             let mode = parse_tag_enum(c, "mode", SAMPLER_MODES)?;
+            let space = parse_tag_dec(c, "space")?;
             Ok(InstructionKind::DclSampler {
                 mode,
                 operands: one(op0),
+                space,
             })
         }
         DclConstantBuffer => {
             let op0 = parse_leading_operand(c)?;
             let access = parse_tag_enum(c, "access", CB_ACCESS)?;
+            let size = parse_tag_dec(c, "size")?;
+            let space = parse_tag_dec(c, "space")?;
             Ok(InstructionKind::DclConstantBuffer {
                 access,
                 operands: one(op0),
+                size,
+                space,
             })
         }
         _ => parse_scalar_kind(op, c),
@@ -372,8 +407,11 @@ fn parse_scalar_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, 
                 value: f32::from_bits(parse_hex0x(c.take_rest())?),
             })
         }
-        DclHsForkPhaseInstanceCount | DclHsJoinPhaseInstanceCount => {
-            Ok(InstructionKind::DclHsForkPhaseInstanceCount {
+        DclHsForkPhaseInstanceCount => Ok(InstructionKind::DclHsForkPhaseInstanceCount {
+            count: parse_trailing_dec(c)?,
+        }),
+        DclHsJoinPhaseInstanceCount => {
+            Ok(InstructionKind::DclHsJoinPhaseInstanceCount {
                 count: parse_trailing_dec(c)?,
             })
         }
@@ -393,7 +431,7 @@ fn parse_scalar_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, 
 fn parse_function_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     use Opcode::{
         DclFunctionBody, DclFunctionTable, DclInterface, HsControlPointPhase, HsDecls, HsForkPhase,
-        HsJoinPhase,
+        HsJoinPhase, InterfaceCall,
     };
     match op {
         DclFunctionBody => Ok(InstructionKind::DclFunctionBody {
@@ -413,19 +451,31 @@ fn parse_function_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind
             c.skip_spaces();
             let interface_index = parse_dec(c.take_token())?;
             c.skip_spaces();
-            let num_call_sites = parse_dec(c.take_token())?;
+            let expected_table_size = parse_dec(c.take_token())?;
+            c.skip_spaces();
+            let array_length = parse_dec(c.take_token())?;
+            c.skip_spaces();
+            let dynamically_indexed = parse_dec::<u8>(c.take_token())? != 0;
             c.skip_spaces();
             let table_indices = parse_u32_list(c)?;
             Ok(InstructionKind::DclInterface {
+                dynamically_indexed,
                 interface_index,
-                num_call_sites,
+                expected_table_size,
+                array_length,
                 table_indices,
             })
         }
+        InterfaceCall => {
+            c.skip_spaces();
+            let function_index = parse_dec(c.take_token())?;
+            Ok(InstructionKind::InterfaceCall {
+                function_index,
+                operands: parse_operand_list(c)?,
+            })
+        }
         HsDecls | HsControlPointPhase | HsForkPhase | HsJoinPhase => Ok(InstructionKind::HsPhase),
-        _ => Ok(InstructionKind::Generic {
-            operands: parse_operand_list(c)?,
-        }),
+        _ => parse_generic(c),
     }
 }
 
@@ -505,6 +555,7 @@ fn parse_dcl_resource(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
         sample_count,
         return_type,
         operands: one(op0),
+        space: parse_tag_dec(c, "space")?,
     })
 }
 
@@ -513,11 +564,13 @@ fn parse_dcl_uav_typed(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> 
     let dimension = parse_tag_enum(c, "dim", DIMENSIONS)?;
     let return_type = parse_rt_tag(c)?;
     let flags = parse_tag_hex(c, "flags")?;
+    let space = parse_tag_dec(c, "space")?;
     Ok(InstructionKind::DclUavTyped {
         dimension,
         flags,
         return_type,
         operands: one(op0),
+        space,
     })
 }
 
@@ -525,10 +578,12 @@ fn parse_dcl_uav_structured(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmEr
     let op0 = parse_leading_operand(c)?;
     let stride = parse_tag_dec(c, "stride")?;
     let flags = parse_tag_hex(c, "flags")?;
+    let space = parse_tag_dec(c, "space")?;
     Ok(InstructionKind::DclUavStructured {
         flags,
         stride,
         operands: one(op0),
+        space,
     })
 }
 
@@ -733,6 +788,37 @@ fn parse_operand_list(c: &mut Cursor<'_>) -> Result<Operands, AsmError> {
     Ok(operands)
 }
 
+fn parse_generic(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
+    let mut operands: Operands = SmallVec::new();
+    loop {
+        c.skip_spaces();
+        if c.eof() || c.looking_at("trailing=") {
+            break;
+        }
+        operands.push(parse_operand(c)?);
+    }
+
+    let mut trailing_tokens: SmallU32Vec = SmallVec::new();
+    c.skip_spaces();
+    if let Some(raw) = c.try_tag("trailing") {
+        if raw.is_empty() {
+            return err("trailing= requires at least one DWORD");
+        }
+        for token in raw.split(',') {
+            trailing_tokens.push(parse_hex0x(token)?);
+        }
+    }
+    c.skip_spaces();
+    if !c.eof() {
+        return err(format!("unexpected generic-instruction text: {:?}", c.rest()));
+    }
+
+    Ok(InstructionKind::Generic {
+        operands,
+        trailing_tokens,
+    })
+}
+
 /// Parse a single space-prefixed leading operand (declaration operand).
 fn parse_leading_operand(c: &mut Cursor<'_>) -> Result<Operand, AsmError> {
     c.skip_spaces();
@@ -772,11 +858,52 @@ fn parse_operand(c: &mut Cursor<'_>) -> Result<Operand, AsmError> {
         return err("expected closing '|' for abs operand");
     }
 
+    let mut min_precision = MinPrecision::Default;
+    let mut has_min_precision = false;
+    let mut non_uniform = false;
+    loop {
+        let precision = if c.eat_str("@min16f") {
+            Some(MinPrecision::Float16)
+        } else if c.eat_str("@min2_8f") {
+            Some(MinPrecision::Float2_8)
+        } else if c.eat_str("@min16i") {
+            Some(MinPrecision::Sint16)
+        } else if c.eat_str("@min16u") {
+            Some(MinPrecision::Uint16)
+        } else if c.eat_str("@minprec") {
+            let raw = parse_dec(c.take_while(|byte| byte.is_ascii_digit()))?;
+            if raw > 7 {
+                return err("minimum-precision wire value must be 0..=7");
+            }
+            Some(MinPrecision::from_u32(raw))
+        } else {
+            None
+        };
+        if let Some(precision) = precision {
+            if has_min_precision {
+                return err("duplicate minimum-precision operand tag");
+            }
+            has_min_precision = true;
+            min_precision = precision;
+            continue;
+        }
+        if c.eat_str("@nonuniform") {
+            if non_uniform {
+                return err("duplicate nonuniform operand tag");
+            }
+            non_uniform = true;
+            continue;
+        }
+        break;
+    }
+
     Ok(Operand {
         reg_type,
         components,
         negate,
         abs,
+        min_precision,
+        non_uniform,
         indices,
         immediate_values,
     })
@@ -926,15 +1053,17 @@ fn parse_components(c: &mut Cursor<'_>) -> Result<ComponentSelect, AsmError> {
     }
 }
 
-fn intern_system_value(s: &str) -> Result<&'static str, AsmError> {
-    let val = dxbc::shex::system_value_to_u32(s);
-    // Confirm it round-trips to the same canonical name decode would yield.
-    let canon = dxbc::shex::system_value_name(val);
-    if canon == s {
-        Ok(canon)
-    } else {
-        err(format!("unknown system value: {s:?}"))
+fn intern_system_value(s: &str) -> Result<SystemValue, AsmError> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        return u32::from_str_radix(hex, 16)
+            .map(SystemValue::from_u32)
+            .map_err(|_| AsmError {
+                message: format!("invalid raw system value: {s:?}"),
+            });
     }
+    SystemValue::from_name(s).ok_or_else(|| AsmError {
+        message: format!("unknown system value: {s:?}"),
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -122,6 +122,7 @@ fn resolve_cb(op: &Operand, rdef: &ResourceDef<'_>) -> Option<(String, String)> 
         OperandIndex::RelativePlusImm(base, sub) => {
             resolve_cb_dynamic(cb, *base, sub, &op.components)?
         }
+        OperandIndex::RelativePlusImm64(_, _) => return None,
         OperandIndex::Relative(sub) => resolve_cb_dynamic(cb, 0, sub, &op.components)?,
         OperandIndex::Imm64(_) => return None,
     };
@@ -285,6 +286,8 @@ mod tests {
                 bind_point: 0,
                 bind_count: 1,
                 flags: 0,
+                space: 0,
+                id: 0,
             }],
             constant_buffers: alloc::vec![CBufferDef {
                 name: Cow::Borrowed("cb"),
@@ -302,7 +305,9 @@ mod tests {
             creator: Cow::Borrowed(""),
             target_version: 0xffff_0500,
             compile_flags: 0,
-            rd11_extra: None,
+            rd11: None,
+            original_data: None,
+            original_canonical: None,
         }
     }
     fn cb(reg: OperandIndex, comps: ComponentSelect) -> Operand {
@@ -311,6 +316,8 @@ mod tests {
             components: comps,
             negate: false,
             abs: false,
+            min_precision: Default::default(),
+            non_uniform: false,
             indices: smallvec![OperandIndex::Imm32(0), reg],
             immediate_values: smallvec![],
         }
@@ -353,6 +360,8 @@ mod tests {
             components: ComponentSelect::Scalar(0),
             negate: false,
             abs: false,
+            min_precision: Default::default(),
+            non_uniform: false,
             indices: smallvec![OperandIndex::Imm32(0)],
             immediate_values: smallvec![],
         };

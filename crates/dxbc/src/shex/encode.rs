@@ -3,8 +3,8 @@
 use alloc::vec::Vec;
 
 use super::ir::{
-    ComponentSelect, CustomDataType, Instruction, InstructionKind, Operand, OperandIndex, Program,
-    RegisterType, ReturnType,
+    ComponentSelect, CustomDataType, Instruction, InstructionKind, MinPrecision, Operand,
+    OperandIndex, Program, RegisterType, ReturnType, SystemValue,
 };
 use super::opcodes::Opcode;
 
@@ -38,8 +38,10 @@ pub fn encode(program: &Program) -> Vec<u8> {
     // Placeholder for length (dword count including header).
     dwords.push(0);
 
+    let shader_model_5_1_or_later = program.major_version > 5
+        || (program.major_version == 5 && program.minor_version > 0);
     for instr in &program.instructions {
-        encode_instruction(instr, &mut dwords);
+        encode_instruction(instr, shader_model_5_1_or_later, &mut dwords);
     }
 
     // Fix up total length.
@@ -50,7 +52,11 @@ pub fn encode(program: &Program) -> Vec<u8> {
 }
 
 /// Encode a single instruction into the dword stream.
-fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
+fn encode_instruction(
+    instr: &Instruction,
+    shader_model_5_1_or_later: bool,
+    out: &mut Vec<u32>,
+) {
     let opcode_val = instr.opcode.to_u32();
 
     if let InstructionKind::CustomData {
@@ -72,24 +78,39 @@ fn encode_instruction(instr: &Instruction, out: &mut Vec<u32>) {
     // sample_controls (type 1), resource_dim (type 2), resource_return_type (type 3).
     // Bit 31 of each token is set if another extended token follows.
     let ext_tokens = build_extended_tokens(instr);
-    let has_extended = !ext_tokens.is_empty();
+    let has_extended_opcode = !ext_tokens.is_empty();
     for &ext in &ext_tokens {
         out.push(ext);
     }
 
     // Encode instruction-kind-specific payload.
-    encode_kind(instr, out);
+    encode_kind(instr, shader_model_5_1_or_later, out);
 
     // Compute instruction length and build token0.
     // Reconstruct bits 11-23 from typed IR fields (no raw bit bucket).
-    let instr_len = u32::from(
-        u8::try_from(out.len() - token0_idx).expect("SHEX instruction exceeds 255 dwords"),
-    );
+    let mut instr_len = out.len() - token0_idx;
+    let has_extended_length = instr_len > 127
+        && matches!(
+            &instr.kind,
+            InstructionKind::DclFunctionTable { .. } | InstructionKind::DclInterface { .. }
+        );
+    if has_extended_length {
+        assert!(
+            !has_extended_opcode,
+            "long interface declarations cannot also carry extended opcode tokens"
+        );
+        instr_len = instr_len
+            .checked_add(1)
+            .expect("SHEX instruction length overflows usize");
+        out.insert(token0_idx + 1, wire_u32(instr_len));
+    } else {
+        assert!(instr_len <= 127, "SHEX instruction exceeds 127 dwords");
+    }
     let mut token0 = (opcode_val & 0x7FF) | build_token0_opdata(instr);
-    if has_extended {
+    if has_extended_opcode || has_extended_length {
         token0 |= 1 << 31;
     }
-    token0 |= (instr_len & 0x7F) << 24;
+    token0 |= (wire_u32(instr_len) & 0x7F) << 24;
 
     out[token0_idx] = token0;
 }
@@ -211,6 +232,10 @@ fn declaration_token0(kind: &InstructionKind) -> Option<u32> {
         } => (dimension_to_u32(dimension) << 11) | ((flags & 0xFF) << 16),
         InstructionKind::DclUavRaw { flags, .. }
         | InstructionKind::DclUavStructured { flags, .. } => (flags & 0xFF) << 16,
+        InstructionKind::DclInterface {
+            dynamically_indexed,
+            ..
+        } => u32::from(*dynamically_indexed) << 11,
         _ => return None,
     })
 }
@@ -268,13 +293,15 @@ fn encode_custom_data(
 }
 
 /// Encode the instruction-kind-specific payload (operands and trailing data).
-fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
+fn encode_kind(instr: &Instruction, shader_model_5_1_or_later: bool, out: &mut Vec<u32>) {
     match &instr.kind {
-        InstructionKind::Generic { operands }
-        | InstructionKind::DclSampler { operands, .. }
-        | InstructionKind::DclConstantBuffer { operands, .. }
-        | InstructionKind::DclUavRaw { operands, .. }
-        | InstructionKind::DclResourceRaw { operands } => encode_operands(operands, out),
+        InstructionKind::Generic {
+            operands,
+            trailing_tokens,
+        } => {
+            encode_operands(operands, out);
+            out.extend_from_slice(trailing_tokens);
+        }
         InstructionKind::DclGlobalFlags { .. }
         | InstructionKind::DclGsInputPrimitive { .. }
         | InstructionKind::DclGsOutputTopology { .. }
@@ -295,26 +322,56 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
         } => {
             encode_operands(operands, out);
             if let Some(sv) = system_value {
-                out.push(system_value_to_u32(sv));
+                out.push(sv.to_u32());
             }
         }
         InstructionKind::DclResource {
             return_type,
             operands,
+            space,
             ..
         }
         | InstructionKind::DclUavTyped {
             return_type,
             operands,
+            space,
             ..
         } => {
             encode_operands(operands, out);
             out.push(encode_return_type_token(return_type));
+            if shader_model_5_1_or_later {
+                out.push(*space);
+            }
+        }
+        InstructionKind::DclSampler {
+            operands, space, ..
+        }
+        | InstructionKind::DclUavRaw {
+            operands, space, ..
+        }
+        | InstructionKind::DclResourceRaw { operands, space } => {
+            encode_operands(operands, out);
+            if shader_model_5_1_or_later {
+                out.push(*space);
+            }
+        }
+        InstructionKind::DclConstantBuffer {
+            operands,
+            size,
+            space,
+            ..
+        } => {
+            encode_operands(operands, out);
+            if shader_model_5_1_or_later {
+                out.push(*size);
+                out.push(*space);
+            }
         }
         InstructionKind::DclTemps { count }
         | InstructionKind::DclMaxOutputVertexCount { count }
         | InstructionKind::DclGsInstanceCount { count }
-        | InstructionKind::DclHsForkPhaseInstanceCount { count } => out.push(*count),
+        | InstructionKind::DclHsForkPhaseInstanceCount { count }
+        | InstructionKind::DclHsJoinPhaseInstanceCount { count } => out.push(*count),
         InstructionKind::DclIndexableTemp {
             reg,
             size,
@@ -333,11 +390,37 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
             out.push(*z);
         }
         InstructionKind::DclUavStructured {
-            operands, stride, ..
+            operands,
+            stride,
+            space,
+            ..
         }
-        | InstructionKind::DclResourceStructured { stride, operands } => {
+        | InstructionKind::DclResourceStructured {
+            stride,
+            operands,
+            space,
+        } => {
             encode_operands(operands, out);
             out.push(*stride);
+            if shader_model_5_1_or_later {
+                out.push(*space);
+            }
+        }
+        InstructionKind::DclThreadGroupSharedMemoryRaw {
+            operands,
+            byte_count,
+        } => {
+            encode_operands(operands, out);
+            out.push(*byte_count);
+        }
+        InstructionKind::DclThreadGroupSharedMemoryStructured {
+            operands,
+            stride,
+            count,
+        } => {
+            encode_operands(operands, out);
+            out.push(*stride);
+            out.push(*count);
         }
         InstructionKind::DclFunctionBody { index } => {
             out.push(*index);
@@ -352,13 +435,26 @@ fn encode_kind(instr: &Instruction, out: &mut Vec<u32>) {
         }
         InstructionKind::DclInterface {
             interface_index,
-            num_call_sites,
+            expected_table_size,
+            array_length,
             table_indices,
+            ..
         } => {
             out.push(*interface_index);
-            out.push(*num_call_sites);
-            out.push(wire_u32(table_indices.len()));
+            out.push(*expected_table_size);
+            let table_length = u32::from(
+                u16::try_from(table_indices.len())
+                    .expect("SHEX interface table exceeds 65535 entries"),
+            );
+            out.push(table_length | (u32::from(*array_length) << 16));
             out.extend_from_slice(table_indices);
+        }
+        InstructionKind::InterfaceCall {
+            function_index,
+            operands,
+        } => {
+            out.push(*function_index);
+            encode_operands(operands, out);
         }
         InstructionKind::DclIndexRange { operands, count } => {
             encode_operands(operands, out);
@@ -399,7 +495,10 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
         ComponentSelect::Scalar(c) => (2u32 << 2) | (u32::from(*c) << 4),
     };
 
-    let has_extended = op.negate || op.abs;
+    let has_extended = op.negate
+        || op.abs
+        || op.min_precision != MinPrecision::Default
+        || op.non_uniform;
 
     // Build operand token.
     let mut token = num_components | sel_bits;
@@ -416,6 +515,7 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
             OperandIndex::Imm64(_) => 1,
             OperandIndex::Relative(_) => 2,
             OperandIndex::RelativePlusImm(_, _) => 3,
+            OperandIndex::RelativePlusImm64(_, _) => 4,
         };
         token |= repr << (22 + i * 3);
     }
@@ -425,11 +525,16 @@ fn encode_one_operand(op: &Operand, out: &mut Vec<u32>) {
     // Extended modifier token.
     if has_extended {
         let mut ext = 1u32; // type = 1 (extended operand modifier)
-        if op.negate {
-            ext |= 1 << 6;
-        }
-        if op.abs {
-            ext |= 1 << 7;
+        let modifier = match (op.negate, op.abs) {
+            (false, false) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (true, true) => 3,
+        };
+        ext |= modifier << 6;
+        ext |= op.min_precision.to_u32() << 14;
+        if op.non_uniform {
+            ext |= 1 << 17;
         }
         out.push(ext);
     }
@@ -463,6 +568,11 @@ fn encode_index(idx: &OperandIndex, out: &mut Vec<u32>) {
             out.push(*imm);
             encode_one_operand(sub, out);
         }
+        OperandIndex::RelativePlusImm64(imm, sub) => {
+            out.push(u32::try_from(*imm & u64::from(u32::MAX)).expect("masked value fits in u32"));
+            out.push(u32::try_from(*imm >> 32).expect("shifted value fits in u32"));
+            encode_one_operand(sub, out);
+        }
     }
 }
 
@@ -474,38 +584,7 @@ fn encode_return_type_token(rt: &[ReturnType; 4]) -> u32 {
 /// Convert a system value name string back to its `D3D10_SB_NAME` / `D3D11_SB_NAME` value.
 #[must_use]
 pub fn system_value_to_u32(name: &str) -> u32 {
-    match name {
-        "position" => 1,
-        "clip_distance" => 2,
-        "cull_distance" => 3,
-        "render_target_array_index" => 4,
-        "viewport_array_index" => 5,
-        "vertex_id" => 6,
-        "primitive_id" => 7,
-        "instance_id" => 8,
-        "is_front_face" => 9,
-        "sample_index" => 10,
-        "finalQuadUeq0EdgeTessFactor" => 11,
-        "finalQuadVeq0EdgeTessFactor" => 12,
-        "finalQuadUeq1EdgeTessFactor" => 13,
-        "finalQuadVeq1EdgeTessFactor" => 14,
-        "finalQuadUInsideTessFactor" => 15,
-        "finalQuadVInsideTessFactor" => 16,
-        "finalTriUeq0EdgeTessFactor" => 17,
-        "finalTriVeq0EdgeTessFactor" => 18,
-        "finalTriWeq0EdgeTessFactor" => 19,
-        "finalTriInsideTessFactor" => 20,
-        "finalLineDetailTessFactor" => 21,
-        "finalLineDensityTessFactor" => 22,
-        "target" => 23,
-        "depth" => 24,
-        "coverage" => 25,
-        "depth_greater_equal" => 26,
-        "depth_less_equal" => 27,
-        "stencil_ref" => 64,
-        "inner_coverage" => 65,
-        _ => 0, // Undefined and unrecognized system values.
-    }
+    SystemValue::from_name(name).map_or(0, SystemValue::to_u32)
 }
 
 /// Build the chain of extended opcode tokens for an instruction.
@@ -538,4 +617,45 @@ fn build_extended_tokens(instr: &Instruction) -> Vec<u32> {
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shex::decode_with_fourcc;
+
+    #[test]
+    fn long_function_table_uses_extended_instruction_length() {
+        let instruction = Instruction {
+            opcode: Opcode::DclFunctionTable,
+            saturate: false,
+            test_nonzero: false,
+            precise_mask: 0,
+            resinfo_return_type: None,
+            sync_flags: 0,
+            tex_offsets: None,
+            resource_dim: None,
+            resource_return_type: None,
+            kind: InstructionKind::DclFunctionTable {
+                table_index: 7,
+                body_indices: (0..125).collect(),
+            },
+        };
+        let program = Program {
+            shader_type: "ps",
+            major_version: 5,
+            minor_version: 0,
+            instructions: alloc::vec![instruction],
+            warnings: Vec::new(),
+            fourcc: *b"SHEX",
+        };
+
+        let bytes = encode(&program);
+        let token = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let extended_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        assert_ne!(token & (1 << 31), 0);
+        assert_eq!((token >> 24) & 0x7f, 129 & 0x7f);
+        assert_eq!(extended_length, 129);
+        assert_eq!(decode_with_fourcc(&bytes, *b"SHEX").unwrap(), program);
+    }
 }

@@ -55,6 +55,6 @@ pub mod util;
 
 // Re-export the most commonly used types at the crate root.
 pub use chunks::ChunkData;
-pub use container::{DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
+pub use container::{ContainerVersion, DxbcChunk, DxbcContainer, build_dxbc, scan_dxbc};
 pub use shex::Program;
 pub use shex::disassemble;

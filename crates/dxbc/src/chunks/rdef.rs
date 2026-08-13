@@ -16,10 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use nostdio::{Cursor, ReadLe, Seek, SeekFrom};
-
 use super::ChunkWriter;
-use crate::util::read_cstring;
 
 /// Parsed RDEF chunk — constant buffers, resource bindings, and creator string.
 #[derive(Debug)]
@@ -34,8 +31,79 @@ pub struct ResourceDef<'a> {
     pub target_version: u32,
     /// Compile flags.
     pub compile_flags: u32,
-    /// SM5 RD11 sub-header (32 bytes after the main header). None for SM4.
-    pub rd11_extra: Option<[u32; 8]>,
+    /// SM5 RD11 layout descriptor (32 bytes after the main header). None for SM4.
+    pub rd11: Option<Rd11Header>,
+    /// Original bytes retained for a layout-preserving no-op rewrite.
+    #[doc(hidden)]
+    pub original_data: Option<Cow<'a, [u8]>>,
+    /// Canonical encoding of the semantic state at parse time.
+    #[doc(hidden)]
+    pub original_canonical: Option<Vec<u8>>,
+}
+
+/// The SM5 RD11 layout descriptor embedded after the 28-byte RDEF header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rd11Header {
+    /// Format identifier (`RD11` for SM5.0, `0x2544_1313` for SM5.1).
+    pub identifier: u32,
+    /// Total RDEF+RD11 header size (currently 60 bytes).
+    pub header_size: u32,
+    /// Constant-buffer record stride.
+    pub constant_buffer_stride: u32,
+    /// Resource-binding record stride (32 for SM5.0, 40 for SM5.1).
+    pub resource_binding_stride: u32,
+    /// Constant-buffer variable record stride.
+    pub variable_stride: u32,
+    /// Type descriptor stride.
+    pub type_stride: u32,
+    /// Structure-member record stride.
+    pub member_stride: u32,
+    /// Number of interface slots reported by reflection.
+    pub interface_slot_count: u32,
+}
+
+impl Rd11Header {
+    /// Standard SM5.0 layout descriptor.
+    pub const SM5_0: Self = Self {
+        identifier: u32::from_le_bytes(*b"RD11"),
+        header_size: 60,
+        constant_buffer_stride: 24,
+        resource_binding_stride: 32,
+        variable_stride: 40,
+        type_stride: 36,
+        member_stride: 12,
+        interface_slot_count: 0,
+    };
+
+    /// Return the serialized dwords in order.
+    #[must_use]
+    pub const fn to_words(self) -> [u32; 8] {
+        [
+            self.identifier,
+            self.header_size,
+            self.constant_buffer_stride,
+            self.resource_binding_stride,
+            self.variable_stride,
+            self.type_stride,
+            self.member_stride,
+            self.interface_slot_count,
+        ]
+    }
+
+    /// Decode the eight serialized dwords.
+    #[must_use]
+    pub const fn from_words(words: [u32; 8]) -> Self {
+        Self {
+            identifier: words[0],
+            header_size: words[1],
+            constant_buffer_stride: words[2],
+            resource_binding_stride: words[3],
+            variable_stride: words[4],
+            type_stride: words[5],
+            member_stride: words[6],
+            interface_slot_count: words[7],
+        }
+    }
 }
 
 /// A single constant buffer and its variable layout.
@@ -150,6 +218,10 @@ pub enum ResourceInputType {
     UavConsumeStructured = 10,
     /// Read-write structured buffer with hidden counter (UAV).
     UavRwStructuredWithCounter = 11,
+    /// Ray-tracing acceleration structure.
+    RtAccelerationStructure = 12,
+    /// Sampler-feedback texture UAV.
+    UavFeedbackTexture = 13,
 }
 
 impl ResourceInputType {
@@ -169,6 +241,8 @@ impl ResourceInputType {
             9 => Self::UavAppendStructured,
             10 => Self::UavConsumeStructured,
             11 => Self::UavRwStructuredWithCounter,
+            12 => Self::RtAccelerationStructure,
+            13 => Self::UavFeedbackTexture,
             _ => return None,
         })
     }
@@ -189,6 +263,8 @@ impl ResourceInputType {
             Self::UavAppendStructured => "uav_append_structured",
             Self::UavConsumeStructured => "uav_consume_structured",
             Self::UavRwStructuredWithCounter => "uav_rwstructured_with_counter",
+            Self::RtAccelerationStructure => "rt_acceleration_structure",
+            Self::UavFeedbackTexture => "uav_feedback_texture",
         }
     }
 }
@@ -203,6 +279,8 @@ impl ResourceInputType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ResourceDimension {
+    /// Dimension is not applicable or unknown.
+    Unknown = 0,
     /// Buffer resource.
     Buffer = 1,
     /// 1D texture.
@@ -223,6 +301,8 @@ pub enum ResourceDimension {
     TextureCube = 9,
     /// Cube-map texture array.
     TextureCubeArray = 10,
+    /// Extended buffer dimension.
+    BufferEx = 11,
 }
 
 impl ResourceDimension {
@@ -230,6 +310,7 @@ impl ResourceDimension {
     #[must_use]
     pub fn from_u32(v: u32) -> Option<Self> {
         Some(match v {
+            0 => Self::Unknown,
             1 => Self::Buffer,
             2 => Self::Texture1D,
             3 => Self::Texture1DArray,
@@ -240,6 +321,7 @@ impl ResourceDimension {
             8 => Self::Texture3D,
             9 => Self::TextureCube,
             10 => Self::TextureCubeArray,
+            11 => Self::BufferEx,
             _ => return None,
         })
     }
@@ -248,6 +330,7 @@ impl ResourceDimension {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
+            Self::Unknown => "NA",
             Self::Buffer => "buf",
             Self::Texture1D => "1d",
             Self::Texture1DArray => "1darray",
@@ -258,6 +341,7 @@ impl ResourceDimension {
             Self::Texture3D => "3d",
             Self::TextureCube => "cube",
             Self::TextureCubeArray => "cubearray",
+            Self::BufferEx => "bufex",
         }
     }
 
@@ -266,6 +350,7 @@ impl ResourceDimension {
     #[must_use]
     pub fn hlsl_stem(self) -> &'static str {
         match self {
+            Self::Unknown => return "Unknown",
             Self::Buffer => "Buffer",
             Self::Texture1D => "Texture1D",
             Self::Texture1DArray => "Texture1DArray",
@@ -276,6 +361,7 @@ impl ResourceDimension {
             Self::Texture3D => "Texture3D",
             Self::TextureCube => "TextureCube",
             Self::TextureCubeArray => "TextureCubeArray",
+            Self::BufferEx => "BufferEx",
         }
     }
 
@@ -283,6 +369,7 @@ impl ResourceDimension {
     #[must_use]
     pub fn from_hlsl_stem(s: &str) -> Option<Self> {
         Some(match s {
+            "Unknown" => Self::Unknown,
             "Buffer" => Self::Buffer,
             "Texture1D" => Self::Texture1D,
             "Texture1DArray" => Self::Texture1DArray,
@@ -293,6 +380,7 @@ impl ResourceDimension {
             "Texture3D" => Self::Texture3D,
             "TextureCube" => Self::TextureCube,
             "TextureCubeArray" => Self::TextureCubeArray,
+            "BufferEx" => Self::BufferEx,
             _ => return None,
         })
     }
@@ -346,6 +434,10 @@ pub struct ResourceBinding<'a> {
     /// Binding flags (`D3D_SHADER_INPUT_FLAGS`: userPacked, comparisonSampler,
     /// texComp0/1, unused).
     pub flags: u32,
+    /// Register space (SM5.1 binding records; zero for older layouts).
+    pub space: u32,
+    /// Resource range ID in shader bytecode (SM5.1; zero for older layouts).
+    pub id: u32,
 }
 
 impl ResourceBinding<'_> {
@@ -421,25 +513,74 @@ impl fmt::Display for ResourceBinding<'_> {
     }
 }
 
-fn parse_bindings(data: &[u8], count: usize, offset: usize) -> Option<Vec<ResourceBinding<'_>>> {
-    let mut cursor = Cursor::new(data);
-    let mut bindings = Vec::with_capacity(count);
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
+}
+
+fn read_cstring_checked(data: &[u8], offset: usize) -> Option<&str> {
+    let tail = data.get(offset..)?;
+    let end = tail.iter().position(|&byte| byte == 0)?;
+    core::str::from_utf8(&tail[..end]).ok()
+}
+
+fn record_base(data: &[u8], offset: usize, index: usize, stride: usize) -> Option<usize> {
+    let base = offset.checked_add(index.checked_mul(stride)?)?;
+    let end = base.checked_add(stride)?;
+    (end <= data.len()).then_some(base)
+}
+
+#[derive(Clone, Copy)]
+struct RdefLayout {
+    constant_buffer_stride: usize,
+    resource_binding_stride: usize,
+    variable_stride: usize,
+    type_stride: usize,
+    member_stride: usize,
+    is_sm5: bool,
+}
+
+fn parse_bindings(
+    data: &[u8],
+    count: usize,
+    offset: usize,
+    stride: usize,
+) -> Option<Vec<ResourceBinding<'_>>> {
+    if stride < 32 || stride % 4 != 0 || matches!(stride, 33..=39) {
+        return None;
+    }
+    let mut bindings = Vec::new();
     for index in 0..count {
-        let base = offset + index * 32;
-        if base + 32 > data.len() {
-            break;
+        let base = record_base(data, offset, index, stride)?;
+        let name_offset = usize::try_from(read_u32(data, base)?).ok()?;
+        let input_type = read_u32(data, base + 4)?;
+        let dimension = read_u32(data, base + 12)?;
+        let flags = read_u32(data, base + 28)?;
+        if ResourceInputType::from_u32(input_type).is_none()
+            || ResourceDimension::from_u32(dimension).is_none()
+            || flags & !0x1f != 0
+        {
+            return None;
         }
-        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
-        let name_offset = cursor.read_u32_le().ok()? as usize;
         bindings.push(ResourceBinding {
-            name: Cow::Borrowed(read_cstring(data, name_offset)),
-            input_type: cursor.read_u32_le().ok()?,
-            return_type: cursor.read_u32_le().ok()?,
-            dimension: cursor.read_u32_le().ok()?,
-            num_samples: cursor.read_u32_le().ok()?,
-            bind_point: cursor.read_u32_le().ok()?,
-            bind_count: cursor.read_u32_le().ok()?,
-            flags: cursor.read_u32_le().ok()?,
+            name: Cow::Borrowed(read_cstring_checked(data, name_offset)?),
+            input_type,
+            return_type: read_u32(data, base + 8)?,
+            dimension,
+            num_samples: read_u32(data, base + 16)?,
+            bind_point: read_u32(data, base + 20)?,
+            bind_count: read_u32(data, base + 24)?,
+            flags,
+            space: if stride >= 40 {
+                read_u32(data, base + 32)?
+            } else {
+                0
+            },
+            id: if stride >= 40 {
+                read_u32(data, base + 36)?
+            } else {
+                0
+            },
         });
     }
     Some(bindings)
@@ -447,48 +588,48 @@ fn parse_bindings(data: &[u8], count: usize, offset: usize) -> Option<Vec<Resour
 
 fn parse_variables<'a>(
     data: &'a [u8],
-    cursor: &mut Cursor<&[u8]>,
     count: usize,
     offset: usize,
-    stride: usize,
-    is_sm5: bool,
+    layout: RdefLayout,
 ) -> Option<Vec<CBufferVariable<'a>>> {
-    let mut variables = Vec::with_capacity(count);
+    if layout.variable_stride < if layout.is_sm5 { 40 } else { 24 }
+        || layout.variable_stride % 4 != 0
+    {
+        return None;
+    }
+    let mut variables = Vec::new();
     for index in 0..count {
-        let base = offset + index * stride;
-        if base + stride > data.len() {
-            break;
-        }
-        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
-        let name_offset = cursor.read_u32_le().ok()? as usize;
-        let variable_offset = cursor.read_u32_le().ok()?;
-        let size = cursor.read_u32_le().ok()?;
-        let flags = cursor.read_u32_le().ok()?;
-        let type_offset = cursor.read_u32_le().ok()? as usize;
-        let default_offset = cursor.read_u32_le().ok()? as usize;
-        let (texture_start, texture_size, sampler_start, sampler_size) = if is_sm5 {
+        let base = record_base(data, offset, index, layout.variable_stride)?;
+        let name_offset = usize::try_from(read_u32(data, base)?).ok()?;
+        let variable_offset = read_u32(data, base + 4)?;
+        let size = read_u32(data, base + 8)?;
+        let flags = read_u32(data, base + 12)?;
+        let type_offset = usize::try_from(read_u32(data, base + 16)?).ok()?;
+        let default_offset = usize::try_from(read_u32(data, base + 20)?).ok()?;
+        let (texture_start, texture_size, sampler_start, sampler_size) = if layout.is_sm5 {
             (
-                Some(cursor.read_u32_le().ok()?),
-                Some(cursor.read_u32_le().ok()?),
-                Some(cursor.read_u32_le().ok()?),
-                Some(cursor.read_u32_le().ok()?),
+                Some(read_u32(data, base + 24)?),
+                Some(read_u32(data, base + 28)?),
+                Some(read_u32(data, base + 32)?),
+                Some(read_u32(data, base + 36)?),
             )
         } else {
             (None, None, None, None)
         };
-        let default_end = default_offset.checked_add(size as usize)?;
-        let default_value: Cow<'a, [u8]> =
-            if default_offset != 0 && size > 0 && default_end <= data.len() {
-                Cow::Borrowed(&data[default_offset..default_end])
-            } else {
-                Cow::Borrowed(&[])
-            };
+        let default_value = if default_offset == 0 {
+            Cow::Borrowed(&[][..])
+        } else {
+            let default_size = usize::try_from(size).ok()?;
+            let default_end = default_offset.checked_add(default_size)?;
+            Cow::Borrowed(data.get(default_offset..default_end)?)
+        };
+        let mut path = Vec::new();
         variables.push(CBufferVariable {
-            name: Cow::Borrowed(read_cstring(data, name_offset)),
+            name: Cow::Borrowed(read_cstring_checked(data, name_offset)?),
             offset: variable_offset,
             size,
             flags,
-            var_type: parse_type_desc(data, type_offset, is_sm5),
+            var_type: parse_type_desc(data, type_offset, layout, &mut path, 0)?,
             default_value,
             texture_start,
             texture_size,
@@ -503,33 +644,23 @@ fn parse_constant_buffers(
     data: &[u8],
     count: usize,
     offset: usize,
-    variable_stride: usize,
-    is_sm5: bool,
+    layout: RdefLayout,
 ) -> Option<Vec<CBufferDef<'_>>> {
-    let mut cursor = Cursor::new(data);
-    let mut buffers = Vec::with_capacity(count);
+    if layout.constant_buffer_stride < 24 || layout.constant_buffer_stride % 4 != 0 {
+        return None;
+    }
+    let mut buffers = Vec::new();
     for index in 0..count {
-        let base = offset + index * 24;
-        if base + 24 > data.len() {
-            break;
-        }
-        cursor.seek(SeekFrom::Start(base as u64)).ok()?;
-        let name_offset = cursor.read_u32_le().ok()? as usize;
-        let variable_count = cursor.read_u32_le().ok()? as usize;
-        let variable_offset = cursor.read_u32_le().ok()? as usize;
-        let size = cursor.read_u32_le().ok()?;
-        let flags = cursor.read_u32_le().ok()?;
-        let buffer_type = cursor.read_u32_le().ok()?;
-        let variables = parse_variables(
-            data,
-            &mut cursor,
-            variable_count,
-            variable_offset,
-            variable_stride,
-            is_sm5,
-        )?;
+        let base = record_base(data, offset, index, layout.constant_buffer_stride)?;
+        let name_offset = usize::try_from(read_u32(data, base)?).ok()?;
+        let variable_count = usize::try_from(read_u32(data, base + 4)?).ok()?;
+        let variable_offset = usize::try_from(read_u32(data, base + 8)?).ok()?;
+        let size = read_u32(data, base + 12)?;
+        let flags = read_u32(data, base + 16)?;
+        let buffer_type = read_u32(data, base + 20)?;
+        let variables = parse_variables(data, variable_count, variable_offset, layout)?;
         buffers.push(CBufferDef {
-            name: Cow::Borrowed(read_cstring(data, name_offset)),
+            name: Cow::Borrowed(read_cstring_checked(data, name_offset)?),
             variables,
             size,
             flags,
@@ -555,88 +686,111 @@ pub fn parse_rdef(data: &[u8]) -> Option<ResourceDef<'_>> {
         return None;
     }
 
-    let mut c = Cursor::new(data);
-    let cb_count = c.read_u32_le().ok()? as usize;
-    let cb_offset = c.read_u32_le().ok()? as usize;
-    let binding_count = c.read_u32_le().ok()? as usize;
-    let binding_offset = c.read_u32_le().ok()? as usize;
-    let target_version = c.read_u32_le().ok()?;
-    let compile_flags = c.read_u32_le().ok()?;
+    let cb_count = usize::try_from(read_u32(data, 0)?).ok()?;
+    let cb_offset = usize::try_from(read_u32(data, 4)?).ok()?;
+    let binding_count = usize::try_from(read_u32(data, 8)?).ok()?;
+    let binding_offset = usize::try_from(read_u32(data, 12)?).ok()?;
+    let target_version = read_u32(data, 16)?;
+    let compile_flags = read_u32(data, 20)?;
 
     // SM5 uses 40-byte variable descriptors; SM4 uses 24-byte.
     let major_version = (target_version >> 8) & 0xFF;
-    let is_sm5 = major_version >= 5;
-    let var_stride: usize = if is_sm5 { 40 } else { 24 };
+    let is_sm5 = major_version == 5;
+    if !matches!(major_version, 4 | 5) {
+        return None;
+    }
 
     // Creator string (at offset 24 in the RDEF header)
-    let creator_off = c.read_u32_le().ok()? as usize;
-    let creator: Cow<'_, str> = if creator_off < data.len() {
-        Cow::Borrowed(read_cstring(data, creator_off))
-    } else {
-        Cow::Borrowed("")
-    };
+    let creator_off = usize::try_from(read_u32(data, 24)?).ok()?;
+    let creator = Cow::Borrowed(read_cstring_checked(data, creator_off)?);
 
     // SM5 has an RD11 sub-header (8 u32s = 32 bytes) after the main header.
-    let rd11_extra = if is_sm5 && data.len() >= 60 {
-        Some([
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-            c.read_u32_le().ok()?,
-        ])
+    let rd11 = if is_sm5 {
+        if data.len() < 60 {
+            return None;
+        }
+        let mut words = [0u32; 8];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = read_u32(data, 28 + index * 4)?;
+        }
+        let header = Rd11Header::from_words(words);
+        if !matches!(header.identifier, 0x3131_4452 | 0x2544_1313)
+            || header.header_size != 60
+            || header.constant_buffer_stride != 24
+            || !matches!(header.resource_binding_stride, 32 | 40)
+            || header.variable_stride != 40
+            || header.type_stride != 36
+            || header.member_stride != 12
+        {
+            return None;
+        }
+        Some(header)
     } else {
         None
     };
 
-    let bindings = parse_bindings(data, binding_count, binding_offset)?;
-    let constant_buffers = parse_constant_buffers(data, cb_count, cb_offset, var_stride, is_sm5)?;
+    let layout = match rd11 {
+        None => RdefLayout {
+            constant_buffer_stride: 24,
+            resource_binding_stride: 32,
+            variable_stride: 24,
+            type_stride: 16,
+            member_stride: 12,
+            is_sm5: false,
+        },
+        Some(header) => RdefLayout {
+            constant_buffer_stride: usize::try_from(header.constant_buffer_stride).ok()?,
+            resource_binding_stride: usize::try_from(header.resource_binding_stride).ok()?,
+            variable_stride: usize::try_from(header.variable_stride).ok()?,
+            type_stride: usize::try_from(header.type_stride).ok()?,
+            member_stride: usize::try_from(header.member_stride).ok()?,
+            is_sm5: true,
+        },
+    };
 
-    Some(ResourceDef {
+    let bindings = parse_bindings(
+        data,
+        binding_count,
+        binding_offset,
+        layout.resource_binding_stride,
+    )?;
+    let constant_buffers = parse_constant_buffers(data, cb_count, cb_offset, layout)?;
+
+    let mut resource_def = ResourceDef {
         constant_buffers,
         bindings,
         creator,
         target_version,
         compile_flags,
-        rd11_extra,
-    })
+        rd11,
+        original_data: None,
+        original_canonical: None,
+    };
+    resource_def.original_canonical = Some(write_rdef_canonical(&resource_def));
+    resource_def.original_data = Some(Cow::Borrowed(data));
+    Some(resource_def)
 }
 
 /// Parse a type descriptor at `offset` within the RDEF chunk data.
-fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<'a> {
-    let empty = TypeDesc {
-        class: 0,
-        var_type: 0,
-        rows: 0,
-        columns: 0,
-        elements: 0,
-        members: Vec::new(),
-        sm5_extra: None,
-        name: Cow::Borrowed(""),
-    };
-    if offset + 16 > data.len() {
-        return empty;
+fn parse_type_desc<'a>(
+    data: &'a [u8],
+    offset: usize,
+    layout: RdefLayout,
+    path: &mut Vec<usize>,
+    depth: usize,
+) -> Option<TypeDesc<'a>> {
+    if depth > 64 || path.contains(&offset) {
+        return None;
     }
-    let mut cursor = Cursor::new(data);
-    if cursor.seek(SeekFrom::Start(offset as u64)).is_err() {
-        return empty;
+    let end = offset.checked_add(layout.type_stride)?;
+    if end > data.len() {
+        return None;
     }
-    let Ok(class_type) = cursor.read_u32_le() else {
-        return empty;
-    };
-    let Ok(rows_cols) = cursor.read_u32_le() else {
-        return empty;
-    };
-    let Ok(elems_members) = cursor.read_u32_le() else {
-        return empty;
-    };
-    let member_offset = match cursor.read_u32_le() {
-        Ok(v) => v as usize,
-        Err(_) => return empty,
-    };
+    path.push(offset);
+    let class_type = read_u32(data, offset)?;
+    let rows_cols = read_u32(data, offset + 4)?;
+    let elems_members = read_u32(data, offset + 8)?;
+    let member_offset = usize::try_from(read_u32(data, offset + 12)?).ok()?;
 
     let class = (class_type & 0xFFFF) as u16;
     let var_type = (class_type >> 16) as u16;
@@ -645,12 +799,12 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
     let elements = (elems_members & 0xFFFF) as u16;
     let member_count = (elems_members >> 16) as u16;
 
-    let sm5_extra = if is_sm5 {
+    let sm5_extra = if layout.is_sm5 {
         Some([
-            cursor.read_u32_le().unwrap_or(0),
-            cursor.read_u32_le().unwrap_or(0),
-            cursor.read_u32_le().unwrap_or(0),
-            cursor.read_u32_le().unwrap_or(0),
+            read_u32(data, offset + 16)?,
+            read_u32(data, offset + 20)?,
+            read_u32(data, offset + 24)?,
+            read_u32(data, offset + 28)?,
         ])
     } else {
         None
@@ -658,47 +812,33 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
 
     // Parse member descriptors (12 bytes each: name_off, type_off, byte_offset)
     let mut members = Vec::new();
-    if member_count > 0 && member_offset + (member_count as usize) * 12 <= data.len() {
-        members.reserve(member_count as usize);
-        for member_index in 0..member_count as usize {
-            let mbase = member_offset + member_index * 12;
-            if cursor.seek(SeekFrom::Start(mbase as u64)).is_err() {
-                break;
-            }
-            let mname_off = cursor.read_u32_le().unwrap_or(0) as usize;
-            let mtype_off = cursor.read_u32_le().unwrap_or(0) as usize;
-            let moffset = cursor.read_u32_le().unwrap_or(0);
+    if member_count > 0 {
+        for member_index in 0..usize::from(member_count) {
+            let mbase = record_base(data, member_offset, member_index, layout.member_stride)?;
+            let mname_off = usize::try_from(read_u32(data, mbase)?).ok()?;
+            let mtype_off = usize::try_from(read_u32(data, mbase + 4)?).ok()?;
+            let moffset = read_u32(data, mbase + 8)?;
             members.push(MemberDesc {
-                name: Cow::Borrowed(read_cstring(data, mname_off)),
-                member_type: parse_type_desc(data, mtype_off, is_sm5),
+                name: Cow::Borrowed(read_cstring_checked(data, mname_off)?),
+                member_type: parse_type_desc(data, mtype_off, layout, path, depth + 1)?,
                 offset: moffset,
             });
         }
     }
 
     // SM5: name offset comes after the 4 unknowns in the type descriptor body
-    let name: Cow<'a, str> = if is_sm5 {
-        // Name offset is at: base + 16 (fixed) + 16 (4 unknowns) = base + 32
-        let name_pos = offset + 32;
-        if name_pos + 4 <= data.len() {
-            if cursor.seek(SeekFrom::Start(name_pos as u64)).is_ok() {
-                let noff = cursor.read_u32_le().unwrap_or(0) as usize;
-                if noff > 0 && noff < data.len() {
-                    Cow::Borrowed(read_cstring(data, noff))
-                } else {
-                    Cow::Borrowed("")
-                }
-            } else {
-                Cow::Borrowed("")
-            }
-        } else {
+    let name = if layout.is_sm5 {
+        let name_offset = usize::try_from(read_u32(data, offset + 32)?).ok()?;
+        if name_offset == 0 {
             Cow::Borrowed("")
+        } else {
+            Cow::Borrowed(read_cstring_checked(data, name_offset)?)
         }
     } else {
         Cow::Borrowed("")
     };
 
-    TypeDesc {
+    let result = TypeDesc {
         class,
         var_type,
         rows,
@@ -707,7 +847,9 @@ fn parse_type_desc<'a>(data: &'a [u8], offset: usize, is_sm5: bool) -> TypeDesc<
         members,
         sm5_extra,
         name,
-    }
+    };
+    path.pop();
+    Some(result)
 }
 
 impl ResourceDef<'_> {
@@ -931,6 +1073,7 @@ fn write_bindings(
     out: &mut Vec<u8>,
     names: &mut BTreeMap<String, u32>,
     bindings: &[ResourceBinding<'_>],
+    stride: usize,
 ) {
     let mut name_positions = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -943,6 +1086,16 @@ fn write_bindings(
         push_u32(out, binding.bind_point);
         push_u32(out, binding.bind_count);
         push_u32(out, binding.flags);
+        if stride == 40 {
+            push_u32(out, binding.space);
+            push_u32(out, binding.id);
+        } else {
+            assert_eq!(
+                binding.space, 0,
+                "32-byte RDEF binding has no register space"
+            );
+            assert_eq!(binding.id, 0, "32-byte RDEF binding has no range ID");
+        }
     }
     for (position, binding) in name_positions.into_iter().zip(bindings) {
         let offset = intern(out, names, &binding.name);
@@ -1068,50 +1221,79 @@ fn write_variable_data<'a>(
     }
 }
 
+fn write_rdef_canonical(rdef: &ResourceDef<'_>) -> Vec<u8> {
+        let is_sm5 = rdef.is_sm5();
+        assert_eq!(
+            is_sm5,
+            rdef.rd11.is_some(),
+            "SM5 RDEF requires an RD11 header"
+        );
+        let rd11_size: u32 = if rdef.rd11.is_some() { 32 } else { 0 };
+        let binding_stride = rdef.rd11.map_or(32, |header| {
+            assert_eq!(header.header_size, 60, "unsupported RD11 header size");
+            assert_eq!(header.constant_buffer_stride, 24);
+            assert!(matches!(header.resource_binding_stride, 32 | 40));
+            assert_eq!(header.variable_stride, 40);
+            assert_eq!(header.type_stride, 36);
+            assert_eq!(header.member_stride, 12);
+            usize::try_from(header.resource_binding_stride).expect("u32 fits in usize")
+        });
+        let mut out: Vec<u8> = Vec::new();
+        let mut pools = RdefPools::default();
+
+        push_u32(&mut out, wire_u32(rdef.constant_buffers.len()));
+        let buffer_section_position = out.len();
+        push_u32(&mut out, 0);
+        push_u32(&mut out, wire_u32(rdef.bindings.len()));
+        push_u32(&mut out, 28 + rd11_size);
+        push_u32(&mut out, rdef.target_version);
+        push_u32(&mut out, rdef.compile_flags);
+        let creator_position = out.len();
+        push_u32(&mut out, 0);
+        if let Some(rd11) = rdef.rd11 {
+            for value in rd11.to_words() {
+                push_u32(&mut out, value);
+            }
+        }
+
+        write_bindings(
+            &mut out,
+            &mut pools.binding_names,
+            &rdef.bindings,
+            binding_stride,
+        );
+        let variable_positions = write_constant_buffer_headers(
+            &mut out,
+            &mut pools.binding_names,
+            &rdef.constant_buffers,
+            buffer_section_position,
+        );
+        write_variable_sections(
+            &mut out,
+            &mut pools,
+            &rdef.constant_buffers,
+            &variable_positions,
+            is_sm5,
+        );
+        let creator_offset = intern(&mut out, &mut pools.variable_names, &rdef.creator);
+        patch_u32(&mut out, creator_position, creator_offset);
+        pad4(&mut out);
+        out
+}
+
 impl ChunkWriter for ResourceDef<'_> {
     fn fourcc(&self) -> [u8; 4] {
         *b"RDEF"
     }
 
     fn write_payload(&self) -> Vec<u8> {
-        let is_sm5 = self.is_sm5();
-        let rd11_size: u32 = if self.rd11_extra.is_some() { 32 } else { 0 };
-        let mut out: Vec<u8> = Vec::new();
-        let mut pools = RdefPools::default();
-
-        push_u32(&mut out, wire_u32(self.constant_buffers.len()));
-        let buffer_section_position = out.len();
-        push_u32(&mut out, 0);
-        push_u32(&mut out, wire_u32(self.bindings.len()));
-        push_u32(&mut out, 28 + rd11_size);
-        push_u32(&mut out, self.target_version);
-        push_u32(&mut out, self.compile_flags);
-        let creator_position = out.len();
-        push_u32(&mut out, 0);
-        if let Some(rd11) = &self.rd11_extra {
-            for value in rd11 {
-                push_u32(&mut out, *value);
+        let canonical = write_rdef_canonical(self);
+        if self.original_canonical.as_deref() == Some(canonical.as_slice()) {
+            if let Some(original) = &self.original_data {
+                return original.to_vec();
             }
         }
-
-        write_bindings(&mut out, &mut pools.binding_names, &self.bindings);
-        let variable_positions = write_constant_buffer_headers(
-            &mut out,
-            &mut pools.binding_names,
-            &self.constant_buffers,
-            buffer_section_position,
-        );
-        write_variable_sections(
-            &mut out,
-            &mut pools,
-            &self.constant_buffers,
-            &variable_positions,
-            is_sm5,
-        );
-        let creator_offset = intern(&mut out, &mut pools.variable_names, &self.creator);
-        patch_u32(&mut out, creator_position, creator_offset);
-        pad4(&mut out);
-        out
+        canonical
     }
 }
 
@@ -1136,7 +1318,35 @@ mod tests {
             bind_point: 0,
             bind_count: 1,
             flags,
+            space: 0,
+            id: 0,
         }
+    }
+
+    #[test]
+    fn parsed_layout_is_reused_only_until_semantics_change() {
+        let source = ResourceDef {
+            constant_buffers: Vec::new(),
+            bindings: Vec::new(),
+            creator: Cow::Borrowed("x"),
+            target_version: 0xffff_0400,
+            compile_flags: 0,
+            rd11: None,
+            original_data: None,
+            original_canonical: None,
+        };
+        let mut noncanonical = write_rdef_canonical(&source);
+        assert_eq!(&noncanonical[noncanonical.len() - 2..], &[0xab, 0xab]);
+        let len = noncanonical.len();
+        noncanonical[len - 2..].fill(0);
+
+        let mut parsed = parse_rdef(&noncanonical).expect("valid RDEF layout");
+        assert_eq!(parsed.write_payload(), noncanonical);
+
+        parsed.creator = Cow::Borrowed("y");
+        let edited = parsed.write_payload();
+        assert_ne!(edited, noncanonical);
+        assert_eq!(parse_rdef(&edited).expect("canonical edited RDEF").creator, "y");
     }
 
     #[test]

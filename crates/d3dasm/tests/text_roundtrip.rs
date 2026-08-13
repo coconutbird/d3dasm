@@ -5,7 +5,8 @@
 use d3dasm::dxbc;
 use dxbc::chunks::WritableChunk;
 use dxbc::shex::{
-    ComponentSelect, Instruction, InstructionKind, OperandIndex, Program, RegisterType,
+    ComponentSelect, Instruction, InstructionKind, MinPrecision, OperandIndex, Program,
+    RegisterType,
 };
 use dxbc::shex::{Opcode, Operand};
 
@@ -15,6 +16,8 @@ fn temp(reg: u32, components: ComponentSelect) -> Operand {
         components,
         negate: false,
         abs: false,
+        min_precision: Default::default(),
+        non_uniform: false,
         indices: core::iter::once(OperandIndex::Imm32(reg)).collect(),
         immediate_values: dxbc::shex::Immediates::new(),
     }
@@ -40,12 +43,16 @@ fn generic(opcode: Opcode, operands: Vec<Operand>) -> Instruction {
         opcode,
         InstructionKind::Generic {
             operands: operands.into_iter().collect(),
+            trailing_tokens: Default::default(),
         },
     )
 }
 
 #[test]
 fn container_text_roundtrip() {
+    let mut tagged_source = temp(1, ComponentSelect::Swizzle([0, 1, 2, 3]));
+    tagged_source.min_precision = MinPrecision::Float16;
+    tagged_source.non_uniform = true;
     let program = Program {
         shader_type: "ps",
         major_version: 5,
@@ -62,7 +69,7 @@ fn container_text_roundtrip() {
                 Opcode::Mov,
                 vec![
                     temp(0, ComponentSelect::Mask(0xF)),
-                    temp(1, ComponentSelect::Swizzle([0, 1, 2, 3])),
+                    tagged_source,
                 ],
             ),
             generic(Opcode::Ret, vec![]),
@@ -102,5 +109,9 @@ fn container_text_roundtrip() {
     assert!(
         text.contains("\nmov "),
         "expected a mov instruction:\n{text}"
+    );
+    assert!(
+        text.contains("@min16f@nonuniform"),
+        "expected lossless extended-operand tags:\n{text}"
     );
 }

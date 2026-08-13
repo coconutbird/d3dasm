@@ -46,6 +46,7 @@ pub fn generic(opcode: Opcode, operands: Vec<Operand>) -> Instruction {
         opcode,
         InstructionKind::Generic {
             operands: operands.into_iter().collect(),
+            trailing_tokens: Default::default(),
         },
     )
 }
@@ -64,6 +65,8 @@ pub fn reg_op(reg_type: RegisterType, components: ComponentSelect, indices: Indi
         components,
         negate: false,
         abs: false,
+        min_precision: Default::default(),
+        non_uniform: false,
         indices,
         immediate_values: SmallVec::new(),
     }

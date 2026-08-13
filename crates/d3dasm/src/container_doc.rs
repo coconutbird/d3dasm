@@ -108,11 +108,7 @@ fn encode_to_text(fourcc: [u8; 4], data: &[u8]) -> Option<String> {
         return Some(crate::grammar::shex::serialize(&program));
     }
     if SIGNATURE_FOURCCS.contains(&&fourcc) {
-        let fs = core::str::from_utf8(&fourcc).ok()?;
-        let sig = dxbc::chunks::signature::Signature {
-            fourcc,
-            elements: dxbc::chunks::signature::parse_signature(fs, data),
-        };
+        let sig = dxbc::chunks::signature::parse_signature_chunk(fourcc, data)?;
         return Some(crate::grammar::signature::signature_to_text(&sig));
     }
     if &fourcc == b"STAT" {
@@ -146,7 +142,8 @@ fn body_to_chunk(fourcc: [u8; 4], body: &str) -> Result<Vec<u8>, AsmError> {
     if SIGNATURE_FOURCCS.contains(&&fourcc) {
         let sig = crate::grammar::signature::signature_from_text(fourcc, body)
             .ok_or_else(|| err("malformed signature text"))?;
-        return Ok(dxbc::chunks::signature::write_signature(fourcc, &sig.elements).data);
+        use dxbc::chunks::ChunkWriter;
+        return Ok(sig.to_writable().data);
     }
     if &fourcc == b"STAT" {
         use dxbc::chunks::ChunkWriter;

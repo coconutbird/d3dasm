@@ -74,6 +74,8 @@ fn immediate_operand() {
         components: XYZW,
         negate: false,
         abs: false,
+        min_precision: Default::default(),
+        non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x4000_0000, 0x0000_0000, 0xc080_0000],
     };
@@ -163,6 +165,8 @@ fn dcl_constant_buffer() {
         InstructionKind::DclConstantBuffer {
             access: "immediateIndexed",
             operands: smallvec![cb],
+            size: 8,
+            space: 0,
         },
     )]));
 }
@@ -179,6 +183,7 @@ fn dcl_sampler() {
         InstructionKind::DclSampler {
             mode: "default",
             operands: smallvec![s],
+            space: 0,
         },
     )]));
 }
@@ -197,6 +202,7 @@ fn dcl_resource_texture2d() {
             sample_count: 0,
             return_type: [ReturnType::Float; 4],
             operands: smallvec![t],
+            space: 0,
         },
     )]));
 }
@@ -317,6 +323,7 @@ fn declarations_have_no_garbage_modifiers() {
             sample_count: 0,
             return_type: [ReturnType::Float; 4],
             operands: smallvec![t],
+            space: 0,
         },
     )]);
     let canon = decode(&encode(&prog)).unwrap();
@@ -339,6 +346,8 @@ fn float_immediate_edges() {
         components: XYZW,
         negate: false,
         abs: false,
+        min_precision: Default::default(),
+        non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x8000_0000, 0x7f80_0000, 0x7fc0_0000],
     };
@@ -455,6 +464,8 @@ fn vector_immediate_has_no_trailing_colon() {
         components: ComponentSelect::Mask(0),
         negate: false,
         abs: false,
+        min_precision: Default::default(),
+        non_uniform: false,
         indices: SmallVec::new(),
         immediate_values: smallvec![0x3f80_0000, 0x3f80_0000, 0, 0],
     };
@@ -485,6 +496,7 @@ fn dcl_resource_uses_named_tags() {
                 sample_count: 0,
                 return_type: [ReturnType::Float; 4],
                 operands: smallvec![r],
+                space: 0,
             },
         )])
     };

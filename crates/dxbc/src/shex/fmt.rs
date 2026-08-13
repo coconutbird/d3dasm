@@ -10,7 +10,7 @@ use core::fmt::Write;
 
 use super::ir::{
     ComponentSelect, CustomDataType, GsPrimitive, Instruction, InstructionKind, Operand,
-    OperandIndex, Program, RegisterType, ReturnType,
+    MinPrecision, OperandIndex, Program, RegisterType, ReturnType, SystemValue,
 };
 use super::opcodes::Opcode;
 
@@ -66,7 +66,20 @@ pub fn write_program(w: &mut dyn Write, program: &Program) -> core::fmt::Result 
 /// Returns the sink's formatting error if any write fails.
 pub fn write_instruction(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Result {
     match &instr.kind {
-        InstructionKind::Generic { operands } => write_generic(w, instr, operands),
+        InstructionKind::Generic {
+            operands,
+            trailing_tokens,
+        } => {
+            write_generic(w, instr, operands)?;
+            if !trailing_tokens.is_empty() {
+                w.write_str(" /* trailing")?;
+                for token in trailing_tokens {
+                    write!(w, " 0x{token:08x}")?;
+                }
+                w.write_str(" */")?;
+            }
+            Ok(())
+        }
         InstructionKind::HsPhase => write_mnemonic(w, instr),
         InstructionKind::CustomData {
             subtype,
@@ -315,7 +328,7 @@ fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resul
                 w.write_char(' ')?;
             }
             write_operand_list(w, operands)?;
-            if let Some(sv) = system_value.filter(|s| *s != "undefined") {
+            if let Some(sv) = system_value.filter(|value| *value != SystemValue::Undefined) {
                 write!(w, ", {sv}")?;
             }
             Ok(())
@@ -329,7 +342,7 @@ fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resul
                 w.write_char(' ')?;
                 write_operand_list(w, operands)?;
             }
-            if let Some(sv) = system_value.filter(|s| *s != "undefined") {
+            if let Some(sv) = system_value.filter(|value| *value != SystemValue::Undefined) {
                 write!(w, ", {sv}")?;
             }
             Ok(())
@@ -350,12 +363,14 @@ fn write_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fmt::Resul
             w.write_str(") ")?;
             write_operand_list(w, operands)
         }
-        InstructionKind::DclSampler { mode, operands } => {
+        InstructionKind::DclSampler { mode, operands, .. } => {
             w.write_str("dcl_sampler ")?;
             write_operand_list(w, operands)?;
             write!(w, ", mode_{mode}")
         }
-        InstructionKind::DclConstantBuffer { access, operands } => {
+        InstructionKind::DclConstantBuffer {
+            access, operands, ..
+        } => {
             w.write_str("dcl_constantbuffer ")?;
             write_operand_list(w, operands)?;
             write!(w, ", {access}")
@@ -405,6 +420,9 @@ fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fm
         InstructionKind::DclHsForkPhaseInstanceCount { count } => {
             write!(w, "dcl_hsForkPhaseInstanceCount {count}")
         }
+        InstructionKind::DclHsJoinPhaseInstanceCount { count } => {
+            write!(w, "dcl_hsJoinPhaseInstanceCount {count}")
+        }
         InstructionKind::DclThreadGroup { x, y, z } => write!(w, "dcl_thread_group {x}, {y}, {z}"),
         InstructionKind::DclUavTyped {
             dimension,
@@ -422,7 +440,9 @@ fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fm
             w.write_str(") ")?;
             write_operand_list(w, operands)
         }
-        InstructionKind::DclUavRaw { flags, operands } => {
+        InstructionKind::DclUavRaw {
+            flags, operands, ..
+        } => {
             w.write_str("dcl_uav_raw")?;
             write_uav_flags(w, *flags)?;
             w.write_char(' ')?;
@@ -432,6 +452,7 @@ fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fm
             flags,
             stride,
             operands,
+            ..
         } => {
             w.write_str("dcl_uav_structured")?;
             write_uav_flags(w, *flags)?;
@@ -439,14 +460,33 @@ fn write_special_declaration(w: &mut dyn Write, instr: &Instruction) -> core::fm
             write_operand_list(w, operands)?;
             write!(w, ", {stride}")
         }
-        InstructionKind::DclResourceRaw { operands } => {
+        InstructionKind::DclResourceRaw { operands, .. } => {
             w.write_str("dcl_resource_raw ")?;
             write_operand_list(w, operands)
         }
-        InstructionKind::DclResourceStructured { stride, operands } => {
+        InstructionKind::DclResourceStructured {
+            stride, operands, ..
+        } => {
             w.write_str("dcl_resource_structured ")?;
             write_operand_list(w, operands)?;
             write!(w, ", {stride}")
+        }
+        InstructionKind::DclThreadGroupSharedMemoryRaw {
+            operands,
+            byte_count,
+        } => {
+            w.write_str("dcl_tgsm_raw ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {byte_count}")
+        }
+        InstructionKind::DclThreadGroupSharedMemoryStructured {
+            operands,
+            stride,
+            count,
+        } => {
+            w.write_str("dcl_tgsm_structured ")?;
+            write_operand_list(w, operands)?;
+            write!(w, ", {stride}, {count}")
         }
         InstructionKind::DclIndexRange { operands, count } => {
             w.write_str("dcl_indexRange ")?;
@@ -475,13 +515,16 @@ fn write_function_declaration(w: &mut dyn Write, instr: &Instruction) -> core::f
             w.write_char('}')
         }
         InstructionKind::DclInterface {
+            dynamically_indexed,
             interface_index,
-            num_call_sites,
+            expected_table_size,
+            array_length,
             table_indices,
         } => {
             write!(
                 w,
-                "dcl_interface fp{interface_index}[{num_call_sites}][{}] = {{",
+                "dcl_interface{} fp{interface_index}[{expected_table_size}][{array_length}][{}] = {{",
+                if *dynamically_indexed { "_dynamic" } else { "" },
                 table_indices.len()
             )?;
             for (i, t) in table_indices.iter().enumerate() {
@@ -491,6 +534,13 @@ fn write_function_declaration(w: &mut dyn Write, instr: &Instruction) -> core::f
                 write!(w, "ft{t}")?;
             }
             w.write_char('}')
+        }
+        InstructionKind::InterfaceCall {
+            function_index,
+            operands,
+        } => {
+            write!(w, "fcall {function_index}, ")?;
+            write_operand_list(w, operands)
         }
         _ => w.write_str(name),
     }
@@ -651,7 +701,8 @@ fn write_operand_core(
             }
             write_immediate(w, v, imm_type)?;
         }
-        return w.write_char(')');
+        w.write_char(')')?;
+        return write_operand_annotations(w, op);
     }
     if op.reg_type == RegisterType::Immediate64 {
         w.write_str("d(")?;
@@ -668,7 +719,8 @@ fn write_operand_core(
             write!(w, "{f:?}")?;
             i += 2;
         }
-        return w.write_char(')');
+        w.write_char(')')?;
+        return write_operand_annotations(w, op);
     }
 
     // Modifiers wrap the entire operand
@@ -713,6 +765,26 @@ fn write_operand_core(
     if op.abs {
         w.write_char('|')?;
     }
+    write_operand_annotations(w, op)
+}
+
+fn write_operand_annotations(w: &mut dyn Write, op: &Operand) -> core::fmt::Result {
+    let precision = match op.min_precision {
+        MinPrecision::Default => None,
+        MinPrecision::Float16 => Some("min16f"),
+        MinPrecision::Float2_8 => Some("min2_8f"),
+        MinPrecision::Sint16 => Some("min16i"),
+        MinPrecision::Uint16 => Some("min16u"),
+        MinPrecision::Reserved(_) => None,
+    };
+    if let Some(precision) = precision {
+        write!(w, " {{{precision}}}")?;
+    } else if let MinPrecision::Reserved(value) = op.min_precision {
+        write!(w, " {{minprec={}}}", value & 0x7)?;
+    }
+    if op.non_uniform {
+        w.write_str(" {nonuniform}")?;
+    }
     Ok(())
 }
 
@@ -722,6 +794,10 @@ fn write_index(w: &mut dyn Write, idx: &OperandIndex) -> core::fmt::Result {
         OperandIndex::Imm64(v) => write!(w, "{v}"),
         OperandIndex::Relative(sub) => write_operand(w, sub),
         OperandIndex::RelativePlusImm(imm, sub) => {
+            write_operand(w, sub)?;
+            write!(w, " + {imm}")
+        }
+        OperandIndex::RelativePlusImm64(imm, sub) => {
             write_operand(w, sub)?;
             write!(w, " + {imm}")
         }

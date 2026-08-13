@@ -26,7 +26,9 @@
 //!                 | '_off(' i ',' i ',' i ')'
 //!                 | '_res(' dim (',stride=' N)? ')' | '_rd' HEX8     ; resource dim (+ hex fallback)
 //!                 | '_rt(' ret ',' ret ',' ret ',' ret ')' | '_rr' HEX8)*  ; return types (+ fallback)
-//! operand      := '-'? '|'? core components? '|'?
+//! operand      := '-'? '|'? core components? '|'? operand_tag*
+//! operand_tag  := '@min16f' | '@min2_8f' | '@min16i' | '@min16u'
+//!               | '@minprec' digit | '@nonuniform'
 //! core         := imm | reg
 //! imm          := ('l'|'d') '(' value (', ' value)* ')'   ; value = float | int | 0xhex
 //! reg          := (prefix | '?reg(' value ')') index0? ('[' index ']')*

@@ -4,21 +4,16 @@
 //! `lib_*` target profile.  Each entry describes one exported function
 //! that can be linked via `ID3D11Linker`.
 //!
-//! The internal binary format is undocumented — we expose the raw size
-//! and attempt to read a leading function count (u32) when the chunk
-//! is large enough.
+//! The internal binary format has no published contract. The payload remains
+//! opaque instead of assigning speculative meaning to its first dword.
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use super::{ChunkParser, ChunkWriter};
-use nostdio::{Cursor, ReadLe};
-
 /// Parsed LIBF (library function table) chunk.
 #[derive(Debug, Clone)]
 pub struct LibraryFunction {
-    /// Number of exported functions (first u32), if parseable.
-    pub function_count: Option<u32>,
     /// Total size of the chunk payload in bytes.
     pub size: usize,
     /// Raw chunk payload for round-trip serialization.
@@ -28,14 +23,7 @@ pub struct LibraryFunction {
 /// Parse a LIBF chunk.
 #[must_use]
 pub fn parse_libf(data: &[u8]) -> Option<LibraryFunction> {
-    let function_count = if data.len() >= 4 {
-        let mut c = Cursor::new(data);
-        Some(c.read_u32_le().ok()?)
-    } else {
-        None
-    };
     Some(LibraryFunction {
-        function_count,
         size: data.len(),
         raw: Vec::from(data),
     })
@@ -59,12 +47,6 @@ impl ChunkWriter for LibraryFunction {
 
 impl fmt::Display for LibraryFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "// Library Functions: ")?;
-        if let Some(count) = self.function_count {
-            write!(f, "{count} entries")?;
-        } else {
-            write!(f, "empty")?;
-        }
-        writeln!(f, " ({} bytes)", self.size)
+        writeln!(f, "// Library Functions (opaque): {} bytes", self.size)
     }
 }

@@ -168,10 +168,10 @@ impl<'a> Shader<'a> {
         }
     }
 
-    /// Shader hash (HASH or XHSH chunk).
+    /// DXIL shader hash (HASH chunk).
     #[must_use]
     pub fn hash(&self) -> Option<&dxbc::chunks::ShaderHash> {
-        match self.find_by_fourcc(&[b"HASH", b"XHSH"])? {
+        match self.find_by_fourcc(&[b"HASH"])? {
             ChunkData::Hash(h) => Some(h),
             _ => None,
         }
@@ -296,6 +296,8 @@ impl fmt::Display for Shader<'_> {
                 ChunkData::LibraryHeader(lh) => write!(f, "{lh}")?,
                 ChunkData::LibraryFunction(lf) => write!(f, "{lf}")?,
                 ChunkData::LibraryFunctionSignatures(ls) => write!(f, "{ls}")?,
+                ChunkData::DxilReflection(d) => write!(f, "{d}")?,
+                ChunkData::CompilerVersion(v) => write!(f, "{v}")?,
                 _ => {}
             }
         }

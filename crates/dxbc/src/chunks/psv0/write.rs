@@ -2,7 +2,9 @@
 
 use alloc::vec::Vec;
 
-use super::types::{PSVSignatureElement, PipelineStateValidation, ShaderStageInfo};
+use super::types::{
+    PSVRuntimeInfo1Union, PSVSignatureElement, PipelineStateValidation, ShaderStageInfo,
+};
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -20,11 +22,10 @@ fn write_stage_info(out: &mut Vec<u8>, info: &ShaderStageInfo) {
     match info {
         ShaderStageInfo::Vertex {
             output_position_present,
+            padding,
         } => {
-            write_u32(out, u32::from(*output_position_present));
-            write_u32(out, 0);
-            write_u32(out, 0);
-            write_u32(out, 0);
+            write_u8(out, *output_position_present);
+            out.extend_from_slice(padding);
         }
         ShaderStageInfo::Hull {
             input_control_point_count,
@@ -40,33 +41,37 @@ fn write_stage_info(out: &mut Vec<u8>, info: &ShaderStageInfo) {
         ShaderStageInfo::Domain {
             input_control_point_count,
             output_position_present,
+            field_padding,
             tessellator_domain,
+            union_padding,
         } => {
             write_u32(out, *input_control_point_count);
-            write_u32(out, u32::from(*output_position_present));
+            write_u8(out, *output_position_present);
+            out.extend_from_slice(field_padding);
             write_u32(out, *tessellator_domain);
-            write_u32(out, 0);
+            out.extend_from_slice(union_padding);
         }
         ShaderStageInfo::Geometry {
             input_primitive,
             output_topology,
             output_stream_mask,
             output_position_present,
+            padding,
         } => {
             write_u32(out, *input_primitive);
             write_u32(out, *output_topology);
             write_u32(out, *output_stream_mask);
-            write_u32(out, u32::from(*output_position_present));
+            write_u8(out, *output_position_present);
+            out.extend_from_slice(padding);
         }
         ShaderStageInfo::Pixel {
             depth_output,
             sample_frequency,
+            padding,
         } => {
-            let b = u32::from(*depth_output) | u32::from(*sample_frequency) << 8;
-            write_u32(out, b);
-            write_u32(out, 0);
-            write_u32(out, 0);
-            write_u32(out, 0);
+            write_u8(out, *depth_output);
+            write_u8(out, *sample_frequency);
+            out.extend_from_slice(padding);
         }
         ShaderStageInfo::Mesh {
             group_shared_bytes_used,
@@ -85,18 +90,12 @@ fn write_stage_info(out: &mut Vec<u8>, info: &ShaderStageInfo) {
         }
         ShaderStageInfo::Amplification {
             payload_size_in_bytes,
+            padding,
         } => {
             write_u32(out, *payload_size_in_bytes);
-            write_u32(out, 0);
-            write_u32(out, 0);
-            write_u32(out, 0);
+            out.extend_from_slice(padding);
         }
-        ShaderStageInfo::Compute => {
-            write_u32(out, 0);
-            write_u32(out, 0);
-            write_u32(out, 0);
-            write_u32(out, 0);
-        }
+        ShaderStageInfo::Compute { raw } => out.extend_from_slice(raw),
         ShaderStageInfo::Other { raw } => {
             out.extend_from_slice(raw);
         }
@@ -115,11 +114,12 @@ fn write_sig_element(out: &mut Vec<u8>, e: &PSVSignatureElement, stride: u32) {
     write_u8(out, e.interpolation_mode);
     write_u8(out, e.dynamic_mask_and_stream);
     write_u8(out, e.reserved);
-    // Pad to stride
-    let written = out.len() - start;
-    for _ in written..(stride as usize) {
-        out.push(0);
-    }
+    out.extend_from_slice(&e.extra);
+    let end = start
+        .checked_add(usize::try_from(stride).expect("PSV signature stride fits in usize"))
+        .expect("PSV signature stride overflows usize");
+    assert!(out.len() <= end, "PSV signature element exceeds its stride");
+    out.resize(end, 0);
 }
 
 fn write_versioned_sections(out: &mut Vec<u8>, psv: &PipelineStateValidation) {
@@ -204,7 +204,19 @@ pub fn write_psv0(psv: &PipelineStateValidation) -> Vec<u8> {
     if let Some(ref ri1) = psv.runtime_info_1 {
         write_u8(&mut out, ri1.shader_stage);
         write_u8(&mut out, ri1.uses_view_id);
-        write_u16(&mut out, ri1.max_vert_or_patch_prim);
+        let raw_union = match ri1.stage_union {
+            PSVRuntimeInfo1Union::MaxVertexCount(value) | PSVRuntimeInfo1Union::Reserved(value) => {
+                value
+            }
+            PSVRuntimeInfo1Union::PatchConstantVectors { vectors, padding } => {
+                u16::from(vectors) | (u16::from(padding) << 8)
+            }
+            PSVRuntimeInfo1Union::Mesh {
+                signature_primitive_vectors,
+                output_topology,
+            } => u16::from(signature_primitive_vectors) | (u16::from(output_topology) << 8),
+        };
+        write_u16(&mut out, raw_union);
         write_u8(&mut out, ri1.sig_input_elements);
         write_u8(&mut out, ri1.sig_output_elements);
         write_u8(&mut out, ri1.sig_patch_const_or_prim_elements);
@@ -231,12 +243,12 @@ pub fn write_psv0(psv: &PipelineStateValidation) -> Vec<u8> {
         write_u32(&mut out, gsm);
     }
 
-    // Pad info struct to info_size (in case future versions have more)
-    let info_written = out.len() - 4; // subtract the info_size u32 itself
-    if u32::try_from(info_written).expect("PSV info size exceeds u32") < psv.info_size {
-        let pad = usize::try_from(psv.info_size).expect("u32 fits in usize") - info_written;
-        out.resize(out.len() + pad, 0);
-    }
+    out.extend_from_slice(&psv.runtime_info_extra);
+    let runtime_end = 4usize
+        .checked_add(usize::try_from(psv.info_size).expect("PSV info size fits in usize"))
+        .expect("PSV info size overflows usize");
+    assert!(out.len() <= runtime_end, "PSV runtime info exceeds info_size");
+    out.resize(runtime_end, 0);
 
     // Resource count
     write_u32(
@@ -257,14 +269,15 @@ pub fn write_psv0(psv: &PipelineStateValidation) -> Vec<u8> {
             if let Some(flags) = r.res_flags {
                 write_u32(&mut out, flags);
             }
-            // Pad to resource_bind_info_size
-            let written = out.len() - rstart;
-            if written < psv.resource_bind_info_size as usize {
-                out.resize(
-                    out.len() + (psv.resource_bind_info_size as usize - written),
-                    0,
-                );
-            }
+            out.extend_from_slice(&r.extra);
+            let rend = rstart
+                .checked_add(
+                    usize::try_from(psv.resource_bind_info_size)
+                        .expect("PSV resource stride fits in usize"),
+                )
+                .expect("PSV resource stride overflows usize");
+            assert!(out.len() <= rend, "PSV resource binding exceeds its stride");
+            out.resize(rend, 0);
         }
     }
 

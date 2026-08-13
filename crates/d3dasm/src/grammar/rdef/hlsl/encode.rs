@@ -39,6 +39,12 @@ fn emit_binding(o: &mut String, b: &ResourceBinding<'_>, rd: &ResourceDef<'_>) -
     if b.flags != derived_binding_flags(b.input_type, b.return_type) {
         let _ = write!(o, " flags={}", bind_flags_str(b.flags));
     }
+    if b.space != 0 {
+        let _ = write!(o, " space={}", b.space);
+    }
+    if b.id != 0 {
+        let _ = write!(o, " id={}", b.id);
+    }
     o.push_str(";\n");
     Some(())
 }
@@ -110,9 +116,9 @@ pub fn rdef_to_hlsl(rd: &ResourceDef<'_>) -> Option<String> {
     let _ = writeln!(o, "target=0x{:08x}", rd.target_version);
     let _ = writeln!(o, "flags=0x{:x}", rd.compile_flags);
     let _ = writeln!(o, "creator={}", rd.creator);
-    if let Some(rd11) = &rd.rd11_extra {
+    if let Some(rd11) = rd.rd11 {
         o.push_str("rd11=");
-        for (i, x) in rd11.iter().enumerate() {
+        for (i, x) in rd11.to_words().iter().enumerate() {
             let _ = write!(o, "{}{x:x}", if i == 0 { "" } else { "," });
         }
         o.push('\n');
