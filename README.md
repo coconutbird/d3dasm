@@ -161,8 +161,17 @@ The fuzz harness is checked and linted with the workspace, but is excluded from
 `cargo test --all-targets` because libFuzzer supplies its entry point only when
 run through `cargo fuzz`.
 
-Round-trip verification across all test shaders:
+### Local shader corpora
+
+Shader binaries and proprietary corpora are intentionally not committed. Keep
+local inputs under `shader-raw/`, `shaders/`, or `shaders-pc/`; these directories
+are ignored by Git. Supply the files to the conformance tools explicitly:
 
 ```sh
-cargo run --release --example roundtrip -- shaders/shaders-pc/**/*.bin
+cargo run --release -p d3dasm-cli --example chunk_conformance -- <shader-files...>
+cargo run --release -p d3dasm-cli --example container_roundtrip -- <shader-files...>
 ```
+
+`chunk_conformance` verifies typed chunk parse/write identity.
+`container_roundtrip` verifies byte identity for each complete input file,
+including non-DXBC wrapper data.
