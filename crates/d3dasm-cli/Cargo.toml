@@ -23,4 +23,5 @@ doc = false
 [dependencies]
 clap.workspace = true
 d3dasm = { workspace = true, features = ["std"] }
+d3dasm-decompiler.workspace = true
 dxbc = { workspace = true, features = ["std"] }

@@ -4,9 +4,10 @@ members = [
     "crates/dxbc",
     "crates/d3dasm",
     "crates/d3dasm-cli",
+    "crates/decompiler",
     "crates/dxbc/fuzz",
 ]
-default-members = ["crates/dxbc", "crates/d3dasm", "crates/d3dasm-cli"]
+default-members = ["crates/dxbc", "crates/d3dasm", "crates/d3dasm-cli", "crates/decompiler"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,7 +22,9 @@ readme = "README.md"
 [workspace.dependencies]
 arbitrary = "1"
 clap = { version = "4.5.60", features = ["derive"] }
+cfglib = { path = "../../napbat/cfglib/crates/cfglib" }
 d3dasm = { version = "0.1.0", path = "crates/d3dasm" }
+d3dasm-decompiler = { version = "0.1.0", path = "crates/decompiler" }
 dxbc = { version = "0.1.0", path = "crates/dxbc" }
 libfuzzer-sys = "0.4"
 memchr = { version = "2.8.0", default-features = false }

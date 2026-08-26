@@ -26,6 +26,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - run: cargo check --workspace --all-targets --all-features
 
+  no-std:
+    name: no_std
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      # Default features only: dxbc's `std` feature cannot build for an
+      # embedded target, which is the point of this check.
+      - run: cargo check -p dxbc --target thumbv7em-none-eabi
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

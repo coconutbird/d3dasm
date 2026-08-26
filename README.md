@@ -31,7 +31,34 @@ Parses DXBC containers, decodes SM4/SM5 shader bytecode into a fully typed inter
 | ------------ | -------------- | --------------------------------------------------------------------------------------------- |
 | `dxbc`       | lib (`no_std`) | DXBC container parser/writer, chunk decoders, SM4/SM5 bytecode decode/encode/format           |
 | `d3dasm`     | lib            | High-level disassembly interface — wraps `dxbc` with typed accessors and `Display` formatting |
-| `d3dasm-cli` | bin            | Command-line disassembler                                                                     |
+| `d3dasm-decompiler` | lib     | SM4/SM5 bytecode → HLSL decompiler built on [cfglib](https://github.com/napbat/cfglib)'s IR stack; its `cfg` module exposes a raw CFG + component-granular SSA adapter |
+| `d3dasm-cli` | bin            | Command-line disassembler and decompiler                                                      |
+
+## Decompilation
+
+`--emit hlsl` decompiles each shader program to HLSL source. The
+decompiler lifts the decoded instruction stream into an MLIL dialect over
+cfglib's generic IR (structured markers become blocks and edges;
+immediates, constant-buffer reads, and indexable temporaries materialize
+as pure value producers), recovers structured statements with single-use
+expressions inlined into their consumers through cfglib's HLIL lift, and
+renders compilable HLSL with bit-honest storage: temporaries are `uint4`
+locals (fxc's constant folder flushes float values it can prove
+denormal, so integer bits never round-trip float-typed storage), every
+read and write bit-casts between the storage and the consuming
+operation's lane type, and literals format natively in each consumer's
+lane type.
+
+Correctness is proven, not assumed: `tests/recompile.rs` recompiles
+every decompiled corpus shader under `fxc.exe /Gis` with its own
+profile, then executes the original and recompiled bytecode in a
+reference interpreter (`src/interp.rs`) over seeded synthetic worlds —
+signature-keyed registers, D3D-spec integer and NaN semantics — and
+compares every output bit-for-bit. Of the 1,197 corpus shaders, 917
+decompile today (the remainder are geometry/hull/domain stages and a
+few exotic opcodes, each reported explicitly); all 917 recompile
+cleanly and all 917 are proven semantically equivalent to their
+recompilation.
 
 ## Usage
 
@@ -123,6 +150,10 @@ d3dasm/
 │   │   ├── Cargo.toml
 │   │   ├── src/lib.rs                # Library target
 │   │   └── tests/                    # Integration tests
+│   ├── decompiler/                   # SM4/SM5 → HLSL decompiler over cfglib
+│   │   ├── Cargo.toml
+│   │   ├── src/                      # dialect, lift, render, interp, cfg (SSA adapter)
+│   │   └── tests/                    # recompile + differential gate, SSA-over-shex
 │   └── d3dasm-cli/                   # CLI binary
 │       ├── Cargo.toml
 │       ├── src/main.rs               # Binary target

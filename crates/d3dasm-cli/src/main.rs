@@ -12,8 +12,9 @@ use clap::Parser;
 ///
 /// Default mode disassembles a DXBC binary to human text. `--emit d3dasm`
 /// writes the full forensic `.d3dasm` document (metadata header + every chunk,
-/// shader program editable); `--assemble` rebuilds the byte-identical DXBC
-/// container(s) from a `.d3dasm` document.
+/// shader program editable); `--emit hlsl` decompiles each shader program to
+/// HLSL source; `--assemble` rebuilds the byte-identical DXBC container(s)
+/// from a `.d3dasm` document.
 #[derive(Parser)]
 #[command(name = "d3dasm", version, about)]
 struct Cli {
@@ -77,6 +78,18 @@ fn disassemble(cli: &Cli) -> Result<(), String> {
                 let _ = writeln!(out, "{shader}");
             }
         }
+        "hlsl" => {
+            for (i, shader) in shaders.iter().enumerate() {
+                let _ = writeln!(out, "// ===== shader #{i} =====");
+                match decompiler::decompile_shader(shader) {
+                    Ok(source) => out.push_str(&source),
+                    Err(error) => {
+                        let _ = writeln!(out, "// not decompiled: {error}");
+                    }
+                }
+                out.push('\n');
+            }
+        }
         "d3dasm" => {
             // Whole-file forensic document: a container document per DXBC
             // container, plus `.raw` segments for any archive/wrapper bytes
@@ -85,7 +98,7 @@ fn disassemble(cli: &Cli) -> Result<(), String> {
         }
         other => {
             return Err(format!(
-                "unknown --emit format: {other:?} (use human|d3dasm)"
+                "unknown --emit format: {other:?} (use human|d3dasm|hlsl)"
             ));
         }
     }
