@@ -1,23 +1,21 @@
 //! Value rendering: expression trees, operations, and memory places.
 
-use cfglib::ir::hlil::{ExpressionId, ExpressionKind};
-use cfglib::ir::rtl::{ScalarType, ValueShape, VarExpr};
+use cfglib::ir::rtl::{ResolvedRead, ScalarType, ValueShape, VarExpr};
 use dxbc::shex::Opcode;
 
 use crate::dialect::{AluHead, MemRef, RegFile, Register, RtlOp, SystemInput};
 use crate::lift::Unsupported;
 
 use super::{
-    CB_NAMING_MISS, Expr, HullMode, Op, Rendered, Renderer, binary, call1, call2, cast_name,
+    CB_NAMING_MISS, Expr, HullMode, Reads, Rendered, Renderer, binary, call1, call2, cast_name,
     literal, scalar_keyword, select_call_lanes, splat, suffix, texel_offsets, width_text,
 };
 
-impl Renderer<'_> {
+impl<'a> Renderer<'a> {
     pub(super) fn value(
         &self,
         expr: &Expr,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         context: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         match expr {
@@ -29,7 +27,7 @@ impl Renderer<'_> {
                 } else {
                     *scalar
                 };
-                self.read(positions, wanted, operands, cursor)
+                self.read(positions, wanted, reads)
             }
             VarExpr::Const { bits, shape } => {
                 let wanted = if shape.scalar == ScalarType::Bits {
@@ -43,9 +41,9 @@ impl Renderer<'_> {
                 operator,
                 operands: inner,
                 shape,
-            } => self.apply(operator, inner, *shape, operands, cursor, context),
+            } => self.apply(operator, inner, *shape, reads, context),
             VarExpr::Reinterpret { operand, shape } => {
-                let value = self.value(operand, operands, cursor, context)?;
+                let value = self.value(operand, reads, context)?;
                 Ok(Rendered::atom(
                     format!("{}({})", cast_name(shape.scalar), value.text),
                     shape.scalar,
@@ -60,7 +58,7 @@ impl Renderer<'_> {
                 let rendered: Vec<String> = parts
                     .iter()
                     .map(|part| {
-                        self.value(part, operands, cursor, wanted)
+                        self.value(part, reads, wanted)
                             .map(|part| part.cast_bare(wanted))
                     })
                     .collect::<Result<_, _>>()?;
@@ -82,17 +80,14 @@ impl Renderer<'_> {
         &self,
         positions: &[u8],
         wanted: ScalarType,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<Rendered, Unsupported> {
-        let id = operands
-            .get(*cursor)
-            .copied()
-            .ok_or_else(|| Unsupported("read without an operand".into()))?;
-        *cursor += 1;
-        match self.expression(id)?.kind() {
-            ExpressionKind::Variable(variable) => {
-                let (index, web) = self.hlil_web(*variable)?;
+        let resolved = reads
+            .resolve(positions)
+            .map_err(|error| Unsupported(error.to_string()))?;
+        match resolved {
+            ResolvedRead::Variable(variable) => {
+                let (index, web) = self.hlil_web(variable)?;
                 if let Some(Register {
                     file: RegFile::PatchConstant,
                     index: register,
@@ -130,45 +125,27 @@ impl Renderer<'_> {
                 let value = Rendered::atom(selected, holder);
                 Ok(Rendered::atom(value.cast(wanted), wanted))
             }
-            ExpressionKind::Operation {
-                operation:
-                    Op::Assign {
-                        positions: written,
-                        value,
-                        ..
-                    },
-                operands: inner,
+            ResolvedRead::Inlined {
+                value,
+                operands,
+                remap,
             } => {
-                let mut inner_cursor = 0usize;
-                let rendered = self.value(value, inner, &mut inner_cursor, wanted)?;
-                // Remap the read's positions through the producer's
-                // written order.
-                let identity = positions == written.as_slice();
-                if identity {
-                    Ok(Rendered {
+                let mut inner_reads = reads.nested(operands);
+                let rendered = self.value(value, &mut inner_reads, wanted)?;
+                match remap {
+                    None => Ok(Rendered {
                         text: rendered.cast(wanted),
                         scalar: wanted,
                         atomic: true,
-                    })
-                } else {
-                    let mapped: Vec<u8> = positions
-                        .iter()
-                        .map(|position| {
-                            written
-                                .iter()
-                                .position(|written| written == position)
-                                .and_then(|index| u8::try_from(index).ok())
-                                .ok_or_else(|| {
-                                    Unsupported("read outside the inlined producer".into())
-                                })
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let swizzled = format!("{}.{}", rendered.wrapped(), suffix(&mapped));
-                    let value = Rendered::atom(swizzled, rendered.scalar);
-                    Ok(Rendered::atom(value.cast(wanted), wanted))
+                    }),
+                    Some(mapped) => {
+                        let swizzled = format!("{}.{}", rendered.wrapped(), suffix(&mapped));
+                        let value = Rendered::atom(swizzled, rendered.scalar);
+                        Ok(Rendered::atom(value.cast(wanted), wanted))
+                    }
                 }
             }
-            _ => Err(Unsupported("read of an unexpected expression".into())),
+            ResolvedRead::Constant(_) => Err(Unsupported("read of an inlined constant".into())),
         }
     }
 
@@ -178,8 +155,7 @@ impl Renderer<'_> {
         operator: &RtlOp,
         inner: &[Expr],
         shape: ValueShape,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         context: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         let produced = if shape.scalar == ScalarType::Bits {
@@ -189,17 +165,17 @@ impl Renderer<'_> {
         };
         match operator {
             RtlOp::Neg => {
-                let value = self.value(&inner[0], operands, cursor, context)?;
+                let value = self.value(&inner[0], reads, context)?;
                 let scalar = value.scalar;
                 Ok(Rendered::composite(format!("-{}", value.wrapped()), scalar))
             }
             RtlOp::Abs => {
-                let value = self.value(&inner[0], operands, cursor, context)?;
+                let value = self.value(&inner[0], reads, context)?;
                 let scalar = value.scalar;
                 Ok(Rendered::atom(format!("abs({})", value.text), scalar))
             }
             RtlOp::Test { nonzero } => {
-                let value = self.value(&inner[0], operands, cursor, ScalarType::U32)?;
+                let value = self.value(&inner[0], reads, ScalarType::U32)?;
                 let text = value.cast(ScalarType::U32);
                 let symbol = if *nonzero { "!=" } else { "==" };
                 Ok(Rendered::composite(
@@ -237,7 +213,7 @@ impl Renderer<'_> {
                 lanes,
             } => {
                 let index = self
-                    .value(&inner[0], operands, cursor, ScalarType::U32)?
+                    .value(&inner[0], reads, ScalarType::U32)?
                     .cast(ScalarType::U32);
                 let element = if *base == 0 {
                     format!("_icp{vertex}[{index}]")
@@ -250,7 +226,7 @@ impl Renderer<'_> {
             }
             RtlOp::LoadMem(reference) => {
                 let address = inner.first();
-                let place = self.memory(reference, address, operands, cursor)?;
+                let place = self.memory(reference, address, reads)?;
                 let selected = if reference.lanes.as_slice() == [0, 1, 2, 3] {
                     place
                 } else {
@@ -263,7 +239,7 @@ impl Renderer<'_> {
                 let value = Rendered::atom(selected, holder);
                 Ok(Rendered::atom(value.cast(produced), produced))
             }
-            RtlOp::Alu(head) => self.alu(head, inner, shape, produced, operands, cursor),
+            RtlOp::Alu(head) => self.alu(head, inner, shape, produced, reads),
         }
     }
 
@@ -275,8 +251,7 @@ impl Renderer<'_> {
         inner: &[Expr],
         shape: ValueShape,
         produced: ScalarType,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<Rendered, Unsupported> {
         let opcode = head.opcode;
         let width = shape.lanes;
@@ -291,7 +266,7 @@ impl Renderer<'_> {
                 let expr = inner
                     .get($index)
                     .ok_or_else(|| Unsupported(format!("missing operand {}", $index)))?;
-                self.value(expr, operands, cursor, operand_context)
+                self.value(expr, reads, operand_context)
             }};
         }
         let rendered = match opcode {
@@ -306,10 +281,10 @@ impl Renderer<'_> {
             Opcode::Movc => {
                 let condition = {
                     let expr = &inner[0];
-                    if let Some(text) = self.inlined_comparison(expr, operands, cursor)? {
+                    if let Some(text) = self.inlined_comparison(expr, reads)? {
                         text
                     } else {
-                        let value = self.value(expr, operands, cursor, ScalarType::U32)?;
+                        let value = self.value(expr, reads, ScalarType::U32)?;
                         format!("{} != 0u", value.cast(ScalarType::U32))
                     }
                 };
@@ -393,7 +368,7 @@ impl Renderer<'_> {
             | Opcode::INe
             | Opcode::ULt
             | Opcode::UGe => {
-                let comparison = self.comparison(head, inner, operands, cursor)?;
+                let comparison = self.comparison(head, inner, reads)?;
                 let ones = splat("0xffffffffu", width);
                 let zeros = splat("0u", width);
                 Rendered::composite(format!("({comparison}) ? {ones} : {zeros}"), produced)
@@ -430,12 +405,12 @@ impl Renderer<'_> {
                 binary(&arg!(0)?, symbol, &arg!(1)?, produced)
             }
             Opcode::Sample | Opcode::SampleL | Opcode::SampleB => {
-                self.sample(head, inner, operands, cursor, produced)?
+                self.sample(head, inner, reads, produced)?
             }
-            Opcode::Ld => self.texel_load(head, inner, operands, cursor, produced)?,
-            Opcode::LdMs => self.texel_load_ms(head, inner, operands, cursor, produced)?,
-            Opcode::Gather4 => self.gather(head, inner, operands, cursor, produced)?,
-            Opcode::LdStructured => self.structured_load(head, inner, shape, operands, cursor)?,
+            Opcode::Ld => self.texel_load(head, inner, reads, produced)?,
+            Opcode::LdMs => self.texel_load_ms(head, inner, reads, produced)?,
+            Opcode::Gather4 => self.gather(head, inner, reads, produced)?,
+            Opcode::LdStructured => self.structured_load(head, inner, shape, reads)?,
             other => {
                 return Err(Unsupported(format!("opcode {}", other.name())));
             }
@@ -454,15 +429,14 @@ impl Renderer<'_> {
         &self,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         produced: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         let [resource, sampler] = head.bindings.as_slice() else {
             return Err(Unsupported("sample without resource and sampler".into()));
         };
         let coordinate = self
-            .value(&inner[0], operands, cursor, ScalarType::F32)?
+            .value(&inner[0], reads, ScalarType::F32)?
             .cast_bare(ScalarType::F32);
         let texture = self.texture_name(resource.register.index);
         let sampler = self.sampler_name(sampler.register.index);
@@ -471,13 +445,13 @@ impl Renderer<'_> {
         let call = match head.opcode {
             Opcode::SampleL => {
                 let level = self
-                    .value(&inner[1], operands, cursor, ScalarType::F32)?
+                    .value(&inner[1], reads, ScalarType::F32)?
                     .cast_bare(ScalarType::F32);
                 format!("{texture}.SampleLevel({sampler}, {coordinate}, {level}{offsets})")
             }
             Opcode::SampleB => {
                 let bias = self
-                    .value(&inner[1], operands, cursor, ScalarType::F32)?
+                    .value(&inner[1], reads, ScalarType::F32)?
                     .cast_bare(ScalarType::F32);
                 format!("{texture}.SampleBias({sampler}, {coordinate}, {bias}{offsets})")
             }
@@ -493,15 +467,14 @@ impl Renderer<'_> {
         &self,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         produced: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         let [resource] = head.bindings.as_slice() else {
             return Err(Unsupported("ld without a resource".into()));
         };
         let coordinate = self
-            .value(&inner[0], operands, cursor, ScalarType::I32)?
+            .value(&inner[0], reads, ScalarType::I32)?
             .cast_bare(ScalarType::I32);
         let dimensions = usize::from(inner[0].shape().lanes.max(2)) - 1;
         let offsets = texel_offsets(head, dimensions.max(1));
@@ -519,18 +492,17 @@ impl Renderer<'_> {
         &self,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         produced: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         let [resource] = head.bindings.as_slice() else {
             return Err(Unsupported("ld_ms without a resource".into()));
         };
         let coordinate = self
-            .value(&inner[0], operands, cursor, ScalarType::I32)?
+            .value(&inner[0], reads, ScalarType::I32)?
             .cast_bare(ScalarType::I32);
         let sample = self
-            .value(&inner[1], operands, cursor, ScalarType::I32)?
+            .value(&inner[1], reads, ScalarType::I32)?
             .cast_bare(ScalarType::I32);
         let call = format!(
             "{}.Load({coordinate}, {sample})",
@@ -546,15 +518,14 @@ impl Renderer<'_> {
         &self,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         produced: ScalarType,
     ) -> Result<Rendered, Unsupported> {
         let [resource, sampler] = head.bindings.as_slice() else {
             return Err(Unsupported("gather4 without resource and sampler".into()));
         };
         let coordinate = self
-            .value(&inner[0], operands, cursor, ScalarType::F32)?
+            .value(&inner[0], reads, ScalarType::F32)?
             .cast_bare(ScalarType::F32);
         let channel = sampler.lanes.first().copied().unwrap_or(0);
         let intrinsic = match channel {
@@ -583,14 +554,13 @@ impl Renderer<'_> {
         head: &AluHead,
         inner: &[Expr],
         shape: ValueShape,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<Rendered, Unsupported> {
         let [resource] = head.bindings.as_slice() else {
             return Err(Unsupported("ld_structured without a resource".into()));
         };
         let element = self
-            .value(&inner[0], operands, cursor, ScalarType::U32)?
+            .value(&inner[0], reads, ScalarType::U32)?
             .cast(ScalarType::U32);
         // The byte offset must be an immediate to name a struct field.
         let VarExpr::Const { bits, .. } = &inner[1] else {
@@ -628,7 +598,7 @@ impl Renderer<'_> {
         target_scalar: ScalarType,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
+        reads: &mut Reads<'a>,
     ) -> Result<(), Unsupported> {
         let [resource] = head.bindings.as_slice() else {
             return Err(Unsupported("resinfo without a resource".into()));
@@ -639,9 +609,8 @@ impl Renderer<'_> {
             .iter()
             .find(|(index, ..)| *index == resource.register.index)
             .map_or("texture2d", |(_, dimension, _)| dimension);
-        let mut cursor = 0usize;
         let mip = self
-            .value(&inner[0], operands, &mut cursor, ScalarType::U32)?
+            .value(&inner[0], reads, ScalarType::U32)?
             .cast_bare(ScalarType::U32);
         let texture = self.texture_name(resource.register.index);
         // Result layout: [width, height, depth-or-elements, mip count].
@@ -701,11 +670,10 @@ impl Renderer<'_> {
         &self,
         reference: &MemRef,
         address: Option<&Expr>,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<String, Unsupported> {
         if reference.file == RegFile::ConstantBuffer {
-            return self.constant_buffer_place(reference, address, operands, cursor);
+            return self.constant_buffer_place(reference, address, reads);
         }
         // The element index position depends on the file: `icb` has no
         // register-selecting index.
@@ -720,7 +688,7 @@ impl Renderer<'_> {
         let Some(&offset) = reference.indices.get(element_position) else {
             return Err(Unsupported("unindexed addressable read".into()));
         };
-        let index = self.memory_index(reference, address, operands, cursor, offset)?;
+        let index = self.memory_index(reference, address, reads, offset)?;
         // A dynamically indexed icb read is bounds-defined in DXBC (out
         // of range reads zero) but undefined for an HLSL const array,
         // where fxc lowers assuming the index is in range. An explicit
@@ -739,8 +707,7 @@ impl Renderer<'_> {
         &self,
         reference: &MemRef,
         address: Option<&Expr>,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
         offset: u32,
     ) -> Result<String, Unsupported> {
         if reference.relative_to.is_some() {
@@ -751,7 +718,7 @@ impl Renderer<'_> {
             } else {
                 ScalarType::I32
             };
-            let rendered = self.value(address, operands, cursor, wanted)?.cast(wanted);
+            let rendered = self.value(address, reads, wanted)?.cast(wanted);
             if offset == 0 {
                 Ok(rendered)
             } else {
@@ -768,8 +735,7 @@ impl Renderer<'_> {
         &self,
         reference: &MemRef,
         address: Option<&Expr>,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<String, Unsupported> {
         let slot = reference.indices.first().copied().unwrap_or(0);
         let Some(&offset) = reference.indices.get(1) else {
@@ -779,7 +745,7 @@ impl Renderer<'_> {
             let address =
                 address.ok_or_else(|| Unsupported("relative reference without address".into()))?;
             Some(
-                self.value(address, operands, cursor, ScalarType::I32)?
+                self.value(address, reads, ScalarType::I32)?
                     .cast(ScalarType::I32),
             )
         } else {

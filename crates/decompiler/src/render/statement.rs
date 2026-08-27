@@ -1,7 +1,7 @@
 //! Statement rendering: assignments, effects, and conditions.
 
 use cfglib::ir::hlil::{ExpressionId, ExpressionKind, StatementId, StatementKind};
-use cfglib::ir::rtl::{ScalarType, VarExpr};
+use cfglib::ir::rtl::{ResolvedRead, ScalarType, VarExpr};
 use dxbc::shex::Opcode;
 
 use crate::dialect::{AluHead, EffectOp, RegFile, RtlOp};
@@ -127,6 +127,7 @@ impl<'a> Renderer<'a> {
         let (index, web) = self.mlil_web(*target)?;
         let name = self.web_names[index].clone();
         let scalar = normalize(web.shape.scalar);
+        let mut reads = Reads::new(self.function, operands);
         // `resinfo` renders as a statement block, not an expression.
         if let VarExpr::Apply {
             operator: RtlOp::Alu(head),
@@ -136,10 +137,9 @@ impl<'a> Renderer<'a> {
             && head.opcode == Opcode::Resinfo
         {
             let place = Self::place_text(&name, positions, *width);
-            return self.resinfo(&place, scalar, head, inner, operands);
+            return self.resinfo(&place, scalar, head, inner, &mut reads);
         }
-        let mut cursor = 0usize;
-        let rendered = self.value(value, operands, &mut cursor, scalar)?;
+        let rendered = self.value(value, &mut reads, scalar)?;
         let place = Self::place_text(&name, positions, *width);
         let text = rendered.cast_bare(scalar);
         self.line(&format!("{place} = {text};"));
@@ -190,7 +190,7 @@ impl<'a> Renderer<'a> {
                 let value = values
                     .first()
                     .ok_or_else(|| Unsupported("output store without a value".into()))?;
-                let mut cursor = 0usize;
+                let mut reads = Reads::new(self.function, operands);
                 let integral = (self.declarations.geometry.is_some()
                     || self.hull_mode == HullMode::ControlPoint)
                     && self.output_integral(*register);
@@ -199,7 +199,7 @@ impl<'a> Renderer<'a> {
                 } else {
                     ScalarType::F32
                 };
-                let rendered = self.value(value, operands, &mut cursor, wanted)?;
+                let rendered = self.value(value, &mut reads, wanted)?;
                 let name = if self.declarations.geometry.is_some() {
                     format!("_vertex.{}", Self::register_name(*register))
                 } else if self.hull_mode == HullMode::ControlPoint {
@@ -223,10 +223,10 @@ impl<'a> Renderer<'a> {
                 let value = values
                     .first()
                     .ok_or_else(|| Unsupported("store without a value".into()))?;
-                let mut cursor = 0usize;
-                let rendered = self.value(value, operands, &mut cursor, ScalarType::U32)?;
+                let mut reads = Reads::new(self.function, operands);
+                let rendered = self.value(value, &mut reads, ScalarType::U32)?;
                 let address = values.get(1);
-                let place = self.memory(reference, address, operands, &mut cursor)?;
+                let place = self.memory(reference, address, &mut reads)?;
                 let place = if reference.lanes.len() == 4 {
                     place
                 } else {
@@ -253,11 +253,11 @@ impl<'a> Renderer<'a> {
                 let value = values
                     .get(1)
                     .ok_or_else(|| Unsupported("uav store without a value".into()))?;
-                let mut cursor = 0usize;
+                let mut reads = Reads::new(self.function, operands);
                 let coordinate = self
-                    .value(coordinate, operands, &mut cursor, ScalarType::U32)?
+                    .value(coordinate, &mut reads, ScalarType::U32)?
                     .cast_bare(ScalarType::U32);
-                let rendered = self.value(value, operands, &mut cursor, element)?;
+                let rendered = self.value(value, &mut reads, element)?;
                 let name = self.uav_name(register.index);
                 let text = rendered.cast_bare(element);
                 self.line(&format!("{name}[{coordinate}] = {text};"));
@@ -275,8 +275,8 @@ impl<'a> Renderer<'a> {
                 let value = values
                     .first()
                     .ok_or_else(|| Unsupported("discard without a condition".into()))?;
-                let mut cursor = 0usize;
-                let condition = self.test_text(value, operands, &mut cursor)?;
+                let mut reads = Reads::new(self.function, operands);
+                let condition = self.test_text(value, &mut reads)?;
                 self.line(&format!("if ({condition}) discard;"));
                 Ok(())
             }
@@ -297,8 +297,8 @@ impl<'a> Renderer<'a> {
         let Op::Branch { condition } = operation else {
             return Err(Unsupported("condition is not a branch".into()));
         };
-        let mut cursor = 0usize;
-        self.test_text(condition, operands, &mut cursor)
+        let mut reads = Reads::new(self.function, operands);
+        self.test_text(condition, &mut reads)
     }
 
     /// Renders one `Test` application (or a bare tested value) as a
@@ -306,8 +306,7 @@ impl<'a> Renderer<'a> {
     pub(super) fn test_text(
         &self,
         expr: &Expr,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<String, Unsupported> {
         if let VarExpr::Apply {
             operator: RtlOp::Test { nonzero },
@@ -319,14 +318,14 @@ impl<'a> Renderer<'a> {
                 .first()
                 .ok_or_else(|| Unsupported("test without an operand".into()))?;
             // A comparison feeding the test renders as the bare boolean.
-            if let Some(comparison) = self.inlined_comparison(tested, operands, cursor)? {
+            if let Some(comparison) = self.inlined_comparison(tested, reads)? {
                 return Ok(if *nonzero {
                     comparison
                 } else {
                     format!("!({comparison})")
                 });
             }
-            let value = self.value(tested, operands, cursor, ScalarType::U32)?;
+            let value = self.value(tested, reads, ScalarType::U32)?;
             let text = value.cast(ScalarType::U32);
             return Ok(if *nonzero {
                 format!("{text} != 0u")
@@ -334,7 +333,7 @@ impl<'a> Renderer<'a> {
                 format!("{text} == 0u")
             });
         }
-        let value = self.value(expr, operands, cursor, ScalarType::U32)?;
+        let value = self.value(expr, reads, ScalarType::U32)?;
         Ok(format!("{} != 0u", value.cast(ScalarType::U32)))
     }
 
@@ -345,8 +344,7 @@ impl<'a> Renderer<'a> {
     pub(super) fn inlined_comparison(
         &self,
         expr: &Expr,
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<Option<String>, Unsupported> {
         let VarExpr::Read { positions, .. } = expr else {
             // A directly nested comparison application.
@@ -357,38 +355,37 @@ impl<'a> Renderer<'a> {
             } = expr
                 && comparison_symbol(head.opcode).is_some()
             {
-                let text = self.comparison(head, inner, operands, cursor)?;
+                let text = self.comparison(head, inner, reads)?;
                 return Ok(Some(text));
             }
             return Ok(None);
         };
-        let id = operands
-            .get(*cursor)
-            .copied()
-            .ok_or_else(|| Unsupported("read without an operand".into()))?;
-        let ExpressionKind::Operation {
-            operation:
-                Op::Assign {
-                    positions: written,
-                    value:
-                        VarExpr::Apply {
-                            operator: RtlOp::Alu(head),
-                            operands: inner,
-                            ..
-                        },
+        // Probe on a clone: the read is consumed only when it resolves
+        // to a comparison producer read in the producer's own lane order
+        // (a remapped read must go through the generic value path).
+        let mut probe = reads.clone();
+        let resolved = probe
+            .resolve(positions)
+            .map_err(|error| Unsupported(error.to_string()))?;
+        let ResolvedRead::Inlined {
+            value:
+                VarExpr::Apply {
+                    operator: RtlOp::Alu(head),
+                    operands: inner,
                     ..
                 },
             operands: producer_operands,
-        } = self.expression(id)?.kind()
+            remap: None,
+        } = resolved
         else {
             return Ok(None);
         };
-        if comparison_symbol(head.opcode).is_none() || positions != written {
+        if comparison_symbol(head.opcode).is_none() {
             return Ok(None);
         }
-        *cursor += 1;
-        let mut inner_cursor = 0usize;
-        let text = self.comparison(head, inner, producer_operands, &mut inner_cursor)?;
+        *reads = probe;
+        let mut inner_reads = reads.nested(producer_operands);
+        let text = self.comparison(head, inner, &mut inner_reads)?;
         Ok(Some(text))
     }
 
@@ -397,8 +394,7 @@ impl<'a> Renderer<'a> {
         &self,
         head: &AluHead,
         inner: &[Expr],
-        operands: &[ExpressionId],
-        cursor: &mut usize,
+        reads: &mut Reads<'a>,
     ) -> Result<String, Unsupported> {
         let symbol = comparison_symbol(head.opcode)
             .ok_or_else(|| Unsupported("comparison symbol".into()))?;
@@ -407,8 +403,7 @@ impl<'a> Renderer<'a> {
                 inner
                     .first()
                     .ok_or_else(|| Unsupported("comparison operand".into()))?,
-                operands,
-                cursor,
+                reads,
                 ScalarType::F32,
             )?
             .wrapped();
@@ -417,8 +412,7 @@ impl<'a> Renderer<'a> {
                 inner
                     .get(1)
                     .ok_or_else(|| Unsupported("comparison operand".into()))?,
-                operands,
-                cursor,
+                reads,
                 ScalarType::F32,
             )?
             .wrapped();

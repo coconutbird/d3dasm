@@ -8,8 +8,8 @@ use cfglib::ir::hlil::ExpressionId;
 use cfglib::ir::rtl::ScalarType;
 
 use super::{
-    Expr, LANES, PatchRow, Rendered, Renderer, Web, interpolation_keywords, patch_field_name,
-    patch_groups, scalar_keyword, semantic_parts,
+    Expr, LANES, PatchRow, Reads, Rendered, Renderer, Web, interpolation_keywords,
+    patch_field_name, patch_groups, scalar_keyword, semantic_parts,
 };
 
 impl Renderer<'_> {
@@ -344,8 +344,8 @@ impl Renderer<'_> {
         let value = values
             .first()
             .ok_or_else(|| Unsupported("patch store without a value".into()))?;
-        let mut cursor = 0usize;
-        let rendered = self.value(value, operands, &mut cursor, wanted)?;
+        let mut reads = Reads::new(self.function, operands);
+        let rendered = self.value(value, &mut reads, wanted)?;
         let groups = patch_groups(&self.semantics.patch);
         let (row_name, row_index) = semantic_parts(&row.text);
         let group = groups
@@ -370,7 +370,7 @@ impl Renderer<'_> {
                 .get(1)
                 .ok_or_else(|| Unsupported("dynamic store without an index".into()))?;
             let index = self
-                .value(index, operands, &mut cursor, ScalarType::U32)?
+                .value(index, &mut reads, ScalarType::U32)?
                 .cast(ScalarType::U32);
             let delta = register.index.wrapping_sub(group.first_register);
             let field = &group.field;

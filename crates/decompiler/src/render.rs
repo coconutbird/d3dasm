@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use cfglib::ir::hlil::{ExpressionKind, Function as HlilFunction, LiftedFunction, StatementKind};
-use cfglib::ir::rtl::{LiftedStatement, ScalarType, ValueShape, VarExpr, WebInfo};
+use cfglib::ir::hlil::{Function as HlilFunction, LiftedFunction};
+use cfglib::ir::rtl::{LiftedStatement, ScalarType, ValueShape, VarExpr, WebInfo, referenced_webs};
 use dxbc::shex::{Opcode, Program};
 
 use crate::dialect::{AluHead, RegFile, ShaderDialect, SystemInput};
@@ -27,6 +27,8 @@ type Hlil = HlilFunction<ShaderDialect>;
 type Expr = VarExpr<ShaderDialect>;
 type Op = LiftedStatement<ShaderDialect>;
 type Web = WebInfo<ShaderDialect>;
+type Webs = cfglib::ir::rtl::Webs<ShaderDialect>;
+type Reads<'a> = cfglib::ir::rtl::ReadResolver<'a, ShaderDialect>;
 
 mod interface;
 mod statement;
@@ -178,7 +180,7 @@ pub struct Renderer<'a> {
     function: &'a Hlil,
     declarations: &'a Declarations,
     program: &'a Program,
-    webs: &'a [Web],
+    webs: &'a Webs,
     semantics: SemanticNames,
     resources: ResourceNames,
     web_names: Vec<String>,
@@ -197,7 +199,7 @@ impl<'a> Renderer<'a> {
         lifted: &'a LiftedFunction<ShaderDialect>,
         declarations: &'a Declarations,
         program: &'a Program,
-        webs: &'a [Web],
+        webs: &'a Webs,
     ) -> Self {
         Self {
             function: &lifted.function,
@@ -224,7 +226,7 @@ impl<'a> Renderer<'a> {
     /// Returns [`Unsupported`] for constructs outside the modeled subset.
     pub fn render_hull(
         mut self,
-        phases: &'a [(u32, LiftedFunction<ShaderDialect>, Vec<Web>)],
+        phases: &'a [(u32, LiftedFunction<ShaderDialect>, Webs)],
     ) -> Result<String, Unsupported> {
         let declarations = self.declarations;
         let program = self.program;
@@ -378,14 +380,13 @@ impl<'a> Renderer<'a> {
         self.web_names = names;
     }
 
-    /// The web behind one variable: HLIL preserves MLIL's dense variable
-    /// order, and webs are declared in that same order.
+    /// The web behind one lifted (HLIL) variable.
     fn hlil_web(
         &self,
         variable: cfglib::ir::hlil::VariableId,
     ) -> Result<(usize, &'a Web), Unsupported> {
         self.webs
-            .get(variable.index())
+            .of_lifted(variable)
             .map(|web| (variable.index(), web))
             .ok_or_else(|| Unsupported("variable without a web".into()))
     }
@@ -396,7 +397,7 @@ impl<'a> Renderer<'a> {
         variable: cfglib::ir::mlil::VariableId,
     ) -> Result<(usize, &'a Web), Unsupported> {
         self.webs
-            .get(variable.index())
+            .of(variable)
             .map(|web| (variable.index(), web))
             .ok_or_else(|| Unsupported("variable without a web".into()))
     }
@@ -442,28 +443,9 @@ impl<'a> Renderer<'a> {
         // Only webs the structured body still references declare: a web
         // whose single-use definition inlined into its consumer never
         // renders its name.
-        let mut used = vec![false; self.webs.len()];
-        for expression in self.function.expressions() {
-            if let ExpressionKind::Variable(variable) = expression.kind()
-                && let Some(flag) = used.get_mut(variable.index())
-            {
-                *flag = true;
-            }
-        }
-        for statement in self.function.statements() {
-            if let StatementKind::Assign { value, .. } = statement.kind()
-                && let Ok(expression) = self.expression(*value)
-                && let ExpressionKind::Operation {
-                    operation: Op::Assign { target, .. },
-                    ..
-                } = expression.kind()
-                && let Some(flag) = used.get_mut(target.index())
-            {
-                *flag = true;
-            }
-        }
-        for (index, web) in self.webs.iter().enumerate() {
-            if Self::is_input_web(web) || !used[index] {
+        let used = referenced_webs(self.function);
+        for web in self.webs {
+            if Self::is_input_web(web) || !used.contains(&web.variable) {
                 continue;
             }
             let shape = ValueShape {
@@ -472,7 +454,7 @@ impl<'a> Renderer<'a> {
             };
             let declared = type_name(shape);
             let zero = zero_value(shape);
-            let name = self.web_names[index].clone();
+            let name = self.web_names[web.variable.index()].clone();
             // `precise` pins evaluation to the written expression order:
             // the source mirrors the original instruction order, and fxc
             // must not reassociate it (even `/Gis` reorders constant

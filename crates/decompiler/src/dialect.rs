@@ -15,8 +15,10 @@ use cfglib::ir::mlil::{
     AnalysisDialect, Dialect, InstructionMetadata, VerificationIssue, VerifyDialect,
 };
 use cfglib::ir::rtl::{self, LiftedStatement, ScalarType, ValueShape, VarExpr};
-use cfglib::{EdgeKind, FlowEffect, Vocabulary};
+use cfglib::{EdgeKind, Vocabulary};
 use dxbc::shex::Opcode;
+
+pub use cfglib::ir::rtl::Edge;
 
 /// One MLIL/HLIL function over the shader dialect.
 pub type Function = cfglib::ir::mlil::Function<ShaderDialect>;
@@ -230,19 +232,6 @@ pub enum EffectOp {
     Bare(Opcode),
 }
 
-/// Edge payload carrying the structural meaning of each transfer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edge {
-    /// Synthetic entry edge.
-    Entry,
-    /// Sequential flow.
-    Fall,
-    /// Taken branch of a conditional.
-    True,
-    /// Not-taken branch of a conditional.
-    False,
-}
-
 impl Vocabulary for ShaderDialect {
     type ValueType = ValueShape;
     type Effect = Effect;
@@ -291,15 +280,11 @@ impl rtl::Dialect for ShaderDialect {
     }
 
     fn edge_kind(edge: &Self::Edge) -> EdgeKind {
-        match edge {
-            Edge::Entry | Edge::Fall => EdgeKind::Fallthrough,
-            Edge::True => EdgeKind::ConditionalTrue,
-            Edge::False => EdgeKind::ConditionalFalse,
-        }
+        edge.kind()
     }
 
     fn is_entry_edge(edge: &Self::Edge) -> bool {
-        *edge == Edge::Entry
+        edge.is_entry()
     }
 }
 
@@ -328,11 +313,11 @@ impl Dialect for ShaderDialect {
         operation: &Self::Operation,
         _may_throw: bool,
     ) -> InstructionMetadata<Self::Effect> {
-        let (effects, flow) = match operation {
+        let effects = match operation {
             LiftedStatement::Assign { effects, value, .. } => {
                 let mut effects = effects.clone();
                 add_read_effects(value, &mut effects);
-                (effects, FlowEffect::Fallthrough)
+                effects
             }
             LiftedStatement::Effect {
                 operation,
@@ -344,52 +329,30 @@ impl Dialect for ShaderDialect {
                     add_read_effects(operand, &mut effects);
                 }
                 let base = match operation {
-                    EffectOp::StoreMem(_) | EffectOp::StoreUav { .. } => Some(Effect::Write),
-                    EffectOp::StoreOutput { .. } | EffectOp::Emit | EffectOp::Cut => {
-                        Some(Effect::Export)
-                    }
-                    EffectOp::Discard | EffectOp::Bare(_) => Some(Effect::Control),
+                    EffectOp::StoreMem(_) | EffectOp::StoreUav { .. } => Effect::Write,
+                    EffectOp::StoreOutput { .. } | EffectOp::Emit | EffectOp::Cut => Effect::Export,
+                    EffectOp::Discard | EffectOp::Bare(_) => Effect::Control,
                 };
-                if let Some(effect) = base
-                    && !effects.contains(&effect)
-                {
-                    effects.push(effect);
+                if !effects.contains(&base) {
+                    effects.push(base);
                 }
-                (effects, FlowEffect::Fallthrough)
+                effects
             }
-            LiftedStatement::Branch { .. } => (Vec::new(), FlowEffect::ConditionalJump),
-            LiftedStatement::Return { .. } => (Vec::new(), FlowEffect::Return),
+            LiftedStatement::Branch { .. } | LiftedStatement::Return { .. } => Vec::new(),
         };
-        InstructionMetadata::new(effects, flow, false)
+        InstructionMetadata::new(effects, operation.flow_effect(), false)
     }
 
     fn mnemonic(operation: &Self::Operation) -> &str {
-        match operation {
-            LiftedStatement::Assign { value, .. } => value_mnemonic(value),
-            LiftedStatement::Effect { operation, .. } => {
-                <Self as rtl::Dialect>::effect_mnemonic(operation)
-            }
-            LiftedStatement::Branch { .. } => "branch",
-            LiftedStatement::Return { .. } => "ret",
-        }
+        operation.mnemonic()
     }
 
     fn edge_kind(edge: &Self::Edge) -> EdgeKind {
-        <Self as rtl::Dialect>::edge_kind(edge)
+        edge.kind()
     }
 
     fn is_entry_edge(edge: &Self::Edge) -> bool {
-        <Self as rtl::Dialect>::is_entry_edge(edge)
-    }
-}
-
-fn value_mnemonic(value: &Expr) -> &str {
-    match value {
-        VarExpr::Read { .. } => "mov",
-        VarExpr::Const { .. } => "const",
-        VarExpr::Apply { operator, .. } => <ShaderDialect as rtl::Dialect>::mnemonic(operator),
-        VarExpr::Reinterpret { .. } => "bitcast",
-        VarExpr::Compose { .. } => "compose",
+        edge.is_entry()
     }
 }
 
@@ -397,38 +360,26 @@ fn value_mnemonic(value: &Expr) -> &str {
 /// expression: samples and loads must be neither eliminated nor
 /// duplicated.
 fn add_read_effects(value: &Expr, effects: &mut Vec<Effect>) {
-    match value {
-        VarExpr::Apply {
-            operator, operands, ..
-        } => {
-            let reads = match operator {
-                RtlOp::Alu(head) => {
-                    let name = head.opcode.name();
-                    name.starts_with("sample")
-                        || name.starts_with("ld")
-                        || name.starts_with("gather")
-                        || name.starts_with("bufinfo")
-                        || name.starts_with("resinfo")
-                        || name.starts_with("atomic")
-                        || name.starts_with("imm_atomic")
-                }
-                _ => false,
-            };
-            if reads && !effects.contains(&Effect::Read) {
-                effects.push(Effect::Read);
-            }
-            for operand in operands {
-                add_read_effects(operand, effects);
-            }
+    value.for_each_expression(&mut |expression| {
+        let VarExpr::Apply {
+            operator: RtlOp::Alu(head),
+            ..
+        } = expression
+        else {
+            return;
+        };
+        let name = head.opcode.name();
+        let reads = name.starts_with("sample")
+            || name.starts_with("ld")
+            || name.starts_with("gather")
+            || name.starts_with("bufinfo")
+            || name.starts_with("resinfo")
+            || name.starts_with("atomic")
+            || name.starts_with("imm_atomic");
+        if reads && !effects.contains(&Effect::Read) {
+            effects.push(Effect::Read);
         }
-        VarExpr::Reinterpret { operand, .. } => add_read_effects(operand, effects),
-        VarExpr::Compose { parts, .. } => {
-            for part in parts {
-                add_read_effects(part, effects);
-            }
-        }
-        VarExpr::Read { .. } | VarExpr::Const { .. } => {}
-    }
+    });
 }
 
 impl AnalysisDialect for ShaderDialect {
@@ -499,11 +450,7 @@ impl hlil::VerifyDialect for ShaderDialect {
 
 impl hlil::LiftDialect for ShaderDialect {
     fn lift_operation(operation: &Op) -> Lifted<Op> {
-        match operation {
-            LiftedStatement::Branch { .. } => Lifted::BranchOperation(operation.clone()),
-            LiftedStatement::Return { .. } => Lifted::Return,
-            other => Lifted::Operation(other.clone()),
-        }
+        operation.lifted()
     }
 
     fn case_values(_edge: &Edge) -> Vec<Vec<u64>> {
@@ -519,19 +466,13 @@ impl hlil::LiftDialect for ShaderDialect {
     }
 
     fn previous_value_operand(operation: &Op) -> Option<usize> {
+        if let Some(position) = operation.merge_operand() {
+            return Some(position);
+        }
+        // `resinfo` renders as a statement block (`GetDimensions`),
+        // never as an expression: declaring a previous-value slot one
+        // past the reads pins the definition out of inlining.
         match operation {
-            LiftedStatement::Assign {
-                merges: true,
-                value,
-                ..
-            } => {
-                let mut count = 0usize;
-                value.for_each_read(&mut |_| count += 1);
-                Some(count)
-            }
-            // `resinfo` renders as a statement block (`GetDimensions`),
-            // never as an expression: declaring a previous-value slot one
-            // past the reads pins the definition out of inlining.
             LiftedStatement::Assign { value, .. }
                 if matches!(
                     value,
@@ -544,9 +485,7 @@ impl hlil::LiftDialect for ShaderDialect {
                     }
                 ) =>
             {
-                let mut count = 0usize;
-                value.for_each_read(&mut |_| count += 1);
-                Some(count)
+                Some(value.read_count())
             }
             _ => None,
         }
