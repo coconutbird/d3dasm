@@ -182,9 +182,7 @@ fn write_resource_rt(w: &mut String, rr: u32) {
     let _ = write!(w, "_rr{rr:08x}");
 }
 
-// ---------------------------------------------------------------------------
 // Operands
-// ---------------------------------------------------------------------------
 
 fn write_operand(w: &mut String, op: &Operand, imm_type: ImmediateType) {
     if op.negate {
@@ -351,9 +349,7 @@ fn write_components(w: &mut String, comp: &ComponentSelect) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Declarations
-// ---------------------------------------------------------------------------
 
 fn write_declaration(w: &mut String, instr: &Instruction) -> core::fmt::Result {
     let name = instr.opcode.name();

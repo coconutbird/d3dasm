@@ -386,12 +386,10 @@ impl ResourceDimension {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Binding flags.
 //
 // Two distinct fields in RDEF carry "flags" with *different* bit meanings; keep
 // them apart to avoid the historical mix-up.
-// ---------------------------------------------------------------------------
 
 /// `D3D_SHADER_INPUT_FLAGS` — the flags field of a *resource binding*.
 pub const SIF_USER_PACKED: u32 = 0x1;
@@ -1297,9 +1295,7 @@ impl ChunkWriter for ResourceDef<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Editable text codec
-// ---------------------------------------------------------------------------
 
 /// Serialize an RDEF to editable `key=value` text. Returns `None` for RDEFs
 /// with struct members, whose byte-exact layout is not yet reproduced (those

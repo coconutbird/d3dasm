@@ -195,6 +195,20 @@ fn io_keys(shader: &d3dasm::Shader<'_>) -> decompiler::interp::IoKeys {
             });
         }
     }
+    if let Some(signature) = shader.patch_constant_signature() {
+        for element in &signature.elements {
+            let row = semantic_key(&normalize(&element.semantic_name), element.semantic_index);
+            let mut offset = 0u8;
+            for lane in 0u8..4 {
+                if element.mask & (1 << lane) != 0 {
+                    keys.patch
+                        .entry((element.register, lane))
+                        .or_insert((row, offset));
+                    offset += 1;
+                }
+            }
+        }
+    }
     keys
 }
 

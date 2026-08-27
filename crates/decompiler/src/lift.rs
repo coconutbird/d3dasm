@@ -1,26 +1,27 @@
-//! SM4/SM5 structured instruction stream → shader-dialect MLIL.
+//! SM4/SM5 structured instruction stream → shader-dialect RTL.
 //!
 //! The walk mirrors the bytecode's structured markers (`if`/`else`/
 //! `endif`, `loop`/`endloop`, conditional transfers) into explicit blocks
-//! and edges, materializing non-register operand reads (immediates,
-//! constant buffers, indexable temporaries) as pure value producers so
-//! HLIL expression inlining folds them back into their consumers. Blocks
-//! are created lazily when an instruction lands, so no empty semantic
-//! block ever reaches verification.
-
-use std::collections::BTreeMap;
+//! and edges, and expresses each computational instruction as one typed
+//! RTL statement: parallel transfers over raw registers whose expression
+//! trees carry immediates, constant-buffer reads, and source modifiers
+//! inline. Source swizzles are mapped through the destination mask here,
+//! so every read lists the exact storage lanes it consumes. Blocks are
+//! created lazily when a statement lands, so no empty semantic block
+//! survives into MLIL.
+//!
+//! Lane interpretations are assigned per opcode: float arithmetic reads
+//! `F32`, integer forms `I32`/`U32`, comparisons produce `U32` masks,
+//! and transports (`mov`, `movc` data) read `Bits` so cfglib's web
+//! typing routes the surrounding interpretation through them.
 
 use cfglib::BlockId;
-use cfglib::ir::mlil::{FunctionBuilder, TypedVariable};
+use cfglib::ir::rtl::{Expr, FunctionBuilder, ScalarType, Statement};
 use dxbc::shex::{
-    ComponentSelect, Instruction, InstructionKind, Opcode, Operand, OperandIndex, Program,
-    RegisterType,
+    ComponentSelect, InstructionKind, Opcode, Operand, OperandIndex, Program, RegisterType,
 };
 
-use crate::dialect::{
-    AluOp, Binding, DestAccess, Edge, Function, Immediate, MemRef, Op, RegFile, Register, Role,
-    ShaderDialect, SourceAccess, SystemInput, ValueType, VariableId,
-};
+use crate::dialect::{Edge, RegFile, Register, RtlOp, ShaderDialect, SystemInput};
 
 /// One declared input register row.
 #[derive(Debug, Clone)]
@@ -55,16 +56,59 @@ pub struct Declarations {
     pub immediate_constants: Vec<[f32; 4]>,
     /// `dcl_resource_structured` entries: register and byte stride.
     pub structured: Vec<(u32, u32)>,
+    /// `dcl_uav_typed` entries: register, dimension, return types.
+    pub uavs: Vec<(u32, &'static str, [dxbc::shex::ReturnType; 4])>,
     /// `dcl_thread_group` sizes for compute shaders.
     pub thread_group: Option<(u32, u32, u32)>,
+    /// Geometry-shader stage layout, when the program is a GS.
+    pub geometry: Option<GeometryLayout>,
+    /// Tessellation stage layout, when the program is an HS or DS.
+    pub tessellation: Option<TessellationLayout>,
+}
+
+/// The tessellation interface layout shared by hull and domain shaders.
+#[derive(Debug, Clone, Default)]
+pub struct TessellationLayout {
+    /// Tessellator domain (`quad`, `tri`, `isoline`).
+    pub domain: &'static str,
+    /// Partitioning mode, when declared (HS).
+    pub partitioning: Option<&'static str>,
+    /// Tessellator output primitive, when declared (HS).
+    pub output_primitive: Option<&'static str>,
+    /// Input control points per patch.
+    pub input_control_points: u32,
+    /// Output control points per patch, when declared (HS).
+    pub output_control_points: u32,
+    /// Maximum tessellation factor, when declared (HS).
+    pub max_factor: Option<f32>,
+}
+
+/// The geometry-shader interface layout.
+#[derive(Debug, Clone)]
+pub struct GeometryLayout {
+    /// HLSL input-primitive keyword (`point`, `line`, `triangle`, …).
+    pub primitive: &'static str,
+    /// Vertices per input primitive.
+    pub vertices: u32,
+    /// Maximum vertices emitted per invocation.
+    pub max_vertices: u32,
 }
 
 /// One lifted shader body plus its rendering metadata.
 pub struct LiftedShader {
-    /// The verified MLIL function.
-    pub function: Function,
+    /// The RTL function over raw registers (the control-point phase for
+    /// hull shaders).
+    pub function: cfglib::ir::rtl::Function<ShaderDialect>,
     /// Declarations for the HLSL header.
     pub declarations: Declarations,
+    /// Hull-shader patch-constant phases, when the program is an HS.
+    pub hull: Option<HullPhases>,
+}
+
+/// The patch-constant phases of one hull shader.
+pub struct HullPhases {
+    /// Fork and join phase instance counts and functions, in order.
+    pub constants: Vec<(u32, cfglib::ir::rtl::Function<ShaderDialect>)>,
 }
 
 /// A shape the lift does not model yet.
@@ -104,21 +148,25 @@ enum Frame {
 
 struct Walk {
     builder: FunctionBuilder<ShaderDialect>,
-    variables: BTreeMap<Register, VariableId>,
-    outputs: Vec<VariableId>,
-    /// The open block instructions are appended to, if any.
+    declarations: Declarations,
+    /// The open block statements are appended to, if any.
     current: Option<BlockId>,
     /// Edges waiting to enter the next materialized block.
     pending: Vec<(BlockId, Edge)>,
     frames: Vec<Frame>,
     blocks: u32,
-    /// Whether any block was ever materialized (guards a degenerate
-    /// empty program).
     ret_block: Option<BlockId>,
 }
 
+mod declarations;
+mod walk;
+
+use declarations::collect_declaration;
+
+type LiftExpr = Expr<ShaderDialect>;
+
 impl Walk {
-    /// The block instructions land in, materializing it if needed.
+    /// The block statements land in, materializing it if needed.
     fn landing(&mut self) -> BlockId {
         if let Some(block) = self.current {
             return block;
@@ -127,55 +175,210 @@ impl Walk {
         self.blocks += 1;
         for (source, edge) in self.pending.drain(..) {
             self.builder
-                .add_edge(source, block, edge, None)
+                .add_edge(source, block, edge)
                 .expect("pending edges name live blocks");
         }
         self.current = Some(block);
         block
     }
 
-    fn variable(&mut self, register: Register) -> VariableId {
-        if let Some(&variable) = self.variables.get(&register) {
-            return variable;
-        }
-        let role = match register.file {
-            RegFile::Input | RegFile::System(_) => Role::Input,
-            RegFile::Output | RegFile::OutputDepth | RegFile::OutputCoverage => Role::Output,
-            _ => Role::Temp,
-        };
-        let variable = self
-            .builder
-            .declare_variable(role, Some(register))
-            .expect("variable identity space is far from exhausted");
-        self.variables.insert(register, variable);
-        if matches!(role, Role::Output) {
-            self.outputs.push(variable);
-        }
-        variable
-    }
-
-    fn fresh_temp(&mut self) -> VariableId {
-        self.builder
-            .declare_variable(Role::Temp, None)
-            .expect("variable identity space is far from exhausted")
-    }
-
-    fn append(
-        &mut self,
-        operation: Op,
-        uses: Vec<TypedVariable<ShaderDialect>>,
-        defs: Vec<TypedVariable<ShaderDialect>>,
-        span: (u32, u32),
-    ) {
+    fn emit(&mut self, statement: Statement<ShaderDialect>, span: (u32, u32)) {
         let block = self.landing();
         self.builder
-            .append_instruction(block, operation, uses, defs, false, Some(span))
-            .expect("instruction identity space is far from exhausted");
+            .append(block, statement, Some(span))
+            .expect("statement shapes are validated at construction");
     }
 }
 
-fn typed(variable: VariableId) -> TypedVariable<ShaderDialect> {
-    TypedVariable::new(variable, ValueType::VEC4)
+/// Applies the negate/abs source modifiers around one value.
+fn modified(base: LiftExpr, operand: &Operand) -> LiftExpr {
+    let mut value = base;
+    if operand.abs {
+        let shape = value.shape();
+        value = Expr::Apply {
+            operator: RtlOp::Abs,
+            operands: vec![value],
+            shape,
+        };
+    }
+    if operand.negate {
+        let shape = value.shape();
+        value = Expr::Apply {
+            operator: RtlOp::Neg,
+            operands: vec![value],
+            shape,
+        };
+    }
+    value
+}
+
+/// The lanes a componentwise source consumes for the destination lanes.
+fn map_lanes(components: &ComponentSelect, lanes: &[u8]) -> Result<Vec<u8>, Unsupported> {
+    match components {
+        ComponentSelect::Swizzle(swizzle) => Ok(lanes
+            .iter()
+            .map(|&lane| swizzle[usize::from(lane)])
+            .collect()),
+        ComponentSelect::Scalar(lane) => Ok(vec![*lane; lanes.len()]),
+        ComponentSelect::OneComponent | ComponentSelect::ZeroComponent => Ok(vec![0]),
+        ComponentSelect::Mask(_) => Err(Unsupported("mask on a source operand".into())),
+    }
+}
+
+fn mask_lanes(mask: u8) -> Vec<u8> {
+    (0u8..4).filter(|lane| mask & (1 << lane) != 0).collect()
+}
+
+/// The scalar lane a test/select component names.
+fn select_lane(components: &ComponentSelect) -> u8 {
+    match components {
+        ComponentSelect::Scalar(lane) => *lane,
+        ComponentSelect::Swizzle(swizzle) => swizzle[0],
+        _ => 0,
+    }
+}
+
+/// The lane interpretation an opcode imposes on its arithmetic sources.
+fn operand_scalar(opcode: Opcode) -> ScalarType {
+    match opcode {
+        Opcode::Iadd
+        | Opcode::IMad
+        | Opcode::IMin
+        | Opcode::IMax
+        | Opcode::INeg
+        | Opcode::Ishl
+        | Opcode::Ishr
+        | Opcode::ILt
+        | Opcode::IGe
+        | Opcode::IEq
+        | Opcode::INe
+        | Opcode::Itof => ScalarType::I32,
+        Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::Not
+        | Opcode::UMad
+        | Opcode::UMin
+        | Opcode::UMax
+        | Opcode::Ushr
+        | Opcode::ULt
+        | Opcode::UGe
+        | Opcode::UDiv
+        | Opcode::Bfi
+        | Opcode::Utof => ScalarType::U32,
+        Opcode::Mov => ScalarType::Bits,
+        _ => ScalarType::F32,
+    }
+}
+
+/// The lane interpretation of an opcode's result.
+fn result_scalar(opcode: Opcode, bindings: &[&Operand], declarations: &Declarations) -> ScalarType {
+    match opcode {
+        Opcode::Iadd
+        | Opcode::IMad
+        | Opcode::IMin
+        | Opcode::IMax
+        | Opcode::INeg
+        | Opcode::Ishl
+        | Opcode::Ishr
+        | Opcode::Ftoi => ScalarType::I32,
+        Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::Not
+        | Opcode::UMad
+        | Opcode::UMin
+        | Opcode::UMax
+        | Opcode::Ushr
+        | Opcode::Ftou
+        | Opcode::UDiv
+        | Opcode::Lt
+        | Opcode::Ge
+        | Opcode::Eq
+        | Opcode::Ne
+        | Opcode::ILt
+        | Opcode::IGe
+        | Opcode::IEq
+        | Opcode::INe
+        | Opcode::ULt
+        | Opcode::UGe
+        | Opcode::Bfi
+        | Opcode::LdStructured => ScalarType::U32,
+        Opcode::Mov | Opcode::Movc => ScalarType::Bits,
+        Opcode::Ld
+        | Opcode::LdMs
+        | Opcode::Gather4
+        | Opcode::Sample
+        | Opcode::SampleL
+        | Opcode::SampleB => resource_scalar(bindings, declarations),
+        _ => ScalarType::F32,
+    }
+}
+
+/// The element interpretation of the resource a fetch reads.
+fn resource_scalar(bindings: &[&Operand], declarations: &Declarations) -> ScalarType {
+    let Some(index) = bindings.iter().find_map(|operand| {
+        (operand.reg_type == RegisterType::Resource)
+            .then(|| match operand.indices.first() {
+                Some(OperandIndex::Imm32(index)) => Some(*index),
+                _ => None,
+            })
+            .flatten()
+    }) else {
+        return ScalarType::F32;
+    };
+    declarations
+        .resources
+        .iter()
+        .find(|(declared, ..)| *declared == index)
+        .map_or(ScalarType::F32, |(_, _, return_type)| {
+            match return_type[0] {
+                dxbc::shex::ReturnType::Uint => ScalarType::U32,
+                dxbc::shex::ReturnType::Sint => ScalarType::I32,
+                _ => ScalarType::F32,
+            }
+        })
+}
+
+/// The coordinate lanes a sample or load consumes, by resource dimension.
+fn coordinate_lanes(
+    bindings: &[&Operand],
+    declarations: &Declarations,
+    load: bool,
+) -> &'static [u8] {
+    let dimension = bindings
+        .iter()
+        .find_map(|operand| {
+            (operand.reg_type == RegisterType::Resource)
+                .then(|| match operand.indices.first() {
+                    Some(OperandIndex::Imm32(index)) => Some(*index),
+                    _ => None,
+                })
+                .flatten()
+        })
+        .and_then(|index| {
+            declarations
+                .resources
+                .iter()
+                .find(|(declared, ..)| *declared == index)
+                .map(|(_, dimension, _)| *dimension)
+        })
+        .unwrap_or("texture2d");
+    if load {
+        match dimension {
+            "texture1d" => &[0, 3],
+            "texture3d" | "texture2darray" => &[0, 1, 2, 3],
+            "buffer" => &[0],
+            _ => &[0, 1, 3],
+        }
+    } else {
+        match dimension {
+            "texture1d" => &[0],
+            "texture3d" | "texturecube" | "texture2darray" => &[0, 1, 2],
+            "texturecubearray" => &[0, 1, 2, 3],
+            _ => &[0, 1],
+        }
+    }
 }
 
 /// Maps a variable-backed register file, or `None` for files that
@@ -192,6 +395,10 @@ fn variable_file(register: RegisterType) -> Option<RegFile> {
         RegisterType::ThreadIDInGroup => Some(RegFile::System(SystemInput::ThreadIdInGroup)),
         RegisterType::Coverage => Some(RegFile::System(SystemInput::Coverage)),
         RegisterType::InputPrimitiveID => Some(RegFile::System(SystemInput::PrimitiveId)),
+        RegisterType::DomainLocation => Some(RegFile::System(SystemInput::DomainPoint)),
+        RegisterType::OutputControlPointID => Some(RegFile::System(SystemInput::ControlPointId)),
+        RegisterType::ForkInstanceID => Some(RegFile::System(SystemInput::ForkInstanceId)),
+        RegisterType::PatchConstant => Some(RegFile::PatchConstant),
         _ => None,
     }
 }
@@ -209,659 +416,18 @@ fn operand_register(operand: &Operand) -> Result<Register, Unsupported> {
     Ok(Register { file, index })
 }
 
-fn identity_access() -> SourceAccess {
-    SourceAccess {
-        components: ComponentSelect::Swizzle([0, 1, 2, 3]),
-        negate: false,
-        abs: false,
-    }
-}
-
-impl Walk {
-    /// Reads one source operand: returns the variable use aligned with
-    /// the returned access, materializing constants and addressable
-    /// loads first.
-    fn read_source(
-        &mut self,
-        operand: &Operand,
-        span: (u32, u32),
-    ) -> Result<(VariableId, SourceAccess), Unsupported> {
-        let access = SourceAccess {
-            components: operand.components.clone(),
-            negate: operand.negate,
-            abs: operand.abs,
-        };
-        match operand.reg_type {
-            RegisterType::Immediate32 => {
-                let value = self.fresh_temp();
-                self.append(
-                    Op::Const(Immediate {
-                        bits: operand.immediate_values.to_vec(),
-                    }),
-                    Vec::new(),
-                    vec![typed(value)],
-                    span,
-                );
-                Ok((
-                    value,
-                    SourceAccess {
-                        components: ComponentSelect::Swizzle([0, 1, 2, 3]),
-                        negate: operand.negate,
-                        abs: operand.abs,
-                    },
-                ))
-            }
-            RegisterType::ConstantBuffer
-            | RegisterType::ImmConstBuffer
-            | RegisterType::IndexableTemp => {
-                let file = match operand.reg_type {
-                    RegisterType::ConstantBuffer => RegFile::ConstantBuffer,
-                    RegisterType::ImmConstBuffer => RegFile::ImmediateConstantBuffer,
-                    _ => RegFile::IndexableTemp,
-                };
-                let (reference, address) = self.memory_reference(file, operand, span)?;
-                let value = self.fresh_temp();
-                let uses = address.map(typed).into_iter().collect();
-                self.append(Op::Load(reference), uses, vec![typed(value)], span);
-                Ok((
-                    value,
-                    SourceAccess {
-                        components: ComponentSelect::Swizzle([0, 1, 2, 3]),
-                        negate: operand.negate,
-                        abs: operand.abs,
-                    },
-                ))
-            }
-            _ => {
-                let register = operand_register(operand)?;
-                Ok((self.variable(register), access))
-            }
-        }
-    }
-
-    /// Builds an addressable-file reference, materializing at most one
-    /// relative address as a variable.
-    fn memory_reference(
-        &mut self,
-        file: RegFile,
-        operand: &Operand,
-        span: (u32, u32),
-    ) -> Result<(MemRef, Option<VariableId>), Unsupported> {
-        let mut indices = Vec::new();
-        let mut relative = None;
-        let mut address = None;
-        for (position, index) in operand.indices.iter().enumerate() {
-            match index {
-                OperandIndex::Imm32(value) => indices.push(*value),
-                OperandIndex::Relative(inner) | OperandIndex::RelativePlusImm(_, inner) => {
-                    if relative.is_some() {
-                        return unsupported("multiple relative operand indices");
-                    }
-                    let base = match index {
-                        OperandIndex::RelativePlusImm(base, _) => *base,
-                        _ => 0,
-                    };
-                    indices.push(base);
-                    let (variable, access) = self.read_source(inner, span)?;
-                    if access.negate || access.abs {
-                        return unsupported("modified relative address");
-                    }
-                    relative = Some((position, access.components));
-                    address = Some(variable);
-                }
-                OperandIndex::Imm64(_) | OperandIndex::RelativePlusImm64(..) => {
-                    return unsupported("64-bit operand index");
-                }
-            }
-        }
-        Ok((
-            MemRef {
-                file,
-                indices,
-                relative_to: relative.as_ref().map(|(position, _)| *position),
-                relative_select: relative.map(|(_, components)| components),
-                components: operand.components.clone(),
-            },
-            address,
-        ))
-    }
-
-    /// Lowers one generic (non-declaration) instruction.
-    fn generic(
-        &mut self,
-        instruction: &Instruction,
-        operands: &[Operand],
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        match instruction.opcode {
-            Opcode::If => self.open_if(instruction, operands, span),
-            Opcode::Else => self.open_else(),
-            Opcode::EndIf => self.close_if(),
-            Opcode::Loop => {
-                self.open_loop();
-                Ok(())
-            }
-            Opcode::EndLoop => self.close_loop(),
-            Opcode::Break => self.transfer_break(false),
-            Opcode::Breakc => {
-                self.condition(instruction, operands, span)?;
-                self.transfer_break(true)
-            }
-            Opcode::Continue => self.transfer_continue(false),
-            Opcode::Continuec => {
-                self.condition(instruction, operands, span)?;
-                self.transfer_continue(true)
-            }
-            Opcode::Ret => {
-                let uses = self.outputs.iter().copied().map(typed).collect();
-                self.append(Op::Ret, uses, Vec::new(), span);
-                self.current = None;
-                Ok(())
-            }
-            Opcode::Retc => {
-                self.condition(instruction, operands, span)?;
-                self.conditional_return(span);
-                Ok(())
-            }
-            Opcode::Discard => {
-                let (variable, access) = self.read_source(&operands[0], span)?;
-                self.append(
-                    Op::Discard {
-                        nonzero: instruction.test_nonzero,
-                        components: access.components,
-                    },
-                    vec![typed(variable)],
-                    Vec::new(),
-                    span,
-                );
-                Ok(())
-            }
-            Opcode::Switch | Opcode::Case | Opcode::Default | Opcode::EndSwitch => {
-                unsupported("switch flow")
-            }
-            Opcode::Call | Opcode::Callc | Opcode::Label => unsupported("subroutine calls"),
-            Opcode::Nop => Ok(()),
-            _ => self.alu(instruction, operands, span),
-        }
-    }
-
-    /// Reads a conditional opcode's single tested source and emits the
-    /// branch instruction.
-    fn condition(
-        &mut self,
-        instruction: &Instruction,
-        operands: &[Operand],
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        let Some(operand) = operands.first() else {
-            return unsupported("conditional without a tested operand");
-        };
-        let (variable, access) = self.read_source(operand, span)?;
-        if access.negate || access.abs {
-            return unsupported("modified branch condition");
-        }
-        self.append(
-            Op::Branch {
-                nonzero: instruction.test_nonzero,
-                components: access.components,
-            },
-            vec![typed(variable)],
-            Vec::new(),
-            span,
-        );
-        Ok(())
-    }
-
-    fn open_if(
-        &mut self,
-        instruction: &Instruction,
-        operands: &[Operand],
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        self.condition(instruction, operands, span)?;
-        let block = self.current.expect("the branch just landed");
-        self.frames.push(Frame::If {
-            pending_false: Some((block, Edge::False)),
-            pending_merge: Vec::new(),
-            saw_else: false,
-        });
-        self.current = None;
-        self.pending = vec![(block, Edge::True)];
-        Ok(())
-    }
-
-    fn open_else(&mut self) -> Result<(), Unsupported> {
-        let arm_end = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::If {
-            pending_false,
-            pending_merge,
-            saw_else,
-        }) = self.frames.last_mut()
-        else {
-            return unsupported("else outside if");
-        };
-        if *saw_else {
-            return unsupported("second else in one if");
-        }
-        *saw_else = true;
-        if let Some(block) = arm_end {
-            pending_merge.push((block, Edge::Fall));
-        } else {
-            pending_merge.extend(stale);
-        }
-        let Some(false_entry) = pending_false.take() else {
-            return unsupported("else with no false entry");
-        };
-        self.pending = vec![false_entry];
-        Ok(())
-    }
-
-    fn close_if(&mut self) -> Result<(), Unsupported> {
-        let arm_end = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::If {
-            pending_false,
-            mut pending_merge,
-            ..
-        }) = self.frames.pop()
-        else {
-            return unsupported("endif outside if");
-        };
-        if let Some(block) = arm_end {
-            pending_merge.push((block, Edge::Fall));
-        } else {
-            pending_merge.extend(stale);
-        }
-        if let Some(false_entry) = pending_false {
-            pending_merge.push(false_entry);
-        }
-        self.pending = pending_merge;
-        Ok(())
-    }
-
-    fn open_loop(&mut self) {
-        // The header must exist eagerly: it is the back-edge target. The
-        // preceding block falls through into it.
-        if let Some(block) = self.current.take() {
-            self.pending.push((block, Edge::Fall));
-        }
-        let header = self.landing();
-        self.frames.push(Frame::Loop {
-            header,
-            pending_exit: Vec::new(),
-        });
-    }
-
-    fn close_loop(&mut self) -> Result<(), Unsupported> {
-        let latch = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::Loop {
-            header,
-            pending_exit,
-        }) = self.frames.pop()
-        else {
-            return unsupported("endloop outside loop");
-        };
-        if !stale.is_empty() {
-            return unsupported("loop body ends unmaterialized");
-        }
-        if let Some(block) = latch {
-            self.builder
-                .add_edge(block, header, Edge::Fall, None)
-                .expect("loop header is live");
-        }
-        self.pending = pending_exit;
-        Ok(())
-    }
-
-    /// A `break`/`breakc`: `conditional` when the branch just landed.
-    fn transfer_break(&mut self, conditional: bool) -> Result<(), Unsupported> {
-        let Some(block) = self.current else {
-            return unsupported("transfer outside a materialized block");
-        };
-        let Some(Frame::Loop { pending_exit, .. }) = self
-            .frames
-            .iter_mut()
-            .rev()
-            .find(|frame| matches!(frame, Frame::Loop { .. }))
-        else {
-            return unsupported("break outside loop");
-        };
-        if conditional {
-            pending_exit.push((block, Edge::True));
-            self.current = None;
-            self.pending = vec![(block, Edge::False)];
-        } else {
-            pending_exit.push((block, Edge::Fall));
-            self.current = None;
-            self.pending = Vec::new();
-        }
-        Ok(())
-    }
-
-    fn transfer_continue(&mut self, conditional: bool) -> Result<(), Unsupported> {
-        let Some(block) = self.current else {
-            return unsupported("transfer outside a materialized block");
-        };
-        let Some(Frame::Loop { header, .. }) = self
-            .frames
-            .iter()
-            .rev()
-            .find(|frame| matches!(frame, Frame::Loop { .. }))
-        else {
-            return unsupported("continue outside loop");
-        };
-        let header = *header;
-        let edge = if conditional { Edge::True } else { Edge::Fall };
-        self.builder
-            .add_edge(block, header, edge, None)
-            .expect("loop header is live");
-        self.current = None;
-        self.pending = if conditional {
-            vec![(block, Edge::False)]
-        } else {
-            Vec::new()
-        };
-        Ok(())
-    }
-
-    fn conditional_return(&mut self, span: (u32, u32)) {
-        let block = self.current.expect("the branch just landed");
-        let ret_block = if let Some(existing) = self.ret_block {
-            existing
-        } else {
-            let created = self.builder.new_block("ret");
-            let uses = self.outputs.iter().copied().map(typed).collect();
-            self.builder
-                .append_instruction(created, Op::Ret, uses, Vec::new(), false, Some(span))
-                .expect("instruction identity space is far from exhausted");
-            self.ret_block = Some(created);
-            created
-        };
-        self.builder
-            .add_edge(block, ret_block, Edge::True, None)
-            .expect("return block is live");
-        self.current = None;
-        self.pending = vec![(block, Edge::False)];
-    }
-
-    /// Lowers a retained decoded instruction with dest/source operands.
-    fn alu(
-        &mut self,
-        instruction: &Instruction,
-        operands: &[Operand],
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        let mut dests: Vec<(&Operand, DestAccess, usize)> = Vec::new();
-        let mut sources = Vec::new();
-        let mut bindings = Vec::new();
-        let mut uses = Vec::new();
-        let mut source_operands: Vec<&Operand> = Vec::new();
-        let dual = matches!(instruction.opcode, Opcode::Sincos | Opcode::UDiv);
-        for (position, operand) in operands.iter().enumerate() {
-            match operand.reg_type {
-                RegisterType::Null => {}
-                RegisterType::Resource | RegisterType::Sampler | RegisterType::Uav => {
-                    let file = match operand.reg_type {
-                        RegisterType::Resource => RegFile::Resource,
-                        RegisterType::Sampler => RegFile::Sampler,
-                        _ => RegFile::Uav,
-                    };
-                    let index = match operand.indices.first() {
-                        Some(OperandIndex::Imm32(index)) => *index,
-                        _ => return unsupported("binding with a computed index"),
-                    };
-                    bindings.push(Binding {
-                        register: Register { file, index },
-                        components: operand.components.clone(),
-                    });
-                }
-                RegisterType::Immediate32 | RegisterType::Immediate64 => {
-                    let (variable, access) = self.read_source(operand, span)?;
-                    uses.push(typed(variable));
-                    sources.push(access);
-                    source_operands.push(operand);
-                }
-                _ if matches!(operand.components, ComponentSelect::Mask(_))
-                    && (dests.is_empty() || (dual && dests.len() == 1)) =>
-                {
-                    let ComponentSelect::Mask(mask) = operand.components else {
-                        unreachable!()
-                    };
-                    dests.push((operand, DestAccess { mask }, position));
-                }
-                _ if matches!(operand.components, ComponentSelect::Mask(_)) => {
-                    return unsupported(format!(
-                        "second destination operand for {}",
-                        instruction.opcode.name()
-                    ));
-                }
-                _ if dests.is_empty()
-                    && sources.is_empty()
-                    && matches!(operand.components, ComponentSelect::OneComponent)
-                    && matches!(
-                        operand.reg_type,
-                        RegisterType::OutputDepth | RegisterType::OutputCoverageMask
-                    ) =>
-                {
-                    dests.push((operand, DestAccess { mask: 0b0001 }, position));
-                }
-                _ => {
-                    let (variable, access) = self.read_source(operand, span)?;
-                    uses.push(typed(variable));
-                    sources.push(access);
-                    source_operands.push(operand);
-                }
-            }
-        }
-        // Dual-destination opcodes split into one pure instruction per
-        // surviving destination; the operand position selects the half.
-        if dests.len() > 1 {
-            return self.split_dual(instruction, &dests, &source_operands, &bindings, span);
-        }
-        self.finish_alu(instruction, dests.pop(), uses, sources, bindings, span)
-    }
-
-    /// Splits one dual-destination instruction into a pure instruction
-    /// per surviving destination.
-    ///
-    /// The halves execute atomically in the machine but become a
-    /// statement sequence here: a half whose destination register feeds
-    /// the shared sources must run last, or the other half reads a
-    /// clobbered value. If both destinations feed the sources no order
-    /// is sound.
-    fn split_dual(
-        &mut self,
-        instruction: &Instruction,
-        dests: &[(&Operand, DestAccess, usize)],
-        source_operands: &[&Operand],
-        bindings: &[Binding],
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        let source_lanes = |operand: &Operand| -> u8 {
-            match &operand.components {
-                ComponentSelect::Swizzle(swizzle) => {
-                    swizzle.iter().fold(0u8, |bits, &lane| bits | 1 << lane)
-                }
-                ComponentSelect::Scalar(lane) => 1 << lane,
-                _ => 0b1111,
-            }
-        };
-        let feeds_sources = |dest: &Operand, mask: u8| {
-            source_operands.iter().any(|source| {
-                source.reg_type == dest.reg_type
-                    && source.indices.first() == dest.indices.first()
-                    && source_lanes(source) & mask != 0
-            })
-        };
-        let clobbering: Vec<bool> = dests
-            .iter()
-            .map(|(operand, access, _)| feeds_sources(operand, access.mask))
-            .collect();
-        if clobbering.iter().all(|&clobbers| clobbers) {
-            return unsupported(format!(
-                "both destinations of {} overwrite its sources",
-                instruction.opcode.name()
-            ));
-        }
-        let mut ordered: Vec<usize> = (0..dests.len()).collect();
-        ordered.sort_by_key(|&half| clobbering[half]);
-        for &half in &ordered {
-            let (operand, access, position) = (dests[half].0, dests[half].1.clone(), dests[half].2);
-            let register = operand_register(operand)?;
-            let variable = self.variable(register);
-            // Re-materialize the operands per half: every constant
-            // stays single-use, so it inlines as a native literal
-            // instead of round-tripping through a float register.
-            let mut split_uses = Vec::new();
-            let mut split_sources = Vec::new();
-            for source_operand in source_operands {
-                let (operand_variable, operand_access) = self.read_source(source_operand, span)?;
-                split_uses.push(typed(operand_variable));
-                split_sources.push(operand_access);
-            }
-            let merges = !access.full() && register.file == RegFile::Temp;
-            if merges {
-                split_uses.push(typed(variable));
-                split_sources.push(identity_access());
-            }
-            self.append(
-                Op::Alu(AluOp {
-                    opcode: instruction.opcode,
-                    saturate: instruction.saturate,
-                    test_nonzero: instruction.test_nonzero,
-                    dest: Some(access),
-                    dest_position: position,
-                    sources: split_sources,
-                    bindings: bindings.to_vec(),
-                    tex_offsets: instruction.tex_offsets,
-                    resinfo_return_type: instruction.resinfo_return_type,
-                    merges,
-                }),
-                split_uses,
-                vec![typed(variable)],
-                span,
-            );
-        }
-        Ok(())
-    }
-
-    /// Commits one decoded instruction after operand classification.
-    #[allow(clippy::too_many_arguments, reason = "one call site")]
-    fn finish_alu(
-        &mut self,
-        instruction: &Instruction,
-        dest: Option<(&Operand, DestAccess, usize)>,
-        mut uses: Vec<TypedVariable<ShaderDialect>>,
-        mut sources: Vec<SourceAccess>,
-        bindings: Vec<Binding>,
-        span: (u32, u32),
-    ) -> Result<(), Unsupported> {
-        let mut defs = Vec::new();
-        let mut dest_access = None;
-        let mut dest_position = 0usize;
-        let mut merges = false;
-        if let Some((operand, access, position)) = dest {
-            dest_position = position;
-            if operand.reg_type == RegisterType::IndexableTemp {
-                // Writes into x#[...] are stores, not variable defs.
-                let (reference, address) =
-                    self.memory_reference(RegFile::IndexableTemp, operand, span)?;
-                let alu = AluOp {
-                    opcode: instruction.opcode,
-                    saturate: instruction.saturate,
-                    test_nonzero: instruction.test_nonzero,
-                    dest: Some(access),
-                    dest_position,
-                    sources,
-                    bindings,
-                    tex_offsets: instruction.tex_offsets,
-                    resinfo_return_type: instruction.resinfo_return_type,
-                    merges: false,
-                };
-                // Compute into a temp, then store it. The store's uses
-                // are [address..., value]: the HLIL store shape takes
-                // the LAST use as the stored value.
-                let value = self.fresh_temp();
-                let mut store_uses = Vec::new();
-                if let Some(address) = address {
-                    store_uses.push(typed(address));
-                }
-                store_uses.push(typed(value));
-                self.append(Op::Alu(alu), uses, vec![typed(value)], span);
-                self.append(Op::Store(reference), store_uses, Vec::new(), span);
-                return Ok(());
-            }
-            let register = operand_register(operand)?;
-            let variable = self.variable(register);
-            if !access.full() && register.file == RegFile::Temp {
-                // Partial writes read-modify-write the register.
-                uses.push(typed(variable));
-                sources.push(identity_access());
-                merges = true;
-            }
-            defs.push(typed(variable));
-            dest_access = Some(access);
-        }
-        // A plain full-register move is the dialect's copy.
-        let operation = if instruction.opcode == Opcode::Mov
-            && !instruction.saturate
-            && dest_access.as_ref().is_some_and(DestAccess::full)
-            && sources.len() == 1
-            && !sources[0].negate
-            && !sources[0].abs
-            && sources[0].components == ComponentSelect::Swizzle([0, 1, 2, 3])
-            && bindings.is_empty()
-        {
-            Op::Copy
-        } else {
-            Op::Alu(AluOp {
-                opcode: instruction.opcode,
-                saturate: instruction.saturate,
-                test_nonzero: instruction.test_nonzero,
-                dest: dest_access,
-                dest_position,
-                sources,
-                bindings,
-                tex_offsets: instruction.tex_offsets,
-                resinfo_return_type: instruction.resinfo_return_type,
-                merges,
-            })
-        };
-        self.append(operation, uses, defs, span);
-        Ok(())
-    }
-}
-
-/// Lifts one decoded program into a verified MLIL function.
+/// Lifts one decoded program into an RTL function.
 ///
 /// # Errors
 ///
 /// Returns [`Unsupported`] for shader shapes outside the modeled subset
 /// (switch flow, subroutines, exotic operand addressing) and for
-/// verification failures during construction.
+/// construction failures.
 pub fn lift_program(program: &Program) -> Result<LiftedShader, Unsupported> {
-    if matches!(program.shader_type, "gs" | "hs" | "ds") {
-        return unsupported(format!("{} stage", program.shader_type));
-    }
     let source = format!(
         "{}_{}_{}",
         program.shader_type, program.major_version, program.minor_version
     );
-    let mut walk = Walk {
-        builder: FunctionBuilder::new(source),
-        variables: BTreeMap::new(),
-        outputs: Vec::new(),
-        current: None,
-        pending: Vec::new(),
-        frames: Vec::new(),
-        blocks: 0,
-        ret_block: None,
-    };
-    let entry = walk.builder.entry();
-    walk.pending.push((entry, Edge::Entry));
-
     let mut declarations = Declarations {
         samplers: Vec::new(),
         resources: Vec::new(),
@@ -871,40 +437,89 @@ pub fn lift_program(program: &Program) -> Result<LiftedShader, Unsupported> {
         indexable_temps: Vec::new(),
         immediate_constants: Vec::new(),
         structured: Vec::new(),
+        uavs: Vec::new(),
         thread_group: None,
+        geometry: None,
+        tessellation: None,
     };
+    if program.shader_type == "hs" {
+        return lift_hull(program, &source, declarations);
+    }
+    for instruction in &program.instructions {
+        collect_declaration(instruction, &mut declarations, true);
+    }
+    let function = walk_range(
+        program,
+        0..program.instructions.len(),
+        &mut declarations,
+        &source,
+    )?;
+    Ok(LiftedShader {
+        function,
+        declarations,
+        hull: None,
+    })
+}
 
-    for (index, instruction) in program.instructions.iter().enumerate() {
+/// Walks one instruction range into an RTL function.
+fn walk_range(
+    program: &Program,
+    range: core::ops::Range<usize>,
+    declarations: &mut Declarations,
+    source: &str,
+) -> Result<cfglib::ir::rtl::Function<ShaderDialect>, Unsupported> {
+    let mut walk = Walk {
+        builder: FunctionBuilder::new(source.to_owned()),
+        declarations: core::mem::replace(
+            declarations,
+            Declarations {
+                samplers: Vec::new(),
+                resources: Vec::new(),
+                constant_buffers: Vec::new(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                indexable_temps: Vec::new(),
+                immediate_constants: Vec::new(),
+                structured: Vec::new(),
+                uavs: Vec::new(),
+                thread_group: None,
+                geometry: None,
+                tessellation: None,
+            },
+        ),
+        current: None,
+        pending: Vec::new(),
+        frames: Vec::new(),
+        blocks: 0,
+        ret_block: None,
+    };
+    let entry = walk.builder.entry();
+    walk.pending.push((entry, Edge::Entry));
+    for index in range {
+        let instruction = &program.instructions[index];
         let span = (
             u32::try_from(index).unwrap_or(u32::MAX),
             u32::try_from(index + 1).unwrap_or(u32::MAX),
         );
-        collect_declaration(instruction, &mut declarations, &mut walk);
         if let InstructionKind::Generic { operands, .. } = &instruction.kind {
             walk.generic(instruction, operands, span)?;
         }
     }
+    finish_walk(walk, declarations)
+}
+
+fn finish_walk(
+    walk: Walk,
+    declarations: &mut Declarations,
+) -> Result<cfglib::ir::rtl::Function<ShaderDialect>, Unsupported> {
     if !walk.frames.is_empty() {
         return unsupported("unclosed structured region");
     }
-
-    let parameters = walk
-        .variables
-        .iter()
-        .filter(|(register, _)| matches!(register.file, RegFile::Input | RegFile::System(_)))
-        .map(|(_, &variable)| variable)
-        .collect();
-    let returns = walk.outputs.iter().map(|_| ValueType::VEC4).collect();
-    walk.builder
-        .set_signature(cfglib::ir::mlil::Signature::<ShaderDialect>::new(
-            parameters, returns,
-        ))
-        .map_err(|error| Unsupported(format!("signature: {error}")))?;
-
+    *declarations = walk.declarations;
     let function = walk
         .builder
         .finish()
-        .map_err(|error| Unsupported(format!("verification: {error}")))?;
+        .map_err(|error| Unsupported(format!("construction: {error}")))?;
     // A walk bug that strands blocks must fail loudly, never render a
     // silently truncated body.
     let mut reachable = std::collections::BTreeSet::new();
@@ -917,126 +532,66 @@ pub fn lift_program(program: &Program) -> Result<LiftedShader, Unsupported> {
     if reachable.len() != function.cfg().block_count() {
         return unsupported("stranded unreachable blocks");
     }
+    Ok(function)
+}
+
+/// Lifts one hull shader: the control-point phase becomes the main
+/// function, fork and join phases become the patch-constant functions.
+fn lift_hull(
+    program: &Program,
+    source: &str,
+    mut declarations: Declarations,
+) -> Result<LiftedShader, Unsupported> {
+    // Phase boundaries: (phase opcode, body start).
+    let mut phases: Vec<(Opcode, usize)> = Vec::new();
+    for (index, instruction) in program.instructions.iter().enumerate() {
+        match instruction.opcode {
+            Opcode::HsControlPointPhase | Opcode::HsForkPhase | Opcode::HsJoinPhase => {
+                phases.push((instruction.opcode, index + 1));
+            }
+            _ => {}
+        }
+    }
+    let end_of = |position: usize| -> usize {
+        phases
+            .get(position + 1)
+            .map_or(program.instructions.len(), |&(_, start)| start - 1)
+    };
+    // Declarations: everything global, but output rows only from the
+    // control-point phase (fork outputs are patch constants).
+    let control_point_range = phases
+        .iter()
+        .position(|&(opcode, _)| opcode == Opcode::HsControlPointPhase)
+        .map(|position| phases[position].1..end_of(position));
+    for (index, instruction) in program.instructions.iter().enumerate() {
+        let in_control_point = control_point_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&index));
+        collect_declaration(instruction, &mut declarations, in_control_point);
+    }
+    let mut control_point = None;
+    let mut constants = Vec::new();
+    for (position, &(opcode, start)) in phases.iter().enumerate() {
+        let range = start..end_of(position);
+        let instances = program.instructions[range.clone()]
+            .iter()
+            .find_map(|instruction| match instruction.kind {
+                InstructionKind::DclHsForkPhaseInstanceCount { count }
+                | InstructionKind::DclHsJoinPhaseInstanceCount { count } => Some(count.max(1)),
+                _ => None,
+            })
+            .unwrap_or(1);
+        let function = walk_range(program, range, &mut declarations, source)?;
+        match opcode {
+            Opcode::HsControlPointPhase => control_point = Some(function),
+            _ => constants.push((instances, function)),
+        }
+    }
+    let function =
+        control_point.ok_or_else(|| Unsupported("hull without a control-point phase".into()))?;
     Ok(LiftedShader {
         function,
         declarations,
+        hull: Some(HullPhases { constants }),
     })
-}
-
-/// Records declaration instructions for the rendering header.
-fn collect_declaration(
-    instruction: &Instruction,
-    declarations: &mut Declarations,
-    walk: &mut Walk,
-) {
-    match &instruction.kind {
-        InstructionKind::DclSampler { mode, operands, .. } => {
-            if let Some(operand) = operands.first()
-                && let Some(OperandIndex::Imm32(index)) = operand.indices.first()
-            {
-                declarations.samplers.push((*index, mode));
-            }
-        }
-        InstructionKind::DclResource {
-            dimension,
-            return_type,
-            operands,
-            ..
-        } => {
-            if let Some(operand) = operands.first()
-                && let Some(OperandIndex::Imm32(index)) = operand.indices.first()
-            {
-                declarations
-                    .resources
-                    .push((*index, dimension, *return_type));
-            }
-        }
-        InstructionKind::DclConstantBuffer { operands, size, .. } => {
-            if let Some(operand) = operands.first()
-                && let Some(OperandIndex::Imm32(register)) = operand.indices.first()
-            {
-                declarations.constant_buffers.push((*register, *size));
-            }
-        }
-        InstructionKind::DclInput {
-            interpolation,
-            system_value,
-            operands,
-        } => {
-            if let Some(operand) = operands.first()
-                && let Ok(register) = operand_register(operand)
-            {
-                walk.variable(register);
-                if !declarations
-                    .inputs
-                    .iter()
-                    .any(|row| row.register == register)
-                {
-                    declarations.inputs.push(InputRow {
-                        register,
-                        components: operand.components.clone(),
-                        system_value: system_value.and_then(dxbc::shex::SystemValue::name),
-                        interpolation: *interpolation,
-                    });
-                }
-            }
-        }
-        InstructionKind::DclOutput {
-            system_value,
-            operands,
-        } => {
-            collect_io(&mut declarations.outputs, operands, *system_value, walk);
-        }
-        InstructionKind::DclResourceStructured {
-            stride, operands, ..
-        } => {
-            if let Some(operand) = operands.first()
-                && let Some(OperandIndex::Imm32(index)) = operand.indices.first()
-            {
-                declarations.structured.push((*index, *stride));
-            }
-        }
-        InstructionKind::DclThreadGroup { x, y, z } => {
-            declarations.thread_group = Some((*x, *y, *z));
-        }
-        InstructionKind::CustomData {
-            subtype: dxbc::shex::CustomDataType::ImmediateConstantBuffer,
-            values,
-            ..
-        } => {
-            declarations.immediate_constants.clone_from(values);
-        }
-        InstructionKind::DclIndexableTemp {
-            reg,
-            size,
-            components,
-        } => {
-            declarations
-                .indexable_temps
-                .push((*reg, *size, *components));
-        }
-        _ => {}
-    }
-}
-
-/// Records one input or output declaration row, deduplicating split
-/// component declarations of the same register.
-fn collect_io(
-    rows: &mut Vec<(Register, ComponentSelect, Option<&'static str>)>,
-    operands: &[Operand],
-    system_value: Option<dxbc::shex::SystemValue>,
-    walk: &mut Walk,
-) {
-    if let Some(operand) = operands.first()
-        && let Ok(register) = operand_register(operand)
-    {
-        walk.variable(register);
-        if !rows.iter().any(|(declared, ..)| *declared == register) {
-            rows.push((
-                register,
-                operand.components.clone(),
-                system_value.and_then(dxbc::shex::SystemValue::name),
-            ));
-        }
-    }
 }

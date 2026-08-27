@@ -237,9 +237,7 @@ fn apply_modifiers(instr: &mut Instruction, modifiers: &str) -> Result<(), AsmEr
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Per-opcode kind dispatch (mirrors decode::decode_instruction).
-// ---------------------------------------------------------------------------
 
 fn parse_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     use Opcode::{
@@ -477,9 +475,7 @@ fn parse_function_kind(op: Opcode, c: &mut Cursor<'_>) -> Result<InstructionKind
     }
 }
 
-// ---------------------------------------------------------------------------
 // Declaration payload helpers
-// ---------------------------------------------------------------------------
 
 fn parse_global_flags(c: &mut Cursor<'_>) -> Result<InstructionKind, AsmError> {
     c.skip_spaces();
@@ -768,9 +764,7 @@ fn parse_raw_block(c: &mut Cursor<'_>) -> Result<Vec<u32>, AsmError> {
     Ok(raw)
 }
 
-// ---------------------------------------------------------------------------
 // Operands
-// ---------------------------------------------------------------------------
 
 fn parse_operand_list(c: &mut Cursor<'_>) -> Result<Operands, AsmError> {
     // Operands are whitespace-separated and each is a single whitespace-free
@@ -1067,9 +1061,7 @@ fn intern_system_value(s: &str) -> Result<SystemValue, AsmError> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Small helpers
-// ---------------------------------------------------------------------------
 
 fn one(op: Operand) -> Operands {
     let mut v: Operands = SmallVec::new();
@@ -1161,9 +1153,7 @@ fn parse_hex0x(s: &str) -> Result<u32, AsmError> {
     parse_hex(body)
 }
 
-// ---------------------------------------------------------------------------
 // Cursor
-// ---------------------------------------------------------------------------
 
 struct Cursor<'a> {
     s: &'a [u8],

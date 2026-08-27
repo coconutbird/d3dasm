@@ -1,10 +1,12 @@
 //! SM4/SM5 shader dialect over cfglib's generic IR contracts.
 //!
-//! One dialect type implements both the MLIL and HLIL levels: registers
-//! are dataflow variables, non-register operand reads (immediates,
-//! constant buffers, indexable temporaries) materialize as pure value
-//! producers so expression inlining can fold them into consumers, and
-//! everything else stays a typed wrapper around the decoded instruction.
+//! One dialect type implements the RTL, MLIL, and HLIL levels. The
+//! decoded program (the language's own low-level form) lifts into RTL —
+//! typed parallel transfers over raw registers — and cfglib's web
+//! lifting recovers typed MLIL variables from register lanes. The MLIL
+//! and HLIL operation vocabulary is the lifted statement itself:
+//! expression trees over web variables, with resource bindings and
+//! addressable-memory references carried in operator payloads.
 
 use std::collections::BTreeMap;
 
@@ -12,8 +14,9 @@ use cfglib::ir::hlil::{self, Lifted};
 use cfglib::ir::mlil::{
     AnalysisDialect, Dialect, InstructionMetadata, VerificationIssue, VerifyDialect,
 };
+use cfglib::ir::rtl::{self, LiftedStatement, ScalarType, ValueShape, VarExpr};
 use cfglib::{EdgeKind, FlowEffect, Vocabulary};
-use dxbc::shex::{ComponentSelect, Opcode};
+use dxbc::shex::Opcode;
 
 /// One MLIL/HLIL function over the shader dialect.
 pub type Function = cfglib::ir::mlil::Function<ShaderDialect>;
@@ -21,24 +24,14 @@ pub type Function = cfglib::ir::mlil::Function<ShaderDialect>;
 pub type Instruction = cfglib::ir::mlil::Instruction<ShaderDialect>;
 /// One MLIL variable identity over the shader dialect.
 pub type VariableId = cfglib::ir::mlil::VariableId;
+/// The operation vocabulary shared by MLIL and HLIL: lifted statements.
+pub type Op = LiftedStatement<ShaderDialect>;
+/// One typed expression over web variables.
+pub type Expr = VarExpr<ShaderDialect>;
 
 /// The Direct3D SM4/SM5 semantic dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ShaderDialect;
-
-/// The value type of one occurrence: a register-shaped vector of 32-bit
-/// lanes. SM4/SM5 registers are typeless; lane interpretation belongs to
-/// each consuming operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ValueType {
-    /// Number of 32-bit components (1 or 4).
-    pub components: u8,
-}
-
-impl ValueType {
-    /// The full register shape.
-    pub const VEC4: Self = Self { components: 4 };
-}
 
 /// Observable effects of shader operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,22 +40,22 @@ pub enum Effect {
     Read,
     /// Writes addressable state (UAVs, indexable temporaries).
     Write,
+    /// Writes the shader interface (outputs, depth, coverage).
+    Export,
     /// Control-adjacent side effect (`discard`, `sync`).
     Control,
 }
 
-/// Semantic role of one register variable.
+/// Semantic role of one variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Role {
-    /// General-purpose temporary (`r#`) or a materialized operand value.
+    /// A web recovered from temporaries, or a synthetic value.
     Temp,
     /// Shader input (`v#` and system-value inputs).
     Input,
-    /// Shader output (`o#`, `oDepth`, `oMask`).
-    Output,
 }
 
-/// A register file the dialect models as variables or memory references.
+/// A register file the dialect models as storage or memory references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RegFile {
     /// `r#` temporaries.
@@ -87,6 +80,8 @@ pub enum RegFile {
     Sampler,
     /// `u#` unordered access views.
     Uav,
+    /// `vpc#` tessellation patch-constant inputs.
+    PatchConstant,
     /// System-value input registers (thread ids, coverage, primitive id).
     System(SystemInput),
 }
@@ -104,9 +99,15 @@ pub enum SystemInput {
     Coverage,
     /// `vPrim` (primitive id).
     PrimitiveId,
+    /// `vDomain` (tessellator domain location).
+    DomainPoint,
+    /// `vOutputControlPointID` (hull control-point phase).
+    ControlPointId,
+    /// `vForkInstanceID` (instanced hull fork phase).
+    ForkInstanceId,
 }
 
-/// The native identity of one register variable.
+/// The native identity of one register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Register {
     /// Register file.
@@ -115,142 +116,118 @@ pub struct Register {
     pub index: u32,
 }
 
-/// One source operand's access metadata, positionally aligned with the
-/// instruction's variable uses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceAccess {
-    /// Component selection applied to the read.
-    pub components: ComponentSelect,
-    /// Negate modifier.
-    pub negate: bool,
-    /// Absolute-value modifier.
-    pub abs: bool,
-}
-
-/// The destination operand's access metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DestAccess {
-    /// Component write mask (bit per lane).
-    pub mask: u8,
-}
-
-impl DestAccess {
-    /// Whether every lane is written.
-    #[must_use]
-    pub fn full(&self) -> bool {
-        self.mask == 0b1111
-    }
-}
-
-/// A reference into an addressable register file, with at most one
-/// materialized relative address (the instruction's trailing use).
+/// A reference into an addressable register file. The selected lanes are
+/// already mapped through the destination mask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemRef {
     /// Register file being addressed.
     pub file: RegFile,
     /// Immediate index chain (`cb0[3]` carries `[0, 3]`).
     pub indices: Vec<u32>,
-    /// Which immediate index the materialized relative address offsets,
-    /// when the reference is dynamically indexed.
+    /// Which immediate index a relative address operand offsets, when
+    /// the reference is dynamically indexed.
     pub relative_to: Option<usize>,
-    /// Component selection of the relative address operand.
-    pub relative_select: Option<ComponentSelect>,
-    /// Component selection applied to the read.
-    pub components: ComponentSelect,
+    /// Mapped element lanes selected by the read (empty for stores).
+    pub lanes: Vec<u8>,
 }
 
-/// An immediate literal operand's raw 32-bit lanes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Immediate {
-    /// Raw lane bits.
-    pub bits: Vec<u32>,
-}
-
-/// One binding operand (resource, sampler, UAV) carried in an
-/// instruction's payload rather than as a dataflow variable.
+/// One binding operand (resource, sampler, UAV) carried in an operator
+/// payload rather than as dataflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     /// Bound register.
     pub register: Register,
-    /// Component selection on the binding operand.
-    pub components: ComponentSelect,
+    /// Mapped lanes the binding's swizzle selects for the destination.
+    pub lanes: Vec<u8>,
 }
 
-/// A general decoded instruction retained with its access metadata.
+/// The retained head of one decoded computational instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AluOp {
+pub struct AluHead {
     /// Decoded opcode.
     pub opcode: Opcode,
     /// Saturate modifier.
     pub saturate: bool,
-    /// Conditional test polarity for testing opcodes.
-    pub test_nonzero: bool,
-    /// Destination access, when the opcode writes a register.
-    pub dest: Option<DestAccess>,
     /// The operand slot the destination came from — dual-destination
     /// opcodes (`udiv`, `sincos`) select their meaning by position.
     pub dest_position: usize,
-    /// Source accesses, positionally aligned with the variable uses.
-    pub sources: Vec<SourceAccess>,
     /// Resource and sampler bindings in operand order.
     pub bindings: Vec<Binding>,
     /// Texel offsets from the extended opcode token.
     pub tex_offsets: Option<[i8; 3]>,
     /// `resinfo` return-type selector (0 float, 1 rcp-float, 2 uint).
     pub resinfo_return_type: Option<u32>,
-    /// Whether the lift appended a trailing read of the destination's
-    /// previous value (partial-mask writes read-modify-write).
-    pub merges: bool,
 }
 
-/// The dialect's operation vocabulary.
+/// Pure RTL operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Op {
-    /// Materialized immediate literal.
-    Const(Immediate),
-    /// Pure read of an addressable file (`cb#[...]`, `x#[...]`, icb).
-    Load(MemRef),
-    /// Write into an addressable file (`x#[...]`).
-    Store(MemRef),
-    /// Full-register unmodified move between plain register variables.
-    Copy,
-    /// A structured conditional (`if_z` / `if_nz` and the conditional
-    /// transfers lowered to branches).
-    Branch {
-        /// Test polarity: `true` branches when the component is non-zero.
-        nonzero: bool,
-        /// Component selection of the tested source.
-        components: ComponentSelect,
+pub enum RtlOp {
+    /// A retained decoded instruction applied to its source values.
+    Alu(AluHead),
+    /// Float negation source modifier.
+    Neg,
+    /// Float absolute-value source modifier.
+    Abs,
+    /// A read of an addressable file (`cb#[...]`, `x#[...]`, icb); the
+    /// optional operand is the relative address.
+    LoadMem(MemRef),
+    /// A geometry-shader input read: one vertex of the input primitive.
+    LoadInput {
+        /// The primitive vertex index.
+        vertex: u32,
+        /// The input register within the vertex.
+        register: u32,
+        /// Mapped lanes selected by the read.
+        lanes: Vec<u8>,
     },
-    /// `ret` — uses every live output so liveness keeps output writes.
-    Ret,
-    /// `discard_z` / `discard_nz` — flags the invocation discarded and
-    /// continues executing.
-    Discard {
-        /// Test polarity.
-        nonzero: bool,
-        /// Component selection of the tested source.
-        components: ComponentSelect,
+    /// A control-point read whose register index is computed; the
+    /// operand is the index.
+    LoadInputDynamic {
+        /// The control-point index.
+        vertex: u32,
+        /// The immediate base added to the computed register index.
+        base: u32,
+        /// Mapped lanes selected by the read.
+        lanes: Vec<u8>,
     },
-    /// Every other decoded instruction.
-    Alu(AluOp),
+    /// A scalar zero test producing a boolean.
+    Test {
+        /// Polarity: `true` is non-zero.
+        nonzero: bool,
+    },
 }
 
-impl Op {
-    /// Compact stable mnemonic.
-    #[must_use]
-    pub fn mnemonic(&self) -> &'static str {
-        match self {
-            Self::Const(_) => "const",
-            Self::Load(_) => "load",
-            Self::Store(_) => "store",
-            Self::Copy => "copy",
-            Self::Branch { .. } => "branch",
-            Self::Ret => "ret",
-            Self::Discard { .. } => "discard",
-            Self::Alu(alu) => alu.opcode.name(),
-        }
-    }
+/// Effect-bearing RTL operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectOp {
+    /// A write into an addressable file (`x#[...]`); operands are the
+    /// value and the optional relative address.
+    StoreMem(MemRef),
+    /// A write of interface output lanes; the operands are the value
+    /// and, when dynamic, the register index.
+    StoreOutput {
+        /// The output register (the immediate base when dynamic).
+        register: Register,
+        /// Written lanes in value order.
+        lanes: Vec<u8>,
+        /// Whether a trailing operand dynamically indexes the register.
+        dynamic: bool,
+    },
+    /// A typed UAV store; operands are the coordinate and the value.
+    StoreUav {
+        /// The UAV register.
+        register: Register,
+        /// Written lanes in value order.
+        lanes: Vec<u8>,
+    },
+    /// A geometry-shader vertex emit to stream 0.
+    Emit,
+    /// A geometry-shader strip cut on stream 0.
+    Cut,
+    /// `discard_z` / `discard_nz`; the operand is the tested condition.
+    Discard,
+    /// A destination-less retained instruction (`sync`, `nop`-likes).
+    Bare(Opcode),
 }
 
 /// Edge payload carrying the structural meaning of each transfer.
@@ -267,7 +244,7 @@ pub enum Edge {
 }
 
 impl Vocabulary for ShaderDialect {
-    type ValueType = ValueType;
+    type ValueType = ValueShape;
     type Effect = Effect;
     type Source = String;
     type SourceSpan = (u32, u32);
@@ -284,27 +261,33 @@ impl Vocabulary for ShaderDialect {
     }
 }
 
-impl Dialect for ShaderDialect {
-    type Operation = Op;
+impl rtl::Dialect for ShaderDialect {
+    type Operator = RtlOp;
+    type EffectOp = EffectOp;
     type Edge = Edge;
 
-    fn instruction_metadata(
-        operation: &Self::Operation,
-        _may_throw: bool,
-    ) -> InstructionMetadata<Self::Effect> {
-        let (effects, flow) = match operation {
-            Op::Const(_) | Op::Copy | Op::Load(_) => (Vec::new(), FlowEffect::Fallthrough),
-            Op::Store(_) => (vec![Effect::Write], FlowEffect::Fallthrough),
-            Op::Branch { .. } => (Vec::new(), FlowEffect::ConditionalJump),
-            Op::Ret => (Vec::new(), FlowEffect::Return),
-            Op::Discard { .. } => (vec![Effect::Control], FlowEffect::Fallthrough),
-            Op::Alu(alu) => (alu_effects(alu), FlowEffect::Fallthrough),
-        };
-        InstructionMetadata::new(effects, flow, false)
+    fn mnemonic(operator: &Self::Operator) -> &str {
+        match operator {
+            RtlOp::Alu(head) => head.opcode.name(),
+            RtlOp::Neg => "neg",
+            RtlOp::Abs => "abs",
+            RtlOp::LoadMem(_) => "load",
+            RtlOp::LoadInput { .. } => "load_input",
+            RtlOp::LoadInputDynamic { .. } => "load_input_dynamic",
+            RtlOp::Test { .. } => "test",
+        }
     }
 
-    fn mnemonic(operation: &Self::Operation) -> &str {
-        operation.mnemonic()
+    fn effect_mnemonic(operation: &Self::EffectOp) -> &str {
+        match operation {
+            EffectOp::StoreMem(_) => "store",
+            EffectOp::StoreOutput { .. } => "store_output",
+            EffectOp::StoreUav { .. } => "store_uav",
+            EffectOp::Emit => "emit",
+            EffectOp::Cut => "cut",
+            EffectOp::Discard => "discard",
+            EffectOp::Bare(opcode) => opcode.name(),
+        }
     }
 
     fn edge_kind(edge: &Self::Edge) -> EdgeKind {
@@ -320,46 +303,163 @@ impl Dialect for ShaderDialect {
     }
 }
 
-/// Effects of one retained decoded instruction.
-fn alu_effects(alu: &AluOp) -> Vec<Effect> {
-    // Resource reads stay observable so they are neither eliminated nor
-    // duplicated; UAV and shared-memory traffic is a real write.
-    let name = alu.opcode.name();
-    if name.starts_with("atomic") || name.starts_with("imm_atomic") || name.starts_with("store") {
-        vec![Effect::Read, Effect::Write]
-    } else if name.starts_with("sample")
-        || name.starts_with("ld")
-        || name.starts_with("gather")
-        || name.starts_with("bufinfo")
-        || name.starts_with("resinfo")
-    {
-        vec![Effect::Read]
-    } else if matches!(alu.opcode, Opcode::Sync) {
-        vec![Effect::Control]
-    } else {
-        Vec::new()
+impl rtl::Lift for ShaderDialect {
+    fn value_type(shape: ValueShape) -> ValueShape {
+        shape
+    }
+
+    fn web_role(storage: Option<&Register>) -> Role {
+        match storage.map(|register| register.file) {
+            Some(RegFile::Input | RegFile::System(_) | RegFile::PatchConstant) => Role::Input,
+            _ => Role::Temp,
+        }
+    }
+
+    fn operation(statement: LiftedStatement<Self>) -> Op {
+        statement
+    }
+}
+
+impl Dialect for ShaderDialect {
+    type Operation = Op;
+    type Edge = Edge;
+
+    fn instruction_metadata(
+        operation: &Self::Operation,
+        _may_throw: bool,
+    ) -> InstructionMetadata<Self::Effect> {
+        let (effects, flow) = match operation {
+            LiftedStatement::Assign { effects, value, .. } => {
+                let mut effects = effects.clone();
+                add_read_effects(value, &mut effects);
+                (effects, FlowEffect::Fallthrough)
+            }
+            LiftedStatement::Effect {
+                operation,
+                effects,
+                operands,
+            } => {
+                let mut effects = effects.clone();
+                for operand in operands {
+                    add_read_effects(operand, &mut effects);
+                }
+                let base = match operation {
+                    EffectOp::StoreMem(_) | EffectOp::StoreUav { .. } => Some(Effect::Write),
+                    EffectOp::StoreOutput { .. } | EffectOp::Emit | EffectOp::Cut => {
+                        Some(Effect::Export)
+                    }
+                    EffectOp::Discard | EffectOp::Bare(_) => Some(Effect::Control),
+                };
+                if let Some(effect) = base
+                    && !effects.contains(&effect)
+                {
+                    effects.push(effect);
+                }
+                (effects, FlowEffect::Fallthrough)
+            }
+            LiftedStatement::Branch { .. } => (Vec::new(), FlowEffect::ConditionalJump),
+            LiftedStatement::Return { .. } => (Vec::new(), FlowEffect::Return),
+        };
+        InstructionMetadata::new(effects, flow, false)
+    }
+
+    fn mnemonic(operation: &Self::Operation) -> &str {
+        match operation {
+            LiftedStatement::Assign { value, .. } => value_mnemonic(value),
+            LiftedStatement::Effect { operation, .. } => {
+                <Self as rtl::Dialect>::effect_mnemonic(operation)
+            }
+            LiftedStatement::Branch { .. } => "branch",
+            LiftedStatement::Return { .. } => "ret",
+        }
+    }
+
+    fn edge_kind(edge: &Self::Edge) -> EdgeKind {
+        <Self as rtl::Dialect>::edge_kind(edge)
+    }
+
+    fn is_entry_edge(edge: &Self::Edge) -> bool {
+        <Self as rtl::Dialect>::is_entry_edge(edge)
+    }
+}
+
+fn value_mnemonic(value: &Expr) -> &str {
+    match value {
+        VarExpr::Read { .. } => "mov",
+        VarExpr::Const { .. } => "const",
+        VarExpr::Apply { operator, .. } => <ShaderDialect as rtl::Dialect>::mnemonic(operator),
+        VarExpr::Reinterpret { .. } => "bitcast",
+        VarExpr::Compose { .. } => "compose",
+    }
+}
+
+/// Adds the observable-read effects of resource accesses nested in one
+/// expression: samples and loads must be neither eliminated nor
+/// duplicated.
+fn add_read_effects(value: &Expr, effects: &mut Vec<Effect>) {
+    match value {
+        VarExpr::Apply {
+            operator, operands, ..
+        } => {
+            let reads = match operator {
+                RtlOp::Alu(head) => {
+                    let name = head.opcode.name();
+                    name.starts_with("sample")
+                        || name.starts_with("ld")
+                        || name.starts_with("gather")
+                        || name.starts_with("bufinfo")
+                        || name.starts_with("resinfo")
+                        || name.starts_with("atomic")
+                        || name.starts_with("imm_atomic")
+                }
+                _ => false,
+            };
+            if reads && !effects.contains(&Effect::Read) {
+                effects.push(Effect::Read);
+            }
+            for operand in operands {
+                add_read_effects(operand, effects);
+            }
+        }
+        VarExpr::Reinterpret { operand, .. } => add_read_effects(operand, effects),
+        VarExpr::Compose { parts, .. } => {
+            for part in parts {
+                add_read_effects(part, effects);
+            }
+        }
+        VarExpr::Read { .. } | VarExpr::Const { .. } => {}
     }
 }
 
 impl AnalysisDialect for ShaderDialect {
-    type Constant = Immediate;
+    type Constant = Vec<u64>;
     type ExpressionOperator = Opcode;
     type Callee = u32;
 
-    fn is_copy(operation: &Self::Operation) -> bool {
-        matches!(operation, Op::Copy)
+    fn is_copy(_operation: &Self::Operation) -> bool {
+        false
     }
 
     fn expression_operator(operation: &Self::Operation) -> Option<Self::ExpressionOperator> {
         match operation {
-            Op::Alu(alu) => Some(alu.opcode),
+            LiftedStatement::Assign {
+                value:
+                    VarExpr::Apply {
+                        operator: RtlOp::Alu(head),
+                        ..
+                    },
+                ..
+            } => Some(head.opcode),
             _ => None,
         }
     }
 
     fn constant(operation: &Self::Operation) -> Option<Self::Constant> {
         match operation {
-            Op::Const(immediate) => Some(immediate.clone()),
+            LiftedStatement::Assign {
+                value: VarExpr::Const { bits, .. },
+                ..
+            } => Some(bits.clone()),
             _ => None,
         }
     }
@@ -382,10 +482,10 @@ impl VerifyDialect for ShaderDialect {
 
 impl hlil::Dialect for ShaderDialect {
     type Operation = Op;
-    type Constant = Immediate;
+    type Constant = Vec<u64>;
 
     fn mnemonic(operation: &Self::Operation) -> &str {
-        operation.mnemonic()
+        <Self as Dialect>::mnemonic(operation)
     }
 }
 
@@ -400,24 +500,18 @@ impl hlil::VerifyDialect for ShaderDialect {
 impl hlil::LiftDialect for ShaderDialect {
     fn lift_operation(operation: &Op) -> Lifted<Op> {
         match operation {
-            Op::Branch { .. } => Lifted::BranchOperation(operation.clone()),
-            Op::Ret => Lifted::Return,
-            Op::Store(_) => Lifted::Store {
-                location: match operation {
-                    Op::Store(reference) => Op::Load(reference.clone()),
-                    _ => unreachable!(),
-                },
-            },
+            LiftedStatement::Branch { .. } => Lifted::BranchOperation(operation.clone()),
+            LiftedStatement::Return { .. } => Lifted::Return,
             other => Lifted::Operation(other.clone()),
         }
     }
 
-    fn case_values(_edge: &Edge) -> Vec<Immediate> {
+    fn case_values(_edge: &Edge) -> Vec<Vec<u64>> {
         Vec::new()
     }
 
-    fn void_type() -> ValueType {
-        ValueType { components: 0 }
+    fn void_type() -> ValueShape {
+        ValueShape::vector(ScalarType::Bits, 0)
     }
 
     fn temporary_role() -> Option<Role> {
@@ -426,22 +520,56 @@ impl hlil::LiftDialect for ShaderDialect {
 
     fn previous_value_operand(operation: &Op) -> Option<usize> {
         match operation {
-            Op::Alu(alu) if alu.merges => Some(alu.sources.len() - 1),
+            LiftedStatement::Assign {
+                merges: true,
+                value,
+                ..
+            } => {
+                let mut count = 0usize;
+                value.for_each_read(&mut |_| count += 1);
+                Some(count)
+            }
+            // `resinfo` renders as a statement block (`GetDimensions`),
+            // never as an expression: declaring a previous-value slot one
+            // past the reads pins the definition out of inlining.
+            LiftedStatement::Assign { value, .. }
+                if matches!(
+                    value,
+                    VarExpr::Apply {
+                        operator: RtlOp::Alu(AluHead {
+                            opcode: Opcode::Resinfo,
+                            ..
+                        }),
+                        ..
+                    }
+                ) =>
+            {
+                let mut count = 0usize;
+                value.for_each_read(&mut |_| count += 1);
+                Some(count)
+            }
             _ => None,
         }
     }
 
     fn negate_operation(operation: &Op) -> Option<Op> {
-        let Op::Branch {
-            nonzero,
-            components,
-        } = operation
+        let LiftedStatement::Branch { condition } = operation else {
+            return None;
+        };
+        let VarExpr::Apply {
+            operator: RtlOp::Test { nonzero },
+            operands,
+            shape,
+        } = condition
         else {
             return None;
         };
-        Some(Op::Branch {
-            nonzero: !nonzero,
-            components: components.clone(),
+        Some(LiftedStatement::Branch {
+            condition: VarExpr::Apply {
+                operator: RtlOp::Test { nonzero: !nonzero },
+                operands: operands.clone(),
+                shape: *shape,
+            },
         })
     }
 

@@ -36,29 +36,32 @@ Parses DXBC containers, decodes SM4/SM5 shader bytecode into a fully typed inter
 
 ## Decompilation
 
-`--emit hlsl` decompiles each shader program to HLSL source. The
-decompiler lifts the decoded instruction stream into an MLIL dialect over
-cfglib's generic IR (structured markers become blocks and edges;
-immediates, constant-buffer reads, and indexable temporaries materialize
-as pure value producers), recovers structured statements with single-use
-expressions inlined into their consumers through cfglib's HLIL lift, and
-renders compilable HLSL with bit-honest storage: temporaries are `uint4`
-locals (fxc's constant folder flushes float values it can prove
-denormal, so integer bits never round-trip float-typed storage), every
-read and write bit-casts between the storage and the consuming
-operation's lane type, and literals format natively in each consumer's
-lane type.
+`--emit hlsl` decompiles each shader program to HLSL source, covering
+every SM4/SM5 stage: vertex, pixel, compute, geometry (streams and
+emits), hull (control-point and instanced patch-constant phases), and
+domain shaders. The decoded instruction stream — the language's own
+low-level form — lifts into a shader-dialect RTL over cfglib's generic
+IR: typed parallel transfers over raw registers, with structured markers
+becoming blocks and edges. cfglib's web lifting then computes per-lane
+SSA and recovers typed MLIL variables from register lanes, so one
+register reused for a float and later a counter becomes two honestly
+typed locals, and reinterpretation casts appear only where the program
+genuinely mixes representations. The HLIL lift recovers structured
+statements with single-use expressions inlined into their consumers, and
+the renderer spells the result as compilable HLSL: `precise` locals pin
+evaluation order, RDEF names recover the original constant buffers,
+fields, textures, and samplers, and signature chunks carry the original
+interface semantics.
 
 Correctness is proven, not assumed: `tests/recompile.rs` recompiles
 every decompiled corpus shader under `fxc.exe /Gis` with its own
 profile, then executes the original and recompiled bytecode in a
 reference interpreter (`src/interp.rs`) over seeded synthetic worlds —
-signature-keyed registers, D3D-spec integer and NaN semantics — and
-compares every output bit-for-bit. Of the 1,197 corpus shaders, 917
-decompile today (the remainder are geometry/hull/domain stages and a
-few exotic opcodes, each reported explicitly); all 917 recompile
-cleanly and all 917 are proven semantically equivalent to their
-recompilation.
+signature-keyed registers and patch constants, D3D-spec integer and NaN
+semantics, geometry emissions, hull phases, and UAV stores — and
+compares every output bit-for-bit. All 1,197 corpus shaders decompile,
+all 1,197 recompile cleanly, and all 1,197 are proven semantically
+equivalent to their recompilation.
 
 ## Usage
 
@@ -199,10 +202,10 @@ local inputs under `shader-raw/`, `shaders/`, or `shaders-pc/`; these directorie
 are ignored by Git. Supply the files to the conformance tools explicitly:
 
 ```sh
-cargo run --release -p d3dasm-cli --example chunk_conformance -- <shader-files...>
-cargo run --release -p d3dasm-cli --example container_roundtrip -- <shader-files...>
+cargo run --release -p d3dasm-cli --example chunk-conformance -- <shader-files...>
+cargo run --release -p d3dasm-cli --example container-roundtrip -- <shader-files...>
 ```
 
-`chunk_conformance` verifies typed chunk parse/write identity.
-`container_roundtrip` verifies byte identity for each complete input file,
+`chunk-conformance` verifies typed chunk parse/write identity.
+`container-roundtrip` verifies byte identity for each complete input file,
 including non-DXBC wrapper data.

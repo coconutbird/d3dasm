@@ -63,13 +63,11 @@ pub(crate) fn axis_index(c: char) -> Option<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared string<->value tables.
 //
 // These mirror the canonical literals produced by `decode` so that a parsed
 // string is interned to the exact same `&'static str` the decoder would yield,
 // keeping round-trips content-equal.
-// ---------------------------------------------------------------------------
 
 /// Shader stage names, indexed by `D3D10_SB_TOKENIZED_PROGRAM_TYPE`.
 pub(crate) const SHADER_TYPES: &[(&str, u32)] = &[

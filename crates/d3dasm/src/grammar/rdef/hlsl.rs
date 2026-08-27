@@ -20,9 +20,7 @@ use dxbc::chunks::rdef::{
     hlsl_type_name, parse_hlsl_type,
 };
 
-// ---------------------------------------------------------------------------
 // Small helpers
-// ---------------------------------------------------------------------------
 
 fn is_sm5(target_version: u32) -> bool {
     ((target_version >> 8) & 0xFF) >= 5
@@ -333,9 +331,7 @@ fn ret_from_hlsl(s: &str) -> Option<u32> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Type references
-// ---------------------------------------------------------------------------
 
 /// HLSL spelling of a variable/member type reference (e.g. `float4`,
 /// `float4x4`, `float4[8]`, a struct name, or `Name[3]`). The `row_major`
@@ -372,9 +368,7 @@ fn split_name(tok: &str) -> Option<(&str, u16)> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Emit
-// ---------------------------------------------------------------------------
 
 /// HLSL element-type spelling for a structured-buffer binding (its `$Element`
 /// variable's type), used as the `<T>` in `StructuredBuffer<T>`. This lets the

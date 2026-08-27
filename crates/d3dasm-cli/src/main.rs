@@ -25,7 +25,8 @@ struct Cli {
     #[arg(long)]
     assemble: bool,
 
-    /// Output format when disassembling: `human` (default) or `d3dasm` (lossless).
+    /// Output format when disassembling: `human` (default), `d3dasm`
+    /// (lossless), or `hlsl` (decompile).
     #[arg(long, value_name = "FORMAT", default_value = "human")]
     emit: String,
 
