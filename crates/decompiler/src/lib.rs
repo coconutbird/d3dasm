@@ -89,7 +89,7 @@ fn decompile_with_semantics(
 ) -> Result<String, Unsupported> {
     let lifted = lift_program(program)?;
     let structured = |function: &cfglib::ir::rtl::Function<ShaderDialect>| {
-        let lifting = cfglib::ir::rtl::lift(function)
+        let lifting = cfglib::ir::rtl::lift(function, &())
             .map_err(|error| Unsupported(format!("web lift: {error}")))?;
         let webs = lifting.webs;
         let function = lifting

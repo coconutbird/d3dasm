@@ -28,7 +28,7 @@ type Expr = VarExpr<ShaderDialect>;
 type Op = LiftedStatement<ShaderDialect>;
 type Web = WebInfo<ShaderDialect>;
 type Webs = cfglib::ir::rtl::Webs<ShaderDialect>;
-type Reads<'a> = cfglib::ir::rtl::ReadResolver<'a, ShaderDialect>;
+type Reads<'a> = cfglib::ir::rtl::ReadResolver<'a, ShaderDialect, ShaderDialect>;
 
 mod interface;
 mod statement;
@@ -387,17 +387,6 @@ impl<'a> Renderer<'a> {
     ) -> Result<(usize, &'a Web), Unsupported> {
         self.webs
             .of_lifted(variable)
-            .map(|web| (variable.index(), web))
-            .ok_or_else(|| Unsupported("variable without a web".into()))
-    }
-
-    /// The web behind one MLIL variable identity.
-    fn mlil_web(
-        &self,
-        variable: cfglib::ir::mlil::VariableId,
-    ) -> Result<(usize, &'a Web), Unsupported> {
-        self.webs
-            .of(variable)
             .map(|web| (variable.index(), web))
             .ok_or_else(|| Unsupported("variable without a web".into()))
     }

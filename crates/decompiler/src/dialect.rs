@@ -251,6 +251,7 @@ impl Vocabulary for ShaderDialect {
 }
 
 impl rtl::Dialect for ShaderDialect {
+    type Constraint = ScalarType;
     type Operator = RtlOp;
     type EffectOp = EffectOp;
     type Edge = Edge;
@@ -288,6 +289,10 @@ impl rtl::Dialect for ShaderDialect {
     }
 }
 
+impl rtl::MlilBridge for ShaderDialect {
+    type Mlil = Self;
+}
+
 impl rtl::Lift for ShaderDialect {
     fn value_type(shape: ValueShape) -> ValueShape {
         shape
@@ -300,8 +305,20 @@ impl rtl::Lift for ShaderDialect {
         }
     }
 
-    fn operation(statement: LiftedStatement<Self>) -> Op {
-        statement
+    fn native_variable(storage: &Register, _source: &String) -> Option<Register> {
+        Some(*storage)
+    }
+
+    fn emit(
+        context: &mut rtl::Emission<'_, '_, Self>,
+        statement: LiftedStatement<Self>,
+    ) -> rtl::Result<()> {
+        context.single(statement)?;
+        Ok(())
+    }
+
+    fn lift_edge(edge: &Edge, _context: &rtl::EdgeContext<'_>) -> rtl::Result<Edge> {
+        Ok(*edge)
     }
 }
 
@@ -338,7 +355,12 @@ impl Dialect for ShaderDialect {
                 }
                 effects
             }
-            LiftedStatement::Branch { .. } | LiftedStatement::Return { .. } => Vec::new(),
+            LiftedStatement::Branch { .. }
+            | LiftedStatement::Dispatch { .. }
+            | LiftedStatement::Return { .. } => Vec::new(),
+            // Shaders raise no exceptions; the arm exists for the shared
+            // statement vocabulary only.
+            LiftedStatement::Raise { effects, .. } => effects.clone(),
         };
         InstructionMetadata::new(effects, operation.flow_effect(), false)
     }

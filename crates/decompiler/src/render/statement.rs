@@ -47,7 +47,7 @@ impl<'a> Renderer<'a> {
 
     pub(super) fn statement(&mut self, id: StatementId) -> Result<(), Unsupported> {
         match self.statement_kind(id)? {
-            StatementKind::Assign { value, .. } => self.assign(*value),
+            StatementKind::Assign { target, value } => self.assign(*target, *value),
             StatementKind::Expression(expression) => self.effect(*expression),
             StatementKind::If {
                 condition,
@@ -105,7 +105,15 @@ impl<'a> Renderer<'a> {
     }
 
     /// Renders one assignment statement.
-    pub(super) fn assign(&mut self, value: ExpressionId) -> Result<(), Unsupported> {
+    pub(super) fn assign(
+        &mut self,
+        target: ExpressionId,
+        value: ExpressionId,
+    ) -> Result<(), Unsupported> {
+        let ExpressionKind::Variable(written) = self.expression(target)?.kind() else {
+            return Err(Unsupported("assignment into a non-variable place".into()));
+        };
+        let written = *written;
         let expression = self.expression(value)?;
         let ExpressionKind::Operation {
             operation,
@@ -115,7 +123,6 @@ impl<'a> Renderer<'a> {
             return Err(Unsupported("assignment of a bare value".into()));
         };
         let Op::Assign {
-            target,
             positions,
             width,
             value,
@@ -124,7 +131,7 @@ impl<'a> Renderer<'a> {
         else {
             return Err(Unsupported("assignment of a non-assign operation".into()));
         };
-        let (index, web) = self.mlil_web(*target)?;
+        let (index, web) = self.hlil_web(written)?;
         let name = self.web_names[index].clone();
         let scalar = normalize(web.shape.scalar);
         let mut reads = Reads::new(self.function, operands);
