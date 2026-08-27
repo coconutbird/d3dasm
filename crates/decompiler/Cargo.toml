@@ -1,0 +1,25 @@
+[package]
+name = "d3dasm-decompiler"
+description = "SM4/SM5 shader bytecode to HLSL decompiler over cfglib's IR stack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "decompiler"
+path = "src/lib.rs"
+
+[dependencies]
+cfglib.workspace = true
+d3dasm.workspace = true
+dxbc.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

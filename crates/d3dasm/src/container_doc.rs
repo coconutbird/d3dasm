@@ -108,10 +108,8 @@ pub fn serialize(shader: &Shader<'_>) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
 // Per-chunk text codecs. A chunk is emitted as an editable `.code` block only
 // when `chunk_to_body` confirms its text round-trips to the exact bytes.
-// ---------------------------------------------------------------------------
 
 const SIGNATURE_FOURCCS: &[&[u8; 4]] = &[
     b"ISGN", b"ISG1", b"OSGN", b"OSG1", b"OSG5", b"PCSG", b"PSG1",
