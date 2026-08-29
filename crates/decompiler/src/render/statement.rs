@@ -2,16 +2,25 @@
 
 use cfglib::ir::hlil::{ExpressionId, ExpressionKind, StatementId, StatementKind};
 use cfglib::ir::rtl::{ResolvedRead, ScalarType, VarExpr};
-use dxbc::shex::Opcode;
 
-use crate::dialect::{AluHead, EffectOp, RegFile, RtlOp};
+use crate::dialect::{AluHead, EffectOp, RegFile, RtlOp, resinfo_application};
 use crate::lift::Unsupported;
 
 use super::*;
 
+/// One parsed assignment whose expression can be rendered in a statement or
+/// a `for` clause.
+struct Assignment<'a> {
+    place: String,
+    scalar: ScalarType,
+    value: &'a Expr,
+    operands: &'a [ExpressionId],
+}
+
 impl<'a> Renderer<'a> {
     pub(super) fn statements(&mut self, ids: &[StatementId]) -> Result<(), Unsupported> {
         for &id in ids {
+            self.web_declarations_before(id)?;
             self.statement(id)?;
         }
         Ok(())
@@ -56,22 +65,21 @@ impl<'a> Renderer<'a> {
             } => {
                 let condition = self.condition(*condition)?;
                 self.line(&format!("if ({condition})"));
-                self.block(&then_body.clone())?;
+                self.block(then_body)?;
                 if !else_body.is_empty() {
                     self.line("else");
-                    self.block(&else_body.clone())?;
+                    self.block(else_body)?;
                 }
                 Ok(())
             }
             StatementKind::While { condition, body } => {
                 let condition = self.condition(*condition)?;
                 self.line(&format!("while ({condition})"));
-                self.block(&body.clone())
+                self.block(body)
             }
             StatementKind::DoWhile { body, condition } => {
-                let body = body.clone();
                 self.line("do");
-                self.block(&body)?;
+                self.block(body)?;
                 let condition = self.condition(*condition)?;
                 let last = self.out.pop();
                 debug_assert_eq!(last, Some('\n'));
@@ -80,7 +88,22 @@ impl<'a> Renderer<'a> {
             }
             StatementKind::Loop { body } => {
                 self.line("while (true)");
-                self.block(&body.clone())
+                self.block(body)
+            }
+            StatementKind::For {
+                initializer,
+                condition,
+                update,
+                body,
+            } => {
+                let initializer = self.for_clause(initializer)?;
+                let condition = condition
+                    .map(|condition| self.condition(condition))
+                    .transpose()?
+                    .unwrap_or_default();
+                let update = self.for_clause(update)?;
+                self.line(&format!("for ({initializer}; {condition}; {update})"));
+                self.block(body)
             }
             StatementKind::Break { label: None } => {
                 self.line("break;");
@@ -110,6 +133,103 @@ impl<'a> Renderer<'a> {
         target: ExpressionId,
         value: ExpressionId,
     ) -> Result<(), Unsupported> {
+        if let Some(text) = self.assignment_expression_text(target, value)? {
+            self.line(&format!("{text};"));
+            return Ok(());
+        }
+        let assignment = self.assignment(target, value)?;
+        let (head, inner) = resinfo_application(assignment.value)
+            .ok_or_else(|| Unsupported("non-expression assignment".into()))?;
+        let mut reads = Reads::new(self.function, assignment.operands);
+        self.resinfo(
+            &assignment.place,
+            assignment.scalar,
+            head,
+            inner,
+            &mut reads,
+        )
+    }
+
+    /// Renders any single-expression HLIL assignment, including universal
+    /// constant and variable expressions.
+    fn assignment_expression_text(
+        &self,
+        target: ExpressionId,
+        value: ExpressionId,
+    ) -> Result<Option<String>, Unsupported> {
+        let expression = self.expression(value)?;
+        match expression.kind() {
+            ExpressionKind::Constant(bits) => self
+                .constant_assignment_text(target, bits, *expression.value_type())
+                .map(Some),
+            ExpressionKind::Variable(variable) => self
+                .variable_assignment_text(target, *variable, *expression.value_type())
+                .map(Some),
+            ExpressionKind::Operation { .. } => {
+                let assignment = self.assignment(target, value)?;
+                self.assignment_text(&assignment)
+            }
+        }
+    }
+
+    /// Renders a generic HLIL constant assignment produced by direct or
+    /// materialized MLIL constants.
+    fn constant_assignment_text(
+        &self,
+        target: ExpressionId,
+        bits: &[u64],
+        shape: ValueShape,
+    ) -> Result<String, Unsupported> {
+        let ExpressionKind::Variable(written) = self.expression(target)?.kind() else {
+            return Err(Unsupported(
+                "constant assignment into a non-variable place".into(),
+            ));
+        };
+        let (index, web) = self.hlil_web(*written)?;
+        let holder = normalize(web.shape.scalar);
+        let produced = if shape.scalar == ScalarType::Bits {
+            holder
+        } else {
+            normalize(shape.scalar)
+        };
+        let value = Rendered::atom(literal(bits, produced), produced).cast_bare(holder);
+        let name = self.web_name(index)?;
+        Ok(format!("{name} = {value}"))
+    }
+
+    /// Renders a generic HLIL copy assignment.
+    fn variable_assignment_text(
+        &self,
+        target: ExpressionId,
+        source: cfglib::ir::hlil::VariableId,
+        shape: ValueShape,
+    ) -> Result<String, Unsupported> {
+        let ExpressionKind::Variable(written) = self.expression(target)?.kind() else {
+            return Err(Unsupported(
+                "copy assignment into a non-variable place".into(),
+            ));
+        };
+        let (index, web) = self.hlil_web(*written)?;
+        let holder = normalize(web.shape.scalar);
+        let wanted = if shape.scalar == ScalarType::Bits {
+            holder
+        } else {
+            normalize(shape.scalar)
+        };
+        let positions: Vec<u8> = (0..shape.lanes).collect();
+        let value = self
+            .variable_read(source, &positions, wanted)?
+            .cast_bare(holder);
+        let name = self.web_name(index)?;
+        Ok(format!("{name} = {value}"))
+    }
+
+    /// Parses one HLIL assignment into its HLSL place and retained value.
+    fn assignment(
+        &self,
+        target: ExpressionId,
+        value: ExpressionId,
+    ) -> Result<Assignment<'a>, Unsupported> {
         let ExpressionKind::Variable(written) = self.expression(target)?.kind() else {
             return Err(Unsupported("assignment into a non-variable place".into()));
         };
@@ -132,25 +252,50 @@ impl<'a> Renderer<'a> {
             return Err(Unsupported("assignment of a non-assign operation".into()));
         };
         let (index, web) = self.hlil_web(written)?;
-        let name = self.web_names[index].clone();
+        let name = self.web_name(index)?.to_owned();
         let scalar = normalize(web.shape.scalar);
-        let mut reads = Reads::new(self.function, operands);
-        // `resinfo` renders as a statement block, not an expression.
-        if let VarExpr::Apply {
-            operator: RtlOp::Alu(head),
-            operands: inner,
-            ..
-        } = value
-            && head.opcode == Opcode::Resinfo
-        {
-            let place = Self::place_text(&name, positions, *width);
-            return self.resinfo(&place, scalar, head, inner, &mut reads);
-        }
-        let rendered = self.value(value, &mut reads, scalar)?;
         let place = Self::place_text(&name, positions, *width);
-        let text = rendered.cast_bare(scalar);
-        self.line(&format!("{place} = {text};"));
-        Ok(())
+        Ok(Assignment {
+            place,
+            scalar,
+            value,
+            operands,
+        })
+    }
+
+    /// Renders an assignment as one expression, or returns `None` when the
+    /// retained operation requires a statement block.
+    fn assignment_text(&self, assignment: &Assignment<'a>) -> Result<Option<String>, Unsupported> {
+        if resinfo_application(assignment.value).is_some() {
+            return Ok(None);
+        }
+        let mut reads = Reads::new(self.function, assignment.operands);
+        let rendered = self.value(assignment.value, &mut reads, assignment.scalar)?;
+        let text = rendered.cast_bare(assignment.scalar);
+        if let Some((binary, compound)) = compound_operator(assignment.value) {
+            let prefix = format!("{} {binary} ", assignment.place);
+            if let Some(right) = text.strip_prefix(&prefix) {
+                return Ok(Some(format!("{} {compound} {right}", assignment.place)));
+            }
+        }
+        Ok(Some(format!("{} = {text}", assignment.place)))
+    }
+
+    /// Renders the comma-separated assignment expressions of one `for`
+    /// initializer or update clause.
+    fn for_clause(&self, statements: &[StatementId]) -> Result<String, Unsupported> {
+        statements
+            .iter()
+            .map(|&statement| {
+                let StatementKind::Assign { target, value } = self.statement_kind(statement)?
+                else {
+                    return Err(Unsupported("non-assignment in for clause".into()));
+                };
+                self.assignment_expression_text(*target, *value)?
+                    .ok_or_else(|| Unsupported("multi-statement operation in for clause".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|parts| parts.join(", "))
     }
 
     /// The written-place spelling of one target.
@@ -325,12 +470,13 @@ impl<'a> Renderer<'a> {
                 .first()
                 .ok_or_else(|| Unsupported("test without an operand".into()))?;
             // A comparison feeding the test renders as the bare boolean.
-            if let Some(comparison) = self.inlined_comparison(tested, reads)? {
-                return Ok(if *nonzero {
-                    comparison
-                } else {
-                    format!("!({comparison})")
-                });
+            let polarity = if *nonzero {
+                ComparisonPolarity::Direct
+            } else {
+                ComparisonPolarity::Negated
+            };
+            if let Some(comparison) = self.inlined_comparison(tested, reads, polarity)? {
+                return Ok(comparison);
             }
             let value = self.value(tested, reads, ScalarType::U32)?;
             let text = value.cast(ScalarType::U32);
@@ -352,6 +498,7 @@ impl<'a> Renderer<'a> {
         &self,
         expr: &Expr,
         reads: &mut Reads<'a>,
+        polarity: ComparisonPolarity,
     ) -> Result<Option<String>, Unsupported> {
         let VarExpr::Read { positions, .. } = expr else {
             // A directly nested comparison application.
@@ -362,7 +509,7 @@ impl<'a> Renderer<'a> {
             } = expr
                 && comparison_symbol(head.opcode).is_some()
             {
-                let text = self.comparison(head, inner, reads)?;
+                let text = self.comparison(head, inner, reads, polarity)?;
                 return Ok(Some(text));
             }
             return Ok(None);
@@ -392,7 +539,7 @@ impl<'a> Renderer<'a> {
         }
         *reads = probe;
         let mut inner_reads = reads.nested(producer_operands);
-        let text = self.comparison(head, inner, &mut inner_reads)?;
+        let text = self.comparison(head, inner, &mut inner_reads, polarity)?;
         Ok(Some(text))
     }
 
@@ -402,9 +549,15 @@ impl<'a> Renderer<'a> {
         head: &AluHead,
         inner: &[Expr],
         reads: &mut Reads<'a>,
+        polarity: ComparisonPolarity,
     ) -> Result<String, Unsupported> {
-        let symbol = comparison_symbol(head.opcode)
+        let direct = comparison_symbol(head.opcode)
             .ok_or_else(|| Unsupported("comparison symbol".into()))?;
+        let inverted = negated_comparison_symbol(head.opcode);
+        let symbol = match polarity {
+            ComparisonPolarity::Direct => direct,
+            ComparisonPolarity::Negated => inverted.unwrap_or(direct),
+        };
         let left = self
             .value(
                 inner
@@ -423,6 +576,37 @@ impl<'a> Renderer<'a> {
                 ScalarType::F32,
             )?
             .wrapped();
-        Ok(format!("{left} {symbol} {right}"))
+        let comparison = format!("{left} {symbol} {right}");
+        if polarity == ComparisonPolarity::Negated && inverted.is_none() {
+            Ok(format!("!({comparison})"))
+        } else {
+            Ok(comparison)
+        }
+    }
+}
+
+/// A compound spelling that preserves the operand order of one binary
+/// assignment expression.
+fn compound_operator(value: &Expr) -> Option<(&'static str, &'static str)> {
+    let VarExpr::Apply {
+        operator: RtlOp::Alu(head),
+        ..
+    } = value
+    else {
+        return None;
+    };
+    if head.saturate {
+        return None;
+    }
+    match head.opcode {
+        Opcode::Add | Opcode::Iadd => Some(("+", "+=")),
+        Opcode::Mul => Some(("*", "*=")),
+        Opcode::Div => Some(("/", "/=")),
+        Opcode::And => Some(("&", "&=")),
+        Opcode::Or => Some(("|", "|=")),
+        Opcode::Xor => Some(("^", "^=")),
+        Opcode::Ishl => Some(("<<", "<<=")),
+        Opcode::Ishr | Opcode::Ushr => Some((">>", ">>=")),
+        _ => None,
     }
 }

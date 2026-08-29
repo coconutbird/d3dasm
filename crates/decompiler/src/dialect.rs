@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 
 use cfglib::ir::hlil::{self, Lifted};
 use cfglib::ir::mlil::{
-    AnalysisDialect, Dialect, InstructionMetadata, VerificationIssue, VerifyDialect,
+    AnalysisDialect, ConstantMaterializationDialect, Dialect, InstructionMetadata,
+    VerificationIssue, VerifyDialect,
 };
 use cfglib::ir::rtl::{self, LiftedStatement, ScalarType, ValueShape, VarExpr};
 use cfglib::{EdgeKind, Vocabulary};
@@ -30,6 +31,8 @@ pub type VariableId = cfglib::ir::mlil::VariableId;
 pub type Op = LiftedStatement<ShaderDialect>;
 /// One typed expression over web variables.
 pub type Expr = VarExpr<ShaderDialect>;
+
+mod constant;
 
 /// The Direct3D SM4/SM5 semantic dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -197,6 +200,20 @@ pub enum RtlOp {
         /// Polarity: `true` is non-zero.
         nonzero: bool,
     },
+}
+
+/// Returns the retained `resinfo` application that renders as a statement
+/// block rather than one HLSL expression.
+pub(crate) fn resinfo_application(value: &Expr) -> Option<(&AluHead, &[Expr])> {
+    let VarExpr::Apply {
+        operator: RtlOp::Alu(head),
+        operands,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    (head.opcode == Opcode::Resinfo).then_some((head, operands.as_slice()))
 }
 
 /// Effect-bearing RTL operations.
@@ -428,24 +445,27 @@ impl AnalysisDialect for ShaderDialect {
     }
 
     fn constant(operation: &Self::Operation) -> Option<Self::Constant> {
-        match operation {
-            LiftedStatement::Assign {
-                value: VarExpr::Const { bits, .. },
-                ..
-            } => Some(bits.clone()),
-            _ => None,
-        }
+        constant::operation_constant(operation)
     }
 
     fn fold_constant(
-        _instruction: &Instruction,
-        _known: &BTreeMap<VariableId, Self::Constant>,
+        instruction: &Instruction,
+        known: &BTreeMap<VariableId, Self::Constant>,
     ) -> Option<(VariableId, Self::Constant)> {
-        None
+        constant::fold_instruction(instruction, known)
     }
 
     fn callee(_operation: &Self::Operation) -> Option<Self::Callee> {
         None
+    }
+}
+
+impl ConstantMaterializationDialect for ShaderDialect {
+    fn materialize_constant(
+        instruction: &Instruction,
+        constant: &Self::Constant,
+    ) -> Option<Self::Operation> {
+        constant::materialized_operation(instruction, constant)
     }
 }
 
@@ -467,6 +487,15 @@ impl hlil::VerifyDialect for ShaderDialect {
         _function: &hlil::Function<Self>,
         _issues: &mut Vec<cfglib::ir::hlil::VerificationIssue>,
     ) {
+    }
+}
+
+impl hlil::RecoverDialect for ShaderDialect {
+    fn single_expression_operation(operation: &Op) -> bool {
+        let LiftedStatement::Assign { value, .. } = operation else {
+            return true;
+        };
+        resinfo_application(value).is_none()
     }
 }
 
@@ -495,18 +524,7 @@ impl hlil::LiftDialect for ShaderDialect {
         // never as an expression: declaring a previous-value slot one
         // past the reads pins the definition out of inlining.
         match operation {
-            LiftedStatement::Assign { value, .. }
-                if matches!(
-                    value,
-                    VarExpr::Apply {
-                        operator: RtlOp::Alu(AluHead {
-                            opcode: Opcode::Resinfo,
-                            ..
-                        }),
-                        ..
-                    }
-                ) =>
-            {
+            LiftedStatement::Assign { value, .. } if resinfo_application(value).is_some() => {
                 Some(value.read_count())
             }
             _ => None,

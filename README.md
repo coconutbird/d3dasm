@@ -47,11 +47,12 @@ SSA and recovers typed MLIL variables from register lanes, so one
 register reused for a float and later a counter becomes two honestly
 typed locals, and reinterpretation casts appear only where the program
 genuinely mixes representations. The HLIL lift recovers structured
-statements with single-use expressions inlined into their consumers, and
-the renderer spells the result as compilable HLSL: `precise` locals pin
-evaluation order, RDEF names recover the original constant buffers,
-fields, textures, and samplers, and signature chunks carry the original
-interface semantics.
+statements with single-use expressions inlined into their consumers, then
+reconstructs counted loops as `for` statements. The renderer spells the
+result as compilable HLSL: `precise` locals pin evaluation order without
+dead zero initializers where SSA proves a source definition, RDEF names
+recover the original constant buffers, fields, textures, and samplers,
+and signature chunks carry the original interface semantics.
 
 Correctness is proven, not assumed: `tests/recompile.rs` recompiles
 every decompiled corpus shader under `fxc.exe /Gis` with its own

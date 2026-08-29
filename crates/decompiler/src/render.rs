@@ -8,10 +8,13 @@
 //! order, positionally aligned with the HLIL operand list, so inlined
 //! producers substitute into their exact read sites.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use cfglib::ir::hlil::{Function as HlilFunction, LiftedFunction};
+use cfglib::ir::hlil::{
+    Function as HlilFunction, LiftedFunction, VariableId as HlilVariableId, VariablePlacements,
+};
+use cfglib::ir::mlil::VariableId as MlilVariableId;
 use cfglib::ir::rtl::{LiftedStatement, ScalarType, ValueShape, VarExpr, WebInfo, referenced_webs};
 use dxbc::shex::{Opcode, Program};
 
@@ -82,6 +85,14 @@ struct Rendered {
     text: String,
     scalar: ScalarType,
     atomic: bool,
+}
+
+/// Whether a comparison is rendered directly or as its exact logical
+/// complement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonPolarity {
+    Direct,
+    Negated,
 }
 
 impl Rendered {
@@ -183,7 +194,9 @@ pub struct Renderer<'a> {
     webs: &'a Webs,
     semantics: SemanticNames,
     resources: ResourceNames,
-    web_names: Vec<String>,
+    referenced: BTreeSet<MlilVariableId>,
+    placements: VariablePlacements,
+    web_names: Vec<Option<String>>,
     name_prefix: String,
     hull_mode: HullMode,
     fork_instance: u32,
@@ -201,6 +214,8 @@ impl<'a> Renderer<'a> {
         program: &'a Program,
         webs: &'a Webs,
     ) -> Self {
+        let referenced = referenced_webs(&lifted.function);
+        let placements = VariablePlacements::compute(&lifted.function);
         Self {
             function: &lifted.function,
             declarations,
@@ -208,6 +223,8 @@ impl<'a> Renderer<'a> {
             webs,
             semantics: SemanticNames::default(),
             resources: ResourceNames::default(),
+            referenced,
+            placements,
             web_names: Vec::new(),
             name_prefix: String::new(),
             hull_mode: HullMode::None,
@@ -293,9 +310,9 @@ impl<'a> Renderer<'a> {
     /// Renders one patch-constant phase body.
     fn constants_body(mut self) -> Result<String, Unsupported> {
         self.assign_web_names();
-        self.web_declarations();
-        let body = self.function.body().to_vec();
-        self.statements(&body)?;
+        self.entry_web_declarations()?;
+        let body = self.function.body();
+        self.statements(body)?;
         Ok(self.out)
     }
 
@@ -326,14 +343,14 @@ impl<'a> Renderer<'a> {
         self.signature();
         self.line("{");
         self.indent += 1;
-        for preamble in self.input_preambles.clone() {
+        for preamble in std::mem::take(&mut self.input_preambles) {
             self.line(&preamble);
         }
         self.icb_declaration();
         self.indexable_declarations();
-        self.web_declarations();
-        let body = self.function.body().to_vec();
-        self.statements(&body)?;
+        self.entry_web_declarations()?;
+        let body = self.function.body();
+        self.statements(body)?;
         self.indent -= 1;
         self.line("}");
         Ok(self.out)
@@ -347,14 +364,18 @@ impl<'a> Renderer<'a> {
         self.out.push('\n');
     }
 
-    /// Names every web: inputs keep their register spelling, temporaries
-    /// take the register name with a disambiguating suffix when one
-    /// register split into several webs, and synthetic temporaries get
-    /// fresh names.
+    /// Names every referenced web: inputs keep their register spelling,
+    /// temporaries take the register name with a dense disambiguating suffix,
+    /// and synthetic temporaries get fresh names. Webs inlined out of the
+    /// final HLIL consume no visible name.
     fn assign_web_names(&mut self) {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         let mut names = Vec::with_capacity(self.webs.len());
         for web in self.webs {
+            if !self.referenced.contains(&web.variable) {
+                names.push(None);
+                continue;
+            }
             let name = match &web.storage {
                 Some(register) if matches!(register.file, RegFile::Input | RegFile::System(_)) => {
                     Self::register_name(*register)
@@ -375,9 +396,17 @@ impl<'a> Renderer<'a> {
                     format!("{}tmp{count}", self.name_prefix)
                 }
             };
-            names.push(name);
+            names.push(Some(name));
         }
         self.web_names = names;
+    }
+
+    /// The rendered name of one referenced web.
+    fn web_name(&self, index: usize) -> Result<&str, Unsupported> {
+        self.web_names
+            .get(index)
+            .and_then(Option::as_deref)
+            .ok_or_else(|| Unsupported("referenced web without a rendered name".into()))
     }
 
     /// The web behind one lifted (HLIL) variable.
@@ -428,27 +457,65 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn web_declarations(&mut self) {
-        // Only webs the structured body still references declare: a web
-        // whose single-use definition inlined into its consumer never
-        // renders its name.
-        let used = referenced_webs(self.function);
+    /// Declares live-in webs at function entry and verifies that every other
+    /// rendered local has a structural declaration anchor.
+    fn entry_web_declarations(&mut self) -> Result<(), Unsupported> {
         for web in self.webs {
-            if Self::is_input_web(web) || !used.contains(&web.variable) {
+            if Self::is_input_web(web) || !self.referenced.contains(&web.variable) {
                 continue;
             }
-            let shape = ValueShape {
-                scalar: normalize(web.shape.scalar),
-                lanes: web.shape.lanes,
-            };
-            let declared = type_name(shape);
+            if web.live_in {
+                let declaration = self.web_declaration(web)?;
+                self.line(&declaration);
+                continue;
+            }
+            let variable = HlilVariableId::from_raw(web.variable.raw());
+            if self.placements.placement(variable).is_none() {
+                return Err(Unsupported(
+                    "referenced web without a declaration placement".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Declares non-live-in locals at the narrowest structural anchor that
+    /// encloses all of their occurrences.
+    fn web_declarations_before(
+        &mut self,
+        statement: cfglib::ir::hlil::StatementId,
+    ) -> Result<(), Unsupported> {
+        for index in 0..self.placements.before(statement).len() {
+            let variable = self.placements.before(statement)[index];
+            let (_, web) = self.hlil_web(variable)?;
+            if web.live_in || Self::is_input_web(web) || !self.referenced.contains(&web.variable) {
+                continue;
+            }
+            let declaration = self.web_declaration(web)?;
+            self.line(&declaration);
+        }
+        Ok(())
+    }
+
+    fn web_declaration(&self, web: &Web) -> Result<String, Unsupported> {
+        let shape = ValueShape {
+            scalar: normalize(web.shape.scalar),
+            lanes: web.shape.lanes,
+        };
+        let declared = type_name(shape);
+        let name = self.web_name(web.variable.index())?;
+        // `precise` pins evaluation to the written expression order: the
+        // source mirrors the original instruction order, and fxc must not
+        // reassociate it (even `/Gis` reorders constant additions otherwise).
+        if web.live_in {
+            // Version zero can reach this web, so retain the reference
+            // interpreter's zero-initialized incoming storage.
             let zero = zero_value(shape);
-            let name = self.web_names[web.variable.index()].clone();
-            // `precise` pins evaluation to the written expression order:
-            // the source mirrors the original instruction order, and fxc
-            // must not reassociate it (even `/Gis` reorders constant
-            // additions otherwise).
-            self.line(&format!("precise {declared} {name} = {zero};"));
+            Ok(format!("precise {declared} {name} = {zero};"))
+        } else {
+            // SSA proves every read is reached by a source definition; an
+            // initializer would only add a dead synthetic write.
+            Ok(format!("precise {declared} {name};"))
         }
     }
 
@@ -467,7 +534,7 @@ impl<'a> Renderer<'a> {
             self.declarations.immediate_constants.len()
         ));
         self.line("{");
-        for row in &self.declarations.immediate_constants.clone() {
+        for row in &self.declarations.immediate_constants {
             let lanes: Vec<String> = row
                 .iter()
                 .map(|value| scalar_literal(value.to_bits(), ScalarType::U32))
@@ -543,13 +610,12 @@ fn texel_offsets(head: &AluHead, dimensions: usize) -> String {
     }
 }
 
-/// Applies the destination-lane selection through a resource swizzle to
-/// a vector-valued call.
-fn select_call_lanes(call: String, lanes: &[u8]) -> String {
+/// Selects lanes from a four-lane value, omitting the identity swizzle.
+fn select_vector_lanes(value: String, lanes: &[u8]) -> String {
     if lanes == [0, 1, 2, 3] {
-        call
+        value
     } else {
-        format!("{call}.{}", suffix(lanes))
+        format!("{value}.{}", suffix(lanes))
     }
 }
 
@@ -573,6 +639,19 @@ fn comparison_symbol(opcode: Opcode) -> Option<&'static str> {
         Opcode::Ge | Opcode::IGe | Opcode::UGe => Some(">="),
         Opcode::Eq | Opcode::IEq => Some("=="),
         Opcode::Ne | Opcode::INe => Some("!="),
+        _ => None,
+    }
+}
+
+/// The exact complement of a comparison operator when HLSL can state it
+/// directly. Ordered floating `<`/`>=` deliberately stay wrapped in `!`:
+/// NaN makes the opposite relation different from logical negation.
+fn negated_comparison_symbol(opcode: Opcode) -> Option<&'static str> {
+    match opcode {
+        Opcode::ILt | Opcode::ULt => Some(">="),
+        Opcode::IGe | Opcode::UGe => Some("<"),
+        Opcode::Eq | Opcode::IEq => Some("!="),
+        Opcode::Ne | Opcode::INe => Some("=="),
         _ => None,
     }
 }
@@ -692,4 +771,31 @@ fn patch_groups(rows: &[PatchRow]) -> Vec<PatchGroup> {
         });
     }
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use dxbc::shex::Opcode;
+
+    use super::{negated_comparison_symbol, select_vector_lanes};
+
+    #[test]
+    fn comparison_negation_preserves_unordered_float_semantics() {
+        assert_eq!(negated_comparison_symbol(Opcode::IGe), Some("<"));
+        assert_eq!(negated_comparison_symbol(Opcode::UGe), Some("<"));
+        assert_eq!(negated_comparison_symbol(Opcode::Ge), None);
+        assert_eq!(negated_comparison_symbol(Opcode::Lt), None);
+    }
+
+    #[test]
+    fn identity_vector_selection_omits_its_swizzle() {
+        assert_eq!(
+            select_vector_lanes("vertices[0].v0".into(), &[0, 1, 2, 3]),
+            "vertices[0].v0"
+        );
+        assert_eq!(
+            select_vector_lanes("vertices[0].v0".into(), &[0, 1]),
+            "vertices[0].v0.xy"
+        );
+    }
 }

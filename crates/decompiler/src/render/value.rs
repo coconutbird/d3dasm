@@ -7,8 +7,9 @@ use crate::dialect::{AluHead, MemRef, RegFile, Register, RtlOp, SystemInput};
 use crate::lift::Unsupported;
 
 use super::{
-    CB_NAMING_MISS, Expr, HullMode, Reads, Rendered, Renderer, binary, call1, call2, cast_name,
-    literal, scalar_keyword, select_call_lanes, splat, suffix, texel_offsets, width_text,
+    CB_NAMING_MISS, ComparisonPolarity, Expr, HullMode, Reads, Rendered, Renderer, binary, call1,
+    call2, cast_name, literal, scalar_keyword, select_vector_lanes, splat, suffix, texel_offsets,
+    width_text,
 };
 
 impl<'a> Renderer<'a> {
@@ -86,45 +87,7 @@ impl<'a> Renderer<'a> {
             .resolve(positions)
             .map_err(|error| Unsupported(error.to_string()))?;
         match resolved {
-            ResolvedRead::Variable(variable) => {
-                let (index, web) = self.hlil_web(variable)?;
-                if let Some(Register {
-                    file: RegFile::PatchConstant,
-                    index: register,
-                }) = web.storage
-                {
-                    return self.patch_read(register, web, positions, wanted);
-                }
-                if let Some(Register {
-                    file: RegFile::System(SystemInput::ForkInstanceId),
-                    ..
-                }) = web.storage
-                {
-                    // Instances unroll: the id is a literal per copy.
-                    let value = Rendered::atom(format!("{}u", self.fork_instance), ScalarType::U32);
-                    return Ok(Rendered::atom(value.cast(wanted), wanted));
-                }
-                let name = &self.web_names[index];
-                let holder = self.web_holder(web);
-                let selected = if Self::is_input_web(web) {
-                    // Interface registers are full float4 storage: map
-                    // web positions back to the storage lanes they name.
-                    let lanes: Vec<u8> = positions
-                        .iter()
-                        .map(|&position| web.lanes.get(usize::from(position)).copied().unwrap_or(0))
-                        .collect();
-                    format!("{name}.{}", suffix(&lanes))
-                } else {
-                    let full: Vec<u8> = (0..web.shape.lanes.max(1)).collect();
-                    if positions == full.as_slice() {
-                        name.clone()
-                    } else {
-                        format!("{name}.{}", suffix(positions))
-                    }
-                };
-                let value = Rendered::atom(selected, holder);
-                Ok(Rendered::atom(value.cast(wanted), wanted))
-            }
+            ResolvedRead::Variable(variable) => self.variable_read(variable, positions, wanted),
             ResolvedRead::Inlined {
                 value,
                 operands,
@@ -145,8 +108,64 @@ impl<'a> Renderer<'a> {
                     }
                 }
             }
-            ResolvedRead::Constant(_) => Err(Unsupported("read of an inlined constant".into())),
+            ResolvedRead::Constant(bits) => {
+                let selected = positions
+                    .iter()
+                    .map(|&position| {
+                        bits.get(usize::from(position)).copied().ok_or_else(|| {
+                            Unsupported("constant read position out of bounds".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Rendered::atom(literal(&selected, wanted), wanted))
+            }
         }
+    }
+
+    /// Renders one direct HLIL variable occurrence at selected web positions.
+    pub(super) fn variable_read(
+        &self,
+        variable: cfglib::ir::hlil::VariableId,
+        positions: &[u8],
+        wanted: ScalarType,
+    ) -> Result<Rendered, Unsupported> {
+        let (index, web) = self.hlil_web(variable)?;
+        if let Some(Register {
+            file: RegFile::PatchConstant,
+            index: register,
+        }) = web.storage
+        {
+            return self.patch_read(register, web, positions, wanted);
+        }
+        if let Some(Register {
+            file: RegFile::System(SystemInput::ForkInstanceId),
+            ..
+        }) = web.storage
+        {
+            // Instances unroll: the id is a literal per copy.
+            let value = Rendered::atom(format!("{}u", self.fork_instance), ScalarType::U32);
+            return Ok(Rendered::atom(value.cast(wanted), wanted));
+        }
+        let name = self.web_name(index)?;
+        let holder = self.web_holder(web);
+        let selected = if Self::is_input_web(web) {
+            // Interface registers are full float4 storage: map web positions
+            // back to the storage lanes they name.
+            let lanes: Vec<u8> = positions
+                .iter()
+                .map(|&position| web.lanes.get(usize::from(position)).copied().unwrap_or(0))
+                .collect();
+            select_vector_lanes(name.to_owned(), &lanes)
+        } else {
+            let full: Vec<u8> = (0..web.shape.lanes.max(1)).collect();
+            if positions == full.as_slice() {
+                name.to_owned()
+            } else {
+                format!("{name}.{}", suffix(positions))
+            }
+        };
+        let value = Rendered::atom(selected, holder);
+        Ok(Rendered::atom(value.cast(wanted), wanted))
     }
 
     /// Renders one operator application.
@@ -203,7 +222,7 @@ impl<'a> Renderer<'a> {
                 } else {
                     "patch"
                 };
-                let selected = format!("{patch}[{vertex}].v{register}.{}", suffix(lanes));
+                let selected = select_vector_lanes(format!("{patch}[{vertex}].v{register}"), lanes);
                 let value = Rendered::atom(selected, holder);
                 Ok(Rendered::atom(value.cast(produced), produced))
             }
@@ -220,18 +239,14 @@ impl<'a> Renderer<'a> {
                 } else {
                     format!("_icp{vertex}[{index} + {base}]")
                 };
-                let selected = format!("{element}.{}", suffix(lanes));
+                let selected = select_vector_lanes(element, lanes);
                 let value = Rendered::atom(selected, ScalarType::F32);
                 Ok(Rendered::atom(value.cast(produced), produced))
             }
             RtlOp::LoadMem(reference) => {
                 let address = inner.first();
                 let place = self.memory(reference, address, reads)?;
-                let selected = if reference.lanes.as_slice() == [0, 1, 2, 3] {
-                    place
-                } else {
-                    format!("{place}.{}", suffix(&reference.lanes))
-                };
+                let selected = select_vector_lanes(place, &reference.lanes);
                 let holder = match reference.file {
                     RegFile::ConstantBuffer => ScalarType::F32,
                     _ => ScalarType::U32,
@@ -281,7 +296,9 @@ impl<'a> Renderer<'a> {
             Opcode::Movc => {
                 let condition = {
                     let expr = &inner[0];
-                    if let Some(text) = self.inlined_comparison(expr, reads)? {
+                    if let Some(text) =
+                        self.inlined_comparison(expr, reads, ComparisonPolarity::Direct)?
+                    {
                         text
                     } else {
                         let value = self.value(expr, reads, ScalarType::U32)?;
@@ -368,7 +385,7 @@ impl<'a> Renderer<'a> {
             | Opcode::INe
             | Opcode::ULt
             | Opcode::UGe => {
-                let comparison = self.comparison(head, inner, reads)?;
+                let comparison = self.comparison(head, inner, reads, ComparisonPolarity::Direct)?;
                 let ones = splat("0xffffffffu", width);
                 let zeros = splat("0u", width);
                 Rendered::composite(format!("({comparison}) ? {ones} : {zeros}"), produced)
@@ -458,7 +475,7 @@ impl<'a> Renderer<'a> {
             _ => format!("{texture}.Sample({sampler}, {coordinate}{offsets})"),
         };
         Ok(Rendered::atom(
-            select_call_lanes(call, &resource.lanes),
+            select_vector_lanes(call, &resource.lanes),
             produced,
         ))
     }
@@ -483,7 +500,7 @@ impl<'a> Renderer<'a> {
             self.texture_name(resource.register.index)
         );
         Ok(Rendered::atom(
-            select_call_lanes(call, &resource.lanes),
+            select_vector_lanes(call, &resource.lanes),
             produced,
         ))
     }
@@ -509,7 +526,7 @@ impl<'a> Renderer<'a> {
             self.texture_name(resource.register.index)
         );
         Ok(Rendered::atom(
-            select_call_lanes(call, &resource.lanes),
+            select_vector_lanes(call, &resource.lanes),
             produced,
         ))
     }
@@ -541,7 +558,7 @@ impl<'a> Renderer<'a> {
             self.sampler_name(sampler.register.index)
         );
         Ok(Rendered::atom(
-            select_call_lanes(call, &resource.lanes),
+            select_vector_lanes(call, &resource.lanes),
             produced,
         ))
     }
