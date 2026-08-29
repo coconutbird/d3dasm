@@ -14,6 +14,7 @@
 //! let cfg = decompiler::cfg::build_cfg(&program)?;
 //! let dominators = cfglib::DominatorTree::compute(&cfg);
 //! let ssa = cfglib::SsaForm::compute(&cfg, &dominators);
+//! let memory = cfglib::MemorySSA::compute(&cfg, &decompiler::cfg::Sm4MemoryAlias);
 //! println!("{}", cfg.to_dot());
 //! ```
 
@@ -23,7 +24,8 @@ use dxbc::shex::Program;
 mod instruction;
 
 pub use instruction::{
-    Sm4Component, Sm4Effect, Sm4Index, Sm4Instruction, Sm4Register, Sm4RegisterType, Sm4Variable,
+    Sm4Component, Sm4Effect, Sm4Fence, Sm4Index, Sm4Instruction, Sm4MemoryAlias, Sm4MemoryEvent,
+    Sm4MemoryLocation, Sm4MemoryRegion, Sm4Register, Sm4RegisterType, Sm4Variable,
 };
 
 /// Build a control-flow graph from a decoded shader program.

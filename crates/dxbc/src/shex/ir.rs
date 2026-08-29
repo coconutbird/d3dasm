@@ -61,10 +61,10 @@ pub struct Instruction {
     pub resinfo_return_type: Option<u32>,
     /// Sync flags for the `sync` opcode (token0 bits 11–14).
     ///
-    /// Bit 0 = thread-group shared memory barrier,
-    /// bit 1 = thread-group execution barrier,
-    /// bit 2 = UAV memory globally-coherent,
-    /// bit 3 = typed UAV coherent.
+    /// Bit 0 = thread-group execution barrier (`_t`),
+    /// bit 1 = thread-group shared-memory fence (`_g`),
+    /// bit 2 = thread-group-scope UAV-memory fence (`_ugroup`),
+    /// bit 3 = global-scope UAV-memory fence request (`_uglobal`).
     pub sync_flags: u8,
     /// Texture sample/ld offsets from extended opcode token (u, v, w as signed 4-bit).
     pub tex_offsets: Option<[i8; 3]>,

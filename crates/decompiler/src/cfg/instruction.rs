@@ -1,6 +1,13 @@
 //! SM4/SM5 instruction and variable adapters.
-use cfglib::{FlowControl, FlowEffect, InstrInfo};
+use cfglib::{
+    FlowControl, FlowEffect, InstrInfo, MemoryAccessKind, MemoryAtomicity, MemoryEventInfo,
+};
 use dxbc::shex::{ComponentSelect, Instruction, Opcode, Operand, OperandIndex, RegisterType};
+
+mod memory;
+
+use memory::analyze_memory_events;
+pub use memory::{Sm4Fence, Sm4MemoryAlias, Sm4MemoryEvent, Sm4MemoryLocation, Sm4MemoryRegion};
 
 /// SM4/SM5 side-effect vocabulary reported through [`cfglib::EffectInfo`].
 ///
@@ -9,15 +16,15 @@ use dxbc::shex::{ComponentSelect, Instruction, Opcode, Operand, OperandIndex, Re
 /// calls, and synchronization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Sm4Effect {
-    /// Reads a resource (texture sample, typed/raw/structured load).
+    /// Reads a resource or thread-group shared memory.
     ResourceRead,
-    /// Writes a resource (UAV store, atomic).
+    /// Writes a resource or thread-group shared memory.
     ResourceWrite,
     /// Observable output: render-target/stream export, emit/cut, discard.
     Export,
     /// Calls a subroutine or interface method.
     Call,
-    /// Synchronization barrier.
+    /// Memory-ordering or execution-synchronization boundary.
     Sync,
     /// A store through a dynamically-indexed indexable temp (`x#[reg]`).
     ///
@@ -26,8 +33,9 @@ pub enum Sm4Effect {
     /// carries this effect instead, keeping it visible to liveness, purity,
     /// and dead-code elimination. Loads through dynamic indices keep their
     /// structural identities; cross-slot def/use edges between static and
-    /// dynamic accesses are not modeled (a `MemoryInfo` adapter would be
-    /// the complete story).
+    /// dynamic accesses are not represented by ordinary variable def/use
+    /// edges. They remain explicit in the instruction's generic memory-event
+    /// stream.
     IndexableWrite,
     /// Unclassified effect (abort, debug break, unknown opcode).
     Unknown,
@@ -230,15 +238,16 @@ impl Sm4Variable {
 
 /// A decoded SM4/SM5 instruction with cached data-flow information.
 ///
-/// Construction derives component-granular uses and definitions once. The
-/// cached slices then satisfy [`InstrInfo`] without allocating during fixpoint
-/// iteration or SSA construction.
+/// Construction derives component-granular uses and definitions plus ordered
+/// memory events once. The cached data then satisfies [`InstrInfo`] and
+/// [`MemoryEventInfo`] without allocating during analysis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sm4Instruction {
     instruction: Instruction,
     uses: Vec<Sm4Variable>,
     defs: Vec<Sm4Variable>,
     effects: Vec<Sm4Effect>,
+    memory_events: Vec<Sm4MemoryEvent>,
 }
 
 impl Sm4Instruction {
@@ -246,6 +255,7 @@ impl Sm4Instruction {
     #[must_use]
     pub fn new(instruction: Instruction) -> Self {
         let analysis = analyze_operands(&instruction);
+        let memory_events = analyze_memory_events(&instruction);
         let mut effects = analyze_effects(&instruction, &analysis.defs);
         if analysis.dynamic_indexable_write {
             push_unique(&mut effects, Sm4Effect::IndexableWrite);
@@ -255,6 +265,7 @@ impl Sm4Instruction {
             uses: analysis.uses,
             defs: analysis.defs,
             effects,
+            memory_events,
         }
     }
 
@@ -337,6 +348,18 @@ impl cfglib::EffectInfo for Sm4Instruction {
     }
 }
 
+impl MemoryEventInfo for Sm4Instruction {
+    type Location = Sm4MemoryLocation;
+    type Fence = Sm4Fence;
+
+    fn memory_events(
+        &self,
+    ) -> impl Iterator<Item = cfglib::MemoryEvent<Self::Location, Self::Variable, Self::Fence>>
+    {
+        self.memory_events.iter().cloned()
+    }
+}
+
 impl cfglib::CallInfo for Sm4Instruction {
     type Callee = u32;
 
@@ -363,13 +386,68 @@ enum OperandLayout {
     None,
     Sources,
     Destinations(usize),
-    ReadWrite { target: usize },
-    DestinationsAndReadWrite { destinations: usize, target: usize },
+    Memory {
+        destinations: usize,
+        target: usize,
+        address_start: usize,
+        address_count: usize,
+        kind: MemoryAccessKind,
+        atomicity: MemoryAtomicity,
+    },
+}
+
+impl OperandLayout {
+    const fn is_source(self, index: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::Sources => true,
+            Self::Destinations(count) => index >= count,
+            Self::Memory {
+                destinations,
+                target,
+                ..
+            } => index >= destinations && index != target,
+        }
+    }
+
+    const fn is_destination(self, index: usize) -> bool {
+        match self {
+            Self::Destinations(count) => index < count,
+            Self::Memory { destinations, .. } => index < destinations,
+            Self::None | Self::Sources => false,
+        }
+    }
+
+    const fn memory_access(self, index: usize) -> Option<(MemoryAccessKind, MemoryAtomicity)> {
+        match self {
+            Self::Memory {
+                target,
+                kind,
+                atomicity,
+                ..
+            } if index == target => Some((kind, atomicity)),
+            _ => None,
+        }
+    }
+
+    const fn is_memory_address(self, index: usize) -> bool {
+        match self {
+            Self::Memory {
+                address_start,
+                address_count,
+                ..
+            } => index >= address_start && index < address_start + address_count,
+            Self::None | Self::Sources | Self::Destinations(_) => false,
+        }
+    }
 }
 
 fn operand_layout(opcode: Opcode) -> OperandLayout {
     if is_declaration(opcode) {
         return OperandLayout::None;
+    }
+    if let Some(layout) = memory_operand_layout(opcode) {
+        return layout;
     }
 
     match opcode {
@@ -395,35 +473,6 @@ fn operand_layout(opcode: Opcode) -> OperandLayout {
         | Opcode::SampleBClampFeedback
         | Opcode::SampleDClampFeedback
         | Opcode::SampleCClampFeedback => OperandLayout::Destinations(2),
-
-        Opcode::StoreUavTyped
-        | Opcode::StoreRaw
-        | Opcode::StoreStructured
-        | Opcode::AtomicAnd
-        | Opcode::AtomicOr
-        | Opcode::AtomicXor
-        | Opcode::AtomicCmpStore
-        | Opcode::AtomicIAdd
-        | Opcode::AtomicIMax
-        | Opcode::AtomicIMin
-        | Opcode::AtomicUMax
-        | Opcode::AtomicUMin => OperandLayout::ReadWrite { target: 0 },
-
-        Opcode::ImmAtomicAlloc
-        | Opcode::ImmAtomicConsume
-        | Opcode::ImmAtomicIAdd
-        | Opcode::ImmAtomicAnd
-        | Opcode::ImmAtomicOr
-        | Opcode::ImmAtomicXor
-        | Opcode::ImmAtomicExch
-        | Opcode::ImmAtomicCmpExch
-        | Opcode::ImmAtomicIMax
-        | Opcode::ImmAtomicIMin
-        | Opcode::ImmAtomicUMax
-        | Opcode::ImmAtomicUMin => OperandLayout::DestinationsAndReadWrite {
-            destinations: 1,
-            target: 1,
-        },
 
         Opcode::Break
         | Opcode::Breakc
@@ -461,6 +510,70 @@ fn operand_layout(opcode: Opcode) -> OperandLayout {
     }
 }
 
+fn memory_operand_layout(opcode: Opcode) -> Option<OperandLayout> {
+    let layout = match opcode {
+        Opcode::StoreUavTyped | Opcode::StoreRaw => OperandLayout::Memory {
+            destinations: 0,
+            target: 0,
+            address_start: 1,
+            address_count: 1,
+            kind: MemoryAccessKind::Write,
+            atomicity: MemoryAtomicity::NonAtomic,
+        },
+        Opcode::StoreStructured => OperandLayout::Memory {
+            destinations: 0,
+            target: 0,
+            address_start: 1,
+            address_count: 2,
+            kind: MemoryAccessKind::Write,
+            atomicity: MemoryAtomicity::NonAtomic,
+        },
+        Opcode::AtomicAnd
+        | Opcode::AtomicOr
+        | Opcode::AtomicXor
+        | Opcode::AtomicCmpStore
+        | Opcode::AtomicIAdd
+        | Opcode::AtomicIMax
+        | Opcode::AtomicIMin
+        | Opcode::AtomicUMax
+        | Opcode::AtomicUMin => OperandLayout::Memory {
+            destinations: 0,
+            target: 0,
+            address_start: 1,
+            address_count: 1,
+            kind: MemoryAccessKind::ReadModifyWrite,
+            atomicity: MemoryAtomicity::Atomic,
+        },
+        Opcode::ImmAtomicAlloc | Opcode::ImmAtomicConsume => OperandLayout::Memory {
+            destinations: 1,
+            target: 1,
+            address_start: 2,
+            address_count: 0,
+            kind: MemoryAccessKind::ReadModifyWrite,
+            atomicity: MemoryAtomicity::Atomic,
+        },
+        Opcode::ImmAtomicIAdd
+        | Opcode::ImmAtomicAnd
+        | Opcode::ImmAtomicOr
+        | Opcode::ImmAtomicXor
+        | Opcode::ImmAtomicExch
+        | Opcode::ImmAtomicCmpExch
+        | Opcode::ImmAtomicIMax
+        | Opcode::ImmAtomicIMin
+        | Opcode::ImmAtomicUMax
+        | Opcode::ImmAtomicUMin => OperandLayout::Memory {
+            destinations: 1,
+            target: 1,
+            address_start: 2,
+            address_count: 1,
+            kind: MemoryAccessKind::ReadModifyWrite,
+            atomicity: MemoryAtomicity::Atomic,
+        },
+        _ => return None,
+    };
+    Some(layout)
+}
+
 /// The def/use analysis result: the variable sets plus whether the
 /// instruction stores through a dynamically-indexed indexable temp.
 struct OperandAnalysis {
@@ -489,48 +602,21 @@ fn is_dynamic_indexable(operand: &Operand) -> bool {
 
 fn analyze_operands(instruction: &Instruction) -> OperandAnalysis {
     let operands = instruction.operands();
+    let layout = operand_layout(instruction.opcode);
     let mut uses = Vec::new();
     let mut defs = Vec::new();
     let mut dynamic_indexable_write = false;
 
-    match operand_layout(instruction.opcode) {
-        OperandLayout::None => {}
-        OperandLayout::Sources => {
-            for operand in operands {
-                collect_use(operand, &mut uses);
-            }
-        }
-        OperandLayout::Destinations(count) => {
-            for (index, operand) in operands.iter().enumerate() {
-                if index < count {
-                    dynamic_indexable_write |= collect_definition(operand, &mut uses, &mut defs);
-                } else {
-                    collect_use(operand, &mut uses);
-                }
-            }
-        }
-        OperandLayout::ReadWrite { target } => {
-            for (index, operand) in operands.iter().enumerate() {
-                if index == target {
-                    dynamic_indexable_write |= collect_read_write(operand, &mut uses, &mut defs);
-                } else {
-                    collect_use(operand, &mut uses);
-                }
-            }
-        }
-        OperandLayout::DestinationsAndReadWrite {
-            destinations,
-            target,
-        } => {
-            for (index, operand) in operands.iter().enumerate() {
-                if index < destinations {
-                    dynamic_indexable_write |= collect_definition(operand, &mut uses, &mut defs);
-                } else if index == target {
-                    dynamic_indexable_write |= collect_read_write(operand, &mut uses, &mut defs);
-                } else {
-                    collect_use(operand, &mut uses);
-                }
-            }
+    for (index, operand) in operands.iter().enumerate() {
+        if layout.is_destination(index) {
+            dynamic_indexable_write |= collect_definition(operand, &mut uses, &mut defs);
+        } else if layout.memory_access(index).is_some() {
+            // The memory object is a location, not an SSA definition. Only
+            // registers used to compute a relative binding index are value
+            // dependencies.
+            collect_index_uses(operand, &mut uses);
+        } else if layout.is_source(index) {
+            collect_use(operand, &mut uses);
         }
     }
 
@@ -560,25 +646,6 @@ fn collect_definition(
     }
     collect_selected_variables(operand, defs);
     false
-}
-
-/// Collect a read-modify-write operand. Returns whether it was a dynamic
-/// indexable-temp store (its read stays a use; the write becomes an effect).
-fn collect_read_write(
-    operand: &Operand,
-    uses: &mut Vec<Sm4Variable>,
-    defs: &mut Vec<Sm4Variable>,
-) -> bool {
-    collect_index_uses(operand, uses);
-    let variables = operand_variables(operand);
-    let dynamic = is_dynamic_indexable(operand);
-    for variable in variables {
-        push_unique(uses, variable.clone());
-        if !dynamic {
-            push_unique(defs, variable);
-        }
-    }
-    dynamic
 }
 
 fn collect_index_uses(operand: &Operand, uses: &mut Vec<Sm4Variable>) {
@@ -655,74 +722,28 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
 
 fn analyze_effects(instruction: &Instruction, defs: &[Sm4Variable]) -> Vec<Sm4Effect> {
     let mut effects = Vec::new();
+
+    if memory::resource_read_region(instruction.opcode).is_some() {
+        push_unique(&mut effects, Sm4Effect::ResourceRead);
+    }
+    if let OperandLayout::Memory { kind, .. } = operand_layout(instruction.opcode) {
+        if kind.reads() {
+            push_unique(&mut effects, Sm4Effect::ResourceRead);
+        }
+        if kind.writes() {
+            push_unique(&mut effects, Sm4Effect::ResourceWrite);
+        }
+    }
+
     match instruction.opcode {
         Opcode::Call | Opcode::Callc | Opcode::InterfaceCall => {
             push_unique(&mut effects, Sm4Effect::Call);
         }
-        Opcode::Ld
-        | Opcode::LdMs
-        | Opcode::Resinfo
-        | Opcode::Sample
-        | Opcode::SampleC
-        | Opcode::SampleCLz
-        | Opcode::SampleL
-        | Opcode::SampleD
-        | Opcode::SampleB
-        | Opcode::Lod
-        | Opcode::Gather4
-        | Opcode::SamplePos
-        | Opcode::SampleInfo
-        | Opcode::BufInfo
-        | Opcode::Gather4C
-        | Opcode::Gather4Po
-        | Opcode::Gather4PoC
-        | Opcode::LdUavTyped
-        | Opcode::LdRaw
-        | Opcode::LdStructured
-        | Opcode::Gather4Feedback
-        | Opcode::Gather4CFeedback
-        | Opcode::Gather4PoFeedback
-        | Opcode::Gather4PoCFeedback
-        | Opcode::LdFeedback
-        | Opcode::LdMsFeedback
-        | Opcode::LdUavTypedFeedback
-        | Opcode::LdRawFeedback
-        | Opcode::LdStructuredFeedback
-        | Opcode::SampleLFeedback
-        | Opcode::SampleCLzFeedback
-        | Opcode::SampleClampFeedback
-        | Opcode::SampleBClampFeedback
-        | Opcode::SampleDClampFeedback
-        | Opcode::SampleCClampFeedback => push_unique(&mut effects, Sm4Effect::ResourceRead),
-        Opcode::StoreUavTyped | Opcode::StoreRaw | Opcode::StoreStructured => {
-            push_unique(&mut effects, Sm4Effect::ResourceWrite);
+        Opcode::Discard => {
+            push_unique(&mut effects, Sm4Effect::Export);
+            push_unique(&mut effects, Sm4Effect::Sync);
         }
-        Opcode::AtomicAnd
-        | Opcode::AtomicOr
-        | Opcode::AtomicXor
-        | Opcode::AtomicCmpStore
-        | Opcode::AtomicIAdd
-        | Opcode::AtomicIMax
-        | Opcode::AtomicIMin
-        | Opcode::AtomicUMax
-        | Opcode::AtomicUMin
-        | Opcode::ImmAtomicAlloc
-        | Opcode::ImmAtomicConsume
-        | Opcode::ImmAtomicIAdd
-        | Opcode::ImmAtomicAnd
-        | Opcode::ImmAtomicOr
-        | Opcode::ImmAtomicXor
-        | Opcode::ImmAtomicExch
-        | Opcode::ImmAtomicCmpExch
-        | Opcode::ImmAtomicIMax
-        | Opcode::ImmAtomicIMin
-        | Opcode::ImmAtomicUMax
-        | Opcode::ImmAtomicUMin => {
-            push_unique(&mut effects, Sm4Effect::ResourceRead);
-            push_unique(&mut effects, Sm4Effect::ResourceWrite);
-        }
-        Opcode::Discard
-        | Opcode::Cut
+        Opcode::Cut
         | Opcode::Emit
         | Opcode::EmitThenCut
         | Opcode::EmitStream
