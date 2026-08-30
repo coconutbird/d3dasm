@@ -1,6 +1,9 @@
 //! SM4/SM5 memory-event vocabulary and instruction classification.
 
-use cfglib::{MemoryAccessKind, MemoryAlias, MemoryAtomicity, MemoryEvent, MemoryEventAccess};
+use cfglib::{
+    MemoryAccess, MemoryAccessKind, MemoryAlias, MemoryAtomicity, MemoryEvent,
+    index_paths_may_overlap,
+};
 use dxbc::shex::{Instruction, Opcode, Operand, RegisterType};
 
 use super::{Sm4Index, Sm4Register, Sm4Variable, collect_index_uses, collect_use, operand_layout};
@@ -81,9 +84,11 @@ impl MemoryAlias<Sm4MemoryLocation> for Sm4MemoryAlias {
         match left_type {
             RegisterType::IndexableTemp
             | RegisterType::ImmConstBuffer
-            | RegisterType::ThreadGroupSharedMemory => {
-                indices_may_overlap(left.register.indices(), right.register.indices())
-            }
+            | RegisterType::ThreadGroupSharedMemory => index_paths_may_overlap(
+                left.register.indices(),
+                right.register.indices(),
+                fixed_index,
+            ),
             _ => left.register == right.register,
         }
     }
@@ -96,18 +101,8 @@ const fn is_runtime_bound_storage(register_type: RegisterType) -> bool {
     )
 }
 
-fn indices_may_overlap(left: &[Sm4Index], right: &[Sm4Index]) -> bool {
-    if left.len() != right.len() {
-        return true;
-    }
-    left.iter().zip(right).all(
-        |(left, right)| match (fixed_index(left), fixed_index(right)) {
-            (Some(left), Some(right)) => left == right,
-            _ => true,
-        },
-    )
-}
-
+/// Projects one index path component to its compile-time value, when
+/// known — the projection [`index_paths_may_overlap`] resolves through.
 const fn fixed_index(index: &Sm4Index) -> Option<u64> {
     match index {
         Sm4Index::Immediate32(value) => Some(*value as u64),
@@ -292,12 +287,11 @@ fn push_access(
     atomicity: MemoryAtomicity,
 ) {
     let location = Sm4MemoryLocation::new(Sm4Register::from_operand(operand), region);
-    events.push(MemoryEvent::Access(MemoryEventAccess::new(
-        location,
-        address_uses,
-        kind,
-        atomicity,
-    )));
+    events.push(MemoryEvent::Access(
+        MemoryAccess::opaque(location, kind)
+            .with_address_uses(address_uses)
+            .with_atomicity(atomicity),
+    ));
 }
 
 const fn is_addressable_value_storage(register_type: RegisterType) -> bool {

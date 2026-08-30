@@ -258,10 +258,10 @@ fn latest_shex_relative_index_is_retained_and_read() {
     assert!(matches!(
         events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::Read
+            if access.kind() == MemoryAccessKind::Read
                 && access.address_uses() == [address_variable]
-                && access.location.region() == Sm4MemoryRegion::Contents
-                && access.location.register().register_type().decoded()
+                && access.location().region() == Sm4MemoryRegion::Contents
+                && access.location().register().register_type().decoded()
                     == RegisterType::IndexableTemp
     ));
 }
@@ -340,11 +340,11 @@ fn multi_result_and_memory_roles_are_explicit() {
     assert!(matches!(
         events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::Write
-                && access.atomicity == MemoryAtomicity::NonAtomic
+            if access.kind() == MemoryAccessKind::Write
+                && access.atomicity() == MemoryAtomicity::NonAtomic
                 && access.address_uses() == &store.uses()[..1]
-                && access.location.region() == Sm4MemoryRegion::Contents
-                && access.location.register() == target.register()
+                && access.location().region() == Sm4MemoryRegion::Contents
+                && access.location().register() == target.register()
     ));
 }
 
@@ -374,11 +374,11 @@ fn load_exposes_its_location_and_address_data_flow() {
     assert!(matches!(
         load_events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::Read
-                && access.atomicity == MemoryAtomicity::NonAtomic
+            if access.kind() == MemoryAccessKind::Read
+                && access.atomicity() == MemoryAtomicity::NonAtomic
                 && access.address_uses() == &load.uses()[..1]
-                && access.location.region() == Sm4MemoryRegion::Contents
-                && access.location.register().register_type().decoded() == RegisterType::Resource
+                && access.location().region() == Sm4MemoryRegion::Contents
+                && access.location().register().register_type().decoded() == RegisterType::Resource
     ));
     assert_eq!(load.memory_operations(), MemoryOperations::READ);
 }
@@ -415,8 +415,8 @@ fn lod_reads_resource_metadata_without_claiming_texel_contents() {
     assert!(matches!(
         events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::Read
-                && access.location.region() == Sm4MemoryRegion::Metadata
+            if access.kind() == MemoryAccessKind::Read
+                && access.location().region() == Sm4MemoryRegion::Metadata
     ));
 }
 
@@ -446,10 +446,10 @@ fn atomics_and_counters_expose_compound_memory_data_flow() {
     assert!(matches!(
         atomic_events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::ReadModifyWrite
-                && access.atomicity == MemoryAtomicity::Atomic
+            if access.kind() == MemoryAccessKind::ReadModifyWrite
+                && access.atomicity() == MemoryAtomicity::Atomic
                 && access.address_uses() == &atomic.uses()[..1]
-                && access.location.register().register_type().decoded()
+                && access.location().register().register_type().decoded()
                     == RegisterType::ThreadGroupSharedMemory
     ));
     assert_eq!(
@@ -476,10 +476,10 @@ fn atomics_and_counters_expose_compound_memory_data_flow() {
     assert!(matches!(
         counter_events.as_slice(),
         [MemoryEvent::Access(access)]
-            if access.kind == MemoryAccessKind::ReadModifyWrite
-                && access.atomicity == MemoryAtomicity::Atomic
+            if access.kind() == MemoryAccessKind::ReadModifyWrite
+                && access.atomicity() == MemoryAtomicity::Atomic
                 && access.address_uses().is_empty()
-                && access.location.region() == Sm4MemoryRegion::HiddenCounter
+                && access.location().region() == Sm4MemoryRegion::HiddenCounter
     ));
     assert_eq!(
         counter.memory_operations(),

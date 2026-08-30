@@ -3,12 +3,10 @@
 use cfglib::ir::rtl::{Expr, Place, ScalarType, Statement, ValueShape};
 use dxbc::shex::{ComponentSelect, Instruction, Opcode, Operand, OperandIndex, RegisterType};
 
-use crate::dialect::{
-    AluHead, Binding, Edge, EffectOp, MemRef, RegFile, Register, RtlOp, ShaderDialect,
-};
+use crate::dialect::{AluHead, Binding, EffectOp, MemRef, RegFile, Register, RtlOp, ShaderDialect};
 
 use super::{
-    Frame, LiftExpr, Unsupported, Walk, coordinate_lanes, map_lanes, mask_lanes, modified,
+    LiftExpr, Unsupported, Walk, coordinate_lanes, map_lanes, mask_lanes, modified,
     operand_register, operand_scalar, result_scalar, select_lane, unsupported,
 };
 
@@ -210,13 +208,12 @@ impl Walk {
             }
             Opcode::Ret => {
                 self.emit(Statement::Return { values: Vec::new() }, span);
-                self.current = None;
+                self.structure.terminate();
                 Ok(())
             }
             Opcode::Retc => {
                 self.condition(instruction, operands, span)?;
-                self.conditional_return(span);
-                Ok(())
+                self.conditional_return(span)
             }
             Opcode::Discard => {
                 let condition = self.condition_expr(instruction, operands)?;
@@ -397,155 +394,40 @@ impl Walk {
         span: (u32, u32),
     ) -> Result<(), Unsupported> {
         self.condition(instruction, operands, span)?;
-        let block = self.current.expect("the branch just landed");
-        self.frames.push(Frame::If {
-            pending_false: Some((block, Edge::False)),
-            pending_merge: Vec::new(),
-            saw_else: false,
-        });
-        self.current = None;
-        self.pending = vec![(block, Edge::True)];
-        Ok(())
+        Ok(self.structure.open_if()?)
     }
 
     pub(super) fn open_else(&mut self) -> Result<(), Unsupported> {
-        let arm_end = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::If {
-            pending_false,
-            pending_merge,
-            saw_else,
-        }) = self.frames.last_mut()
-        else {
-            return unsupported("else outside if");
-        };
-        if *saw_else {
-            return unsupported("second else in one if");
-        }
-        *saw_else = true;
-        if let Some(block) = arm_end {
-            pending_merge.push((block, Edge::Fall));
-        } else {
-            pending_merge.extend(stale);
-        }
-        let Some(false_entry) = pending_false.take() else {
-            return unsupported("else with no false entry");
-        };
-        self.pending = vec![false_entry];
-        Ok(())
+        Ok(self.structure.open_else()?)
     }
 
     pub(super) fn close_if(&mut self) -> Result<(), Unsupported> {
-        let arm_end = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::If {
-            pending_false,
-            mut pending_merge,
-            ..
-        }) = self.frames.pop()
-        else {
-            return unsupported("endif outside if");
-        };
-        if let Some(block) = arm_end {
-            pending_merge.push((block, Edge::Fall));
-        } else {
-            pending_merge.extend(stale);
-        }
-        if let Some(false_entry) = pending_false {
-            pending_merge.push(false_entry);
-        }
-        self.pending = pending_merge;
-        Ok(())
+        Ok(self.structure.close_if()?)
     }
 
     pub(super) fn open_loop(&mut self) {
         // The header must exist eagerly: it is the back-edge target. The
         // preceding block falls through into it.
-        if let Some(block) = self.current.take() {
-            self.pending.push((block, Edge::Fall));
-        }
-        let header = self.landing();
-        self.frames.push(Frame::Loop {
-            header,
-            pending_exit: Vec::new(),
-        });
+        let (walk, mut sink) = self.parts();
+        walk.open_loop(&mut sink);
     }
 
     pub(super) fn close_loop(&mut self) -> Result<(), Unsupported> {
-        let latch = self.current.take();
-        let stale = core::mem::take(&mut self.pending);
-        let Some(Frame::Loop {
-            header,
-            pending_exit,
-        }) = self.frames.pop()
-        else {
-            return unsupported("endloop outside loop");
-        };
-        if !stale.is_empty() {
-            return unsupported("loop body ends unmaterialized");
-        }
-        if let Some(block) = latch {
-            self.builder
-                .add_edge(block, header, Edge::Fall)
-                .expect("loop header is live");
-        }
-        self.pending = pending_exit;
-        Ok(())
+        let (walk, mut sink) = self.parts();
+        Ok(walk.close_loop(&mut sink)?)
     }
 
     /// A `break`/`breakc`: `conditional` when the branch just landed.
     pub(super) fn transfer_break(&mut self, conditional: bool) -> Result<(), Unsupported> {
-        let Some(block) = self.current else {
-            return unsupported("transfer outside a materialized block");
-        };
-        let Some(Frame::Loop { pending_exit, .. }) = self
-            .frames
-            .iter_mut()
-            .rev()
-            .find(|frame| matches!(frame, Frame::Loop { .. }))
-        else {
-            return unsupported("break outside loop");
-        };
-        if conditional {
-            pending_exit.push((block, Edge::True));
-            self.current = None;
-            self.pending = vec![(block, Edge::False)];
-        } else {
-            pending_exit.push((block, Edge::Fall));
-            self.current = None;
-            self.pending = Vec::new();
-        }
-        Ok(())
+        Ok(self.structure.break_out(conditional)?)
     }
 
     pub(super) fn transfer_continue(&mut self, conditional: bool) -> Result<(), Unsupported> {
-        let Some(block) = self.current else {
-            return unsupported("transfer outside a materialized block");
-        };
-        let Some(Frame::Loop { header, .. }) = self
-            .frames
-            .iter()
-            .rev()
-            .find(|frame| matches!(frame, Frame::Loop { .. }))
-        else {
-            return unsupported("continue outside loop");
-        };
-        let header = *header;
-        let edge = if conditional { Edge::True } else { Edge::Fall };
-        self.builder
-            .add_edge(block, header, edge)
-            .expect("loop header is live");
-        self.current = None;
-        self.pending = if conditional {
-            vec![(block, Edge::False)]
-        } else {
-            Vec::new()
-        };
-        Ok(())
+        let (walk, mut sink) = self.parts();
+        Ok(walk.continue_loop(&mut sink, conditional)?)
     }
 
-    pub(super) fn conditional_return(&mut self, span: (u32, u32)) {
-        let block = self.current.expect("the branch just landed");
+    pub(super) fn conditional_return(&mut self, span: (u32, u32)) -> Result<(), Unsupported> {
         let ret_block = if let Some(existing) = self.ret_block {
             existing
         } else {
@@ -560,11 +442,8 @@ impl Walk {
             self.ret_block = Some(created);
             created
         };
-        self.builder
-            .add_edge(block, ret_block, Edge::True)
-            .expect("return block is live");
-        self.current = None;
-        self.pending = vec![(block, Edge::False)];
+        let (walk, mut sink) = self.parts();
+        Ok(walk.conditional_transfer(&mut sink, ret_block)?)
     }
 
     /// Lowers a retained decoded instruction with dest/source operands.

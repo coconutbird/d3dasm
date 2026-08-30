@@ -15,8 +15,8 @@
 //! and transports (`mov`, `movc` data) read `Bits` so cfglib's web
 //! typing routes the surrounding interpretation through them.
 
-use cfglib::BlockId;
 use cfglib::ir::rtl::{Expr, FunctionBuilder, ScalarType, Statement};
+use cfglib::{BlockId, StructuredEdge, StructuredSink, StructuredWalk, StructuredWalkIssue};
 use dxbc::shex::{
     ComponentSelect, InstructionKind, Opcode, Operand, OperandIndex, Program, RegisterType,
 };
@@ -127,33 +127,48 @@ fn unsupported<T>(message: impl Into<String>) -> Result<T, Unsupported> {
     Err(Unsupported(message.into()))
 }
 
-/// One structural nesting frame during the walk.
-enum Frame {
-    If {
-        /// Where the false edge resumes when no `else` intervenes, or
-        /// the pending else entry.
-        pending_false: Option<(BlockId, Edge)>,
-        /// Transfers waiting for the merge block.
-        pending_merge: Vec<(BlockId, Edge)>,
-        /// Whether the `else` arm was entered.
-        saw_else: bool,
-    },
-    Loop {
-        /// The loop header (back-edge target).
-        header: BlockId,
-        /// Transfers waiting for the loop exit.
-        pending_exit: Vec<(BlockId, Edge)>,
-    },
+impl From<StructuredWalkIssue> for Unsupported {
+    fn from(issue: StructuredWalkIssue) -> Self {
+        Self(issue.to_string())
+    }
+}
+
+/// Block minting and edge wiring for the structured walk: labels count
+/// up in materialization order, and the generic edge roles map onto the
+/// dialect's edge vocabulary (the synthetic root keeps its entry edge).
+struct Sink<'a> {
+    builder: &'a mut FunctionBuilder<ShaderDialect>,
+    blocks: &'a mut u32,
+}
+
+impl StructuredSink for Sink<'_> {
+    type Block = BlockId;
+
+    fn new_block(&mut self) -> BlockId {
+        let count = *self.blocks;
+        let block = self.builder.new_block(format!("b{count}"));
+        *self.blocks += 1;
+        block
+    }
+
+    fn connect(&mut self, source: BlockId, target: BlockId, edge: StructuredEdge) {
+        let edge = match edge {
+            StructuredEdge::True => Edge::True,
+            StructuredEdge::False => Edge::False,
+            StructuredEdge::Fallthrough if source == self.builder.entry() => Edge::Entry,
+            StructuredEdge::Fallthrough => Edge::Fall,
+        };
+        self.builder
+            .add_edge(source, target, edge)
+            .expect("structured edges name live blocks");
+    }
 }
 
 struct Walk {
     builder: FunctionBuilder<ShaderDialect>,
     declarations: Declarations,
-    /// The open block statements are appended to, if any.
-    current: Option<BlockId>,
-    /// Edges waiting to enter the next materialized block.
-    pending: Vec<(BlockId, Edge)>,
-    frames: Vec<Frame>,
+    /// The open-block, pending-edge, and frame-stack state.
+    structure: StructuredWalk<BlockId>,
     blocks: u32,
     ret_block: Option<BlockId>,
 }
@@ -166,20 +181,21 @@ use declarations::collect_declaration;
 type LiftExpr = Expr<ShaderDialect>;
 
 impl Walk {
+    /// The frame-stack state alongside a sink over the builder.
+    fn parts(&mut self) -> (&mut StructuredWalk<BlockId>, Sink<'_>) {
+        (
+            &mut self.structure,
+            Sink {
+                builder: &mut self.builder,
+                blocks: &mut self.blocks,
+            },
+        )
+    }
+
     /// The block statements land in, materializing it if needed.
     fn landing(&mut self) -> BlockId {
-        if let Some(block) = self.current {
-            return block;
-        }
-        let block = self.builder.new_block(format!("b{}", self.blocks));
-        self.blocks += 1;
-        for (source, edge) in self.pending.drain(..) {
-            self.builder
-                .add_edge(source, block, edge)
-                .expect("pending edges name live blocks");
-        }
-        self.current = Some(block);
-        block
+        let (walk, mut sink) = self.parts();
+        walk.landing(&mut sink)
     }
 
     fn emit(&mut self, statement: Statement<ShaderDialect>, span: (u32, u32)) {
@@ -468,8 +484,10 @@ fn walk_range(
     declarations: &mut Declarations,
     source: &str,
 ) -> Result<cfglib::ir::rtl::Function<ShaderDialect>, Unsupported> {
+    let builder = FunctionBuilder::new(source.to_owned());
+    let entry = builder.entry();
     let mut walk = Walk {
-        builder: FunctionBuilder::new(source.to_owned()),
+        builder,
         declarations: core::mem::replace(
             declarations,
             Declarations {
@@ -487,14 +505,10 @@ fn walk_range(
                 tessellation: None,
             },
         ),
-        current: None,
-        pending: Vec::new(),
-        frames: Vec::new(),
+        structure: StructuredWalk::new(entry),
         blocks: 0,
         ret_block: None,
     };
-    let entry = walk.builder.entry();
-    walk.pending.push((entry, Edge::Entry));
     for index in range {
         let instruction = &program.instructions[index];
         let span = (
@@ -512,9 +526,7 @@ fn finish_walk(
     walk: Walk,
     declarations: &mut Declarations,
 ) -> Result<cfglib::ir::rtl::Function<ShaderDialect>, Unsupported> {
-    if !walk.frames.is_empty() {
-        return unsupported("unclosed structured region");
-    }
+    walk.structure.finish()?;
     *declarations = walk.declarations;
     let function = walk
         .builder
@@ -522,14 +534,12 @@ fn finish_walk(
         .map_err(|error| Unsupported(format!("construction: {error}")))?;
     // A walk bug that strands blocks must fail loudly, never render a
     // silently truncated body.
-    let mut reachable = std::collections::BTreeSet::new();
-    let mut frontier = vec![function.cfg().entry()];
-    while let Some(block) = frontier.pop() {
-        if reachable.insert(block) {
-            frontier.extend(function.cfg().successors(block));
-        }
-    }
-    if reachable.len() != function.cfg().block_count() {
+    let reachable = cfglib::reachable(
+        function.cfg(),
+        [function.cfg().entry()],
+        cfglib::TraversalDirection::Outgoing,
+    );
+    if reachable.contains(&false) {
         return unsupported("stranded unreachable blocks");
     }
     Ok(function)

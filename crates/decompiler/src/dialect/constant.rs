@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use cfglib::ir::rtl::{LiftedStatement, ValueShape, VarExpr};
 use dxbc::shex::Opcode;
 
-use super::{AluHead, Expr, Instruction, Op, RtlOp, VariableId};
+use super::{AluHead, Instruction, Op, RtlOp, VariableId};
 
 pub(super) fn operation_constant(operation: &Op) -> Option<Vec<u64>> {
     let LiftedStatement::Assign {
@@ -20,7 +20,7 @@ pub(super) fn operation_constant(operation: &Op) -> Option<Vec<u64>> {
     };
     (effects.is_empty()
         && full_assignment(positions, *width, *merges, *shape)
-        && valid_bits(bits, *shape))
+        && shape.holds_words(bits))
     .then(|| bits.clone())
 }
 
@@ -46,13 +46,19 @@ pub(super) fn fold_instruction(
         return None;
     }
 
-    let mut evaluator = Evaluator {
-        instruction,
-        known,
-        use_cursor: 0,
+    // Reads resolve positionally against the instruction's pre-order
+    // use list; a fold is only trusted when it consumed every use.
+    let uses = instruction.uses();
+    let mut cursor = 0usize;
+    let mut next_read = || {
+        let variable = *uses.get(cursor)?;
+        cursor += 1;
+        known.get(&variable).cloned()
     };
-    let bits = evaluator.value(value)?;
-    if evaluator.use_cursor != instruction.uses().len() || !valid_bits(&bits, shape) {
+    let bits = value.fold_constant(&mut next_read, &mut |operator, operands, shape| {
+        fold_operator(operator, operands, *shape)
+    })?;
+    if cursor != uses.len() || !shape.holds_words(&bits) {
         return None;
     }
     Some((*definition, bits))
@@ -73,7 +79,7 @@ pub(super) fn materialized_operation(instruction: &Instruction, constant: &[u64]
     if matches!(value, VarExpr::Const { .. })
         || !effects.is_empty()
         || !full_assignment(positions, *width, *merges, shape)
-        || !valid_bits(constant, shape)
+        || !shape.holds_words(constant)
     {
         return None;
     }
@@ -97,58 +103,6 @@ fn full_assignment(positions: &[u8], width: u8, merges: bool, shape: ValueShape)
             .iter()
             .enumerate()
             .all(|(index, &position)| usize::from(position) == index)
-}
-
-fn valid_bits(bits: &[u64], shape: ValueShape) -> bool {
-    usize::from(shape.lanes).checked_mul(shape.scalar.word_count()) == Some(bits.len())
-}
-
-struct Evaluator<'a> {
-    instruction: &'a Instruction,
-    known: &'a BTreeMap<VariableId, Vec<u64>>,
-    use_cursor: usize,
-}
-
-impl Evaluator<'_> {
-    fn value(&mut self, expression: &Expr) -> Option<Vec<u64>> {
-        match expression {
-            VarExpr::Read { positions, scalar } => {
-                let variable = *self.instruction.uses().get(self.use_cursor)?;
-                self.use_cursor += 1;
-                let constant = self.known.get(&variable)?;
-                let words = scalar.word_count();
-                let mut selected = Vec::with_capacity(positions.len().checked_mul(words)?);
-                for &position in positions {
-                    let start = usize::from(position).checked_mul(words)?;
-                    selected.extend_from_slice(constant.get(start..start.checked_add(words)?)?);
-                }
-                Some(selected)
-            }
-            VarExpr::Const { bits, shape } => valid_bits(bits, *shape).then(|| bits.clone()),
-            VarExpr::Apply {
-                operator,
-                operands,
-                shape,
-            } => {
-                let operands = operands
-                    .iter()
-                    .map(|operand| self.value(operand))
-                    .collect::<Option<Vec<_>>>()?;
-                fold_operator(operator, &operands, *shape)
-            }
-            VarExpr::Reinterpret { operand, shape } => {
-                let bits = self.value(operand)?;
-                valid_bits(&bits, *shape).then_some(bits)
-            }
-            VarExpr::Compose { parts, shape } => {
-                let mut bits = Vec::new();
-                for part in parts {
-                    bits.extend(self.value(part)?);
-                }
-                valid_bits(&bits, *shape).then_some(bits)
-            }
-        }
-    }
 }
 
 fn fold_operator(operator: &RtlOp, operands: &[Vec<u64>], shape: ValueShape) -> Option<Vec<u64>> {
@@ -203,7 +157,7 @@ fn fold_alu(head: &AluHead, operands: &[Vec<u64>], shape: ValueShape) -> Option<
 
 fn exact_operand(operands: &[Vec<u64>], index: usize, shape: ValueShape) -> Option<Vec<u64>> {
     let value = operands.get(index)?;
-    valid_bits(value, shape).then(|| value.clone())
+    shape.holds_words(value).then(|| value.clone())
 }
 
 fn select(operands: &[Vec<u64>], shape: ValueShape) -> Option<Vec<u64>> {
@@ -212,7 +166,7 @@ fn select(operands: &[Vec<u64>], shape: ValueShape) -> Option<Vec<u64>> {
     };
     let lanes = usize::from(shape.lanes);
     let words = shape.scalar.word_count();
-    if condition.len() != lanes || !valid_bits(when_true, shape) || !valid_bits(when_false, shape) {
+    if condition.len() != lanes || !shape.holds_words(when_true) || !shape.holds_words(when_false) {
         return None;
     }
     let mut selected = Vec::with_capacity(lanes.checked_mul(words)?);
