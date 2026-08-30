@@ -13,6 +13,8 @@ use super::*;
 struct Assignment<'a> {
     place: String,
     scalar: ScalarType,
+    written: cfglib::ir::hlil::VariableId,
+    positions: &'a [u8],
     value: &'a Expr,
     operands: &'a [ExpressionId],
 }
@@ -258,6 +260,8 @@ impl<'a> Renderer<'a> {
         Ok(Assignment {
             place,
             scalar,
+            written,
+            positions,
             value,
             operands,
         })
@@ -269,16 +273,81 @@ impl<'a> Renderer<'a> {
         if resinfo_application(assignment.value).is_some() {
             return Ok(None);
         }
+        if let Some(text) = self.compound_assignment_text(assignment)? {
+            return Ok(Some(text));
+        }
         let mut reads = Reads::new(self.function, assignment.operands);
         let rendered = self.value(assignment.value, &mut reads, assignment.scalar)?;
         let text = rendered.cast_bare(assignment.scalar);
-        if let Some((binary, compound)) = compound_operator(assignment.value) {
-            let prefix = format!("{} {binary} ", assignment.place);
-            if let Some(right) = text.strip_prefix(&prefix) {
-                return Ok(Some(format!("{} {compound} {right}", assignment.place)));
-            }
-        }
         Ok(Some(format!("{} = {text}", assignment.place)))
+    }
+
+    /// Renders `place op= rhs` when the assignment is structurally
+    /// compound: its value is a binary operation with a compound spelling
+    /// whose first operand reads back exactly the written place — the
+    /// target variable at the written positions, in the interpretation it
+    /// is stored under, with no cast on the read or on the produced value.
+    /// The decision never inspects rendered text.
+    fn compound_assignment_text(
+        &self,
+        assignment: &Assignment<'a>,
+    ) -> Result<Option<String>, Unsupported> {
+        let VarExpr::Apply {
+            operator: RtlOp::Alu(head),
+            operands: inner,
+            shape,
+        } = assignment.value
+        else {
+            return Ok(None);
+        };
+        let Some(compound) = compound_operator(head) else {
+            return Ok(None);
+        };
+        let [place_operand, value_operand] = inner.as_slice() else {
+            return Ok(None);
+        };
+        let VarExpr::Read { positions, scalar } = place_operand else {
+            return Ok(None);
+        };
+        if positions.as_slice() != assignment.positions {
+            return Ok(None);
+        }
+        // The compound spelling stores the produced value back uncast and
+        // reads the place in its stored interpretation: a mismatch on
+        // either side means the plain spelling's casts are load-bearing.
+        let produced = if shape.scalar == ScalarType::Bits {
+            assignment.scalar
+        } else {
+            shape.scalar
+        };
+        if normalize(produced) != normalize(assignment.scalar) {
+            return Ok(None);
+        }
+        // Binary operands render in the float context (`Renderer::alu`);
+        // a `Bits` read takes that context as its interpretation.
+        let wanted = if *scalar == ScalarType::Bits {
+            ScalarType::F32
+        } else {
+            *scalar
+        };
+        let mut reads = Reads::new(self.function, assignment.operands);
+        let resolved = reads
+            .resolve(positions)
+            .map_err(|error| Unsupported(error.to_string()))?;
+        let ResolvedRead::Variable(variable) = resolved else {
+            return Ok(None);
+        };
+        if variable != assignment.written {
+            return Ok(None);
+        }
+        let (_, web) = self.hlil_web(variable)?;
+        if Self::is_input_web(web) || normalize(self.web_holder(web)) != normalize(wanted) {
+            return Ok(None);
+        }
+        let rhs = self
+            .value(value_operand, &mut reads, ScalarType::F32)?
+            .wrapped();
+        Ok(Some(format!("{} {compound} {rhs}", assignment.place)))
     }
 
     /// Renders the comma-separated assignment expressions of one `for`
@@ -585,28 +654,21 @@ impl<'a> Renderer<'a> {
     }
 }
 
-/// A compound spelling that preserves the operand order of one binary
-/// assignment expression.
-fn compound_operator(value: &Expr) -> Option<(&'static str, &'static str)> {
-    let VarExpr::Apply {
-        operator: RtlOp::Alu(head),
-        ..
-    } = value
-    else {
-        return None;
-    };
+/// The compound-assignment spelling of one retained binary operation,
+/// preserving its operand order.
+fn compound_operator(head: &AluHead) -> Option<&'static str> {
     if head.saturate {
         return None;
     }
     match head.opcode {
-        Opcode::Add | Opcode::Iadd => Some(("+", "+=")),
-        Opcode::Mul => Some(("*", "*=")),
-        Opcode::Div => Some(("/", "/=")),
-        Opcode::And => Some(("&", "&=")),
-        Opcode::Or => Some(("|", "|=")),
-        Opcode::Xor => Some(("^", "^=")),
-        Opcode::Ishl => Some(("<<", "<<=")),
-        Opcode::Ishr | Opcode::Ushr => Some((">>", ">>=")),
+        Opcode::Add | Opcode::Iadd => Some("+="),
+        Opcode::Mul => Some("*="),
+        Opcode::Div => Some("/="),
+        Opcode::And => Some("&="),
+        Opcode::Or => Some("|="),
+        Opcode::Xor => Some("^="),
+        Opcode::Ishl => Some("<<="),
+        Opcode::Ishr | Opcode::Ushr => Some(">>="),
         _ => None,
     }
 }
