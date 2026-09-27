@@ -8,7 +8,7 @@
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! let data = std::fs::read("shader.bin").unwrap();
 //! let shaders = d3dasm::parse(&data);
 //!
@@ -16,7 +16,7 @@
 //!     // Structured access to parsed chunks.
 //!     // Chunks are parsed lazily — only the shader program is decoded here.
 //!     if let Some(program) = shader.program() {
-//!         println!("SM {}.{}", program.version_major, program.version_minor);
+//!         println!("SM {}.{}", program.major_version, program.minor_version);
 //!     }
 //!
 //!     // Full disassembly via Display (parses remaining chunks on demand).
@@ -232,7 +232,7 @@ impl<'a> Shader<'a> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// let data = std::fs::read("shader.bin").unwrap();
 /// for shader in d3dasm::parse(&data) {
 ///     print!("{shader}");

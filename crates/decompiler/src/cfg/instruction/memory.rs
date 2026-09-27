@@ -24,7 +24,7 @@ pub enum Sm4MemoryRegion {
 /// The register identifies the syntactically selected storage object or
 /// addressable array slot. Dynamic byte/element addresses remain ordinary
 /// instruction operands and are linked from
-/// [`MemoryEventAccess::address_uses`]; this location deliberately denotes the
+/// [`MemoryAccess::address_uses`]; this location deliberately denotes the
 /// containing object or region rather than claiming a concrete runtime byte.
 /// The event's [`cfglib::MemoryEventSite`] maps back to the decoded instruction
 /// when a consumer needs its complete constant and vector address expression.

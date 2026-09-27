@@ -30,7 +30,9 @@ pub fn read_cstring(data: &[u8], offset: usize) -> &str {
 /// offset of the first occurrence.
 ///
 /// # Usage
-/// ```ignore
+/// ```no_run
+/// # use dxbc::util::StringTableWriter;
+/// # let base_offset = 0usize;
 /// let mut st = StringTableWriter::new(base_offset);
 /// let off_a = st.add("POSITION");
 /// let off_b = st.add("TEXCOORD");
