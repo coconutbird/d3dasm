@@ -10,17 +10,20 @@
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
-//! use dxbc::{DxbcContainer, ChunkData};
+//! ```rust,no_run
+//! use dxbc::{ChunkData, scan_dxbc};
 //!
-//! let container = DxbcContainer::parse(dxbc_bytes).unwrap();
-//! for chunk in &container.chunks {
-//!     match chunk.parse() {
-//!         ChunkData::Shader(program) => {
-//!             // Program implements Display for fxc-compatible disassembly.
-//!             println!("{program}");
+//! # let dxbc_bytes = &[0u8];
+//! let containers = scan_dxbc(dxbc_bytes);
+//! for container in &containers {
+//!     for chunk in &container.chunks {
+//!         match chunk.parse() {
+//!             ChunkData::Shader(program) => {
+//!                 // Program implements Display for fxc-compatible disassembly.
+//!                 println!("{program}");
+//!             }
+//!             _ => {}
 //!         }
-//!         _ => {}
 //!     }
 //! }
 //! ```

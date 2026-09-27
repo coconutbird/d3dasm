@@ -9,13 +9,17 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! let program = /* decoded dxbc::shex::ir::Program */;
+//! ```rust,no_run
+//! # fn test() -> Result<(), Box<dyn std::error::Error>> {
+//! # let program : dxbc::Program = todo!();
+//! /* program is a decoded dxbc::Program */;
 //! let cfg = decompiler::cfg::build_cfg(&program)?;
 //! let dominators = cfglib::DominatorTree::compute(&cfg);
 //! let ssa = cfglib::SsaForm::compute(&cfg, &dominators);
 //! let memory = cfglib::MemorySSA::compute(&cfg, &decompiler::cfg::Sm4MemoryAlias);
 //! println!("{}", cfg.to_dot());
+//! # Ok(())
+//! # }
 //! ```
 
 use cfglib::{BuildError, Cfg, CfgBuilder};
